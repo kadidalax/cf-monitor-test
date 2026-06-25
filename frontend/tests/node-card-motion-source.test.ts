@@ -86,10 +86,10 @@ test('shared usage bars animate at the calmer node metric pace', () => {
   );
 });
 
-test('shared usage bars color by load level instead of compressing the rainbow gradient', () => {
+test('shared usage bars gradient to the current load level color only', () => {
   assert.doesNotMatch(usageBarSource, /monitor-resource-progress-gradient/);
   assert.match(usageBarSource, /background:\s*barGradient/);
-  assert.match(usageBarSource, /var\(--monitor-success,\s*#22c55e\)/);
-  assert.match(usageBarSource, /var\(--monitor-warning,\s*#f59e0b\)/);
-  assert.match(usageBarSource, /var\(--monitor-danger,\s*#ef4444\)/);
+  assert.ok(usageBarSource.includes('linear-gradient(90deg, color-mix(in srgb, var(--monitor-success, #22c55e) 55%, transparent), var(--monitor-success, #22c55e))'));
+  assert.ok(usageBarSource.includes('linear-gradient(90deg, var(--monitor-success, #22c55e), var(--monitor-warning, #f59e0b))'));
+  assert.ok(usageBarSource.includes('linear-gradient(90deg, var(--monitor-warning, #f59e0b), var(--monitor-danger, #ef4444))'));
 });

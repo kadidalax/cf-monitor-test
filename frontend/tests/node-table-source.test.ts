@@ -34,3 +34,9 @@ test('public node table shows resource percentages beside progress bars', () => 
   assert.match(cellRule, /grid-template-columns:\s*minmax\(58px,\s*1fr\) max-content/);
   assert.match(cellRule, /align-items:\s*center/);
 });
+
+test('public node table defaults to backend manual order', () => {
+  assert.match(source, /type SortKey = 'manual' \|/);
+  assert.match(source, /useState<SortKey>\('manual'\)/);
+  assert.match(source, /case 'manual':[\s\S]{0,120}getSortOrder\(a\) - getSortOrder\(b\)/);
+});

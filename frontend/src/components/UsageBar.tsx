@@ -19,9 +19,9 @@ function getLoadLevel(val: number): 'normal' | 'warm' | 'hot' {
 }
 
 function getBarGradient(level: 'normal' | 'warm' | 'hot'): string {
-  if (level === 'hot') return 'var(--monitor-danger, #ef4444)';
-  if (level === 'warm') return 'var(--monitor-warning, #f59e0b)';
-  return 'var(--monitor-success, #22c55e)';
+  if (level === 'hot') return 'linear-gradient(90deg, var(--monitor-warning, #f59e0b), var(--monitor-danger, #ef4444))';
+  if (level === 'warm') return 'linear-gradient(90deg, var(--monitor-success, #22c55e), var(--monitor-warning, #f59e0b))';
+  return 'linear-gradient(90deg, color-mix(in srgb, var(--monitor-success, #22c55e) 55%, transparent), var(--monitor-success, #22c55e))';
 }
 
 function getBarGlow(level: 'normal' | 'warm' | 'hot'): string {

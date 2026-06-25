@@ -18,7 +18,7 @@ interface NodeTableProps {
   liveData: LiveDataMap;
 }
 
-type SortKey = 'name' | 'os' | 'status' | 'cpu' | 'ram' | 'disk' | 'network' | 'price' | 'traffic';
+type SortKey = 'manual' | 'name' | 'os' | 'status' | 'cpu' | 'ram' | 'disk' | 'network' | 'price' | 'traffic';
 type SortDir = 'asc' | 'desc';
 
 function formatUptimeZh(seconds?: number): string {
@@ -117,6 +117,12 @@ function formatCpuSpec(node: ClientInfo) {
   return '-';
 }
 
+function getSortOrder(node: ClientInfo) {
+  return typeof node.sort_order === 'number' && Number.isFinite(node.sort_order)
+    ? node.sort_order
+    : Number.MAX_SAFE_INTEGER;
+}
+
 function formatSupport(supported?: boolean, sourceValue?: string) {
   return supported || Boolean(sourceValue) ? '支持' : '不支持';
 }
@@ -195,7 +201,7 @@ function ExpandedNodeDetails({
 }
 
 export default function NodeTable({ nodes, liveData }: NodeTableProps) {
-  const [sortKey, setSortKey] = useState<SortKey>('name');
+  const [sortKey, setSortKey] = useState<SortKey>('manual');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [expandedRows, setExpandedRows] = useState<string[]>([]);
   const onlineSet = useMemo(() => new Set(liveData?.online || []), [liveData?.online]);
@@ -231,6 +237,9 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
 
       let cmp = 0;
       switch (sortKey) {
+        case 'manual':
+          cmp = getSortOrder(a) - getSortOrder(b);
+          break;
         case 'name':
           cmp = (a.name || '').localeCompare(b.name || '');
           break;
