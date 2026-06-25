@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from 'react';
 import { Popover } from '@radix-ui/themes';
+import { Popover as PopoverPrimitive } from 'radix-ui';
 import MiniPingChart from './MiniPingChart';
 
 interface MiniPingChartFloatProps {
@@ -43,9 +44,9 @@ export default function MiniPingChartFloat({
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Anchor asChild>
+      <PopoverPrimitive.Anchor asChild>
         {triggerElement}
-      </Popover.Anchor>
+      </PopoverPrimitive.Anchor>
       <Popover.Content
         align="end"
         sideOffset={8}
