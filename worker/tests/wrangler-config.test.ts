@@ -114,6 +114,7 @@ test('deploy script validates Supabase service role secret and generated config'
   assert.doesNotMatch(script, /SOURCE_REVISION|APP_VERSION/);
   assert.doesNotMatch(script, /releases\/latest|tag_name/);
   assert.match(script, /SUPABASE_ACCESS_TOKEN is not set; skipping Supabase migrations/);
+  assert.match(script, /process\.env\.SUPABASE_URL/);
   assert.match(script, /\['db', 'push', '--linked', '--workdir', '\.', '--yes'\]/);
   assert.doesNotMatch(script, new RegExp(`\\b${removedDatabaseProxy}\\b`, 'i'));
   assert.doesNotMatch(script, /DATABASE_URL/);

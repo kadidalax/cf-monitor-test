@@ -16,5 +16,27 @@
     "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
     "dev:worker": "npm --prefix worker run dev",
     "dev:frontend": "npm --prefix frontend run dev"
+  },
+  "devDependencies": {
+    "supabase": "^2.107.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SUPABASE_URL": {
+        "description": "Supabase Project URL, for example `https://PROJECT_REF.supabase.co`. Find it in Supabase **Project Settings** -> **API**."
+      },
+      "SUPABASE_SERVICE_ROLE_KEY": {
+        "description": "Supabase secret/service role key. Store it as a Worker secret; never expose it in frontend code."
+      },
+      "JWT_SECRET": {
+        "description": "Admin session signing secret. Use a random string with at least 32 characters."
+      },
+      "ADMIN_USERNAME": {
+        "description": "Initial admin login username."
+      },
+      "ADMIN_PASSWORD": {
+        "description": "Initial admin login password."
+      }
+    }
   }
 }

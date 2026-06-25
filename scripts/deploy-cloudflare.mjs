@@ -26,6 +26,11 @@ function fail(message) {
 }
 
 function supabaseProjectRef() {
+  const envUrl = process.env.SUPABASE_URL?.trim();
+  if (envUrl) {
+    const match = envUrl.match(/^https:\/\/([a-z0-9]+)\.supabase\.co$/i);
+    if (match) return match[1];
+  }
   const source = readFileSync(sourceConfig, 'utf8');
   const match = source.match(/SUPABASE_URL\s*=\s*"https:\/\/([a-z0-9]+)\.supabase\.co"/i);
   return match?.[1] || '';

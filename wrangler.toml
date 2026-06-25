@@ -34,7 +34,7 @@ tag = "v2"
 new_sqlite_classes = ["RateLimitDO"]
 
 [vars]
-SUPABASE_URL = "https://wkwpyplyvfrulkqukyka.supabase.co"
+SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
 [secrets]
 required = ["JWT_SECRET", "ADMIN_USERNAME", "ADMIN_PASSWORD", "SUPABASE_SERVICE_ROLE_KEY"]
