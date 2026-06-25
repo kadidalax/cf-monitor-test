@@ -93,9 +93,18 @@ function integerInRange(value: unknown, min: number, max: number): number | null
 }
 
 function parseIPv4(host: string): number[] | null {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return null;
+  if (!/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(host)) return null;
   const parts = host.split('.').map(part => Number(part));
   return parts.every(part => Number.isInteger(part) && part >= 0 && part <= 255) ? parts : null;
+}
+
+function isAmbiguousNumericHost(host: string): boolean {
+  if (host.includes(':')) return false;
+  const parts = host.split('.');
+  if (parts.length < 1 || parts.length > 4) return false;
+  if (!parts.every(part => /^(0x[0-9a-f]+|\d+)$/i.test(part))) return false;
+  if (parts.length !== 4) return true;
+  return parts.some(part => /^0x/i.test(part) || (part.length > 1 && part.startsWith('0'))) || !parseIPv4(host);
 }
 
 function isBlockedIPv4(parts: number[]): boolean {
@@ -124,6 +133,7 @@ function isUnsafeHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (!host || host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host === 'metadata.google.internal') return true;
+  if (isAmbiguousNumericHost(host)) return true;
   const ipv4 = parseIPv4(host);
   if (ipv4) return isBlockedIPv4(ipv4);
   if (IPV4_BLOCKS.some(pattern => pattern.test(host))) return true;

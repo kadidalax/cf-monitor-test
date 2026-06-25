@@ -8,9 +8,12 @@ import {
   SupabaseApiError,
   callSupabaseRpc,
   ensureSupabaseInitialAdmin,
+  getSupabaseClientByToken,
+  getSupabasePingRecordsForTasks,
   getSupabasePublicPingTasks,
   isSupabaseApiConfigured,
 } from '../src/db/supabase-api/client.ts';
+import { hashAgentToken } from '../src/utils/client.ts';
 
 const providerSource = readFileSync(join(import.meta.dirname, '..', 'src', 'db', 'provider.ts'), 'utf8');
 const queriesSource = readFileSync(join(import.meta.dirname, '..', 'src', 'db', 'queries.ts'), 'utf8');
@@ -81,6 +84,31 @@ test('callSupabaseRpc throws stable configuration errors', async () => {
   );
 });
 
+test('Supabase agent token lookup re-hashes hash-shaped bearer tokens', async () => {
+  const originalFetch = globalThis.fetch;
+  const rawToken = 'a'.repeat(64);
+  const storedHash = await hashAgentToken(rawToken);
+  const expectedLookupHash = await hashAgentToken(storedHash);
+  let body: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+    return new Response(JSON.stringify(null), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    await getSupabaseClientByToken(env, storedHash);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(body?.input_token, storedHash);
+  assert.equal(body?.input_token_hash, expectedLookupHash);
+  assert.notEqual(body?.input_token_hash, storedHash);
+});
+
 test('ensureSupabaseInitialAdmin sends the required user uuid to the RPC', async () => {
   const originalFetch = globalThis.fetch;
   let body: unknown;
@@ -113,6 +141,40 @@ test('Supabase ping tasks normalize smallint all_clients for Agent policies', as
 
   assert.equal(tasks[0].all_clients, true);
   assert.equal(tasks[1].all_clients, false);
+});
+
+test('batch ping history preserves per-task limits when task specs are provided', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body || '{}')) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify([]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const records = await getSupabasePingRecordsForTasks(env, 'node-a', [
+      { taskId: 1, limit: 12, intervalSec: 60 },
+      { taskId: 2, limit: 34, intervalSec: 300 },
+    ], 99);
+
+    assert.deepEqual(records, { '1': [], '2': [] });
+    assert.deepEqual(calls.map(call => call.url), [
+      'https://project-ref.supabase.co/rest/v1/rpc/cfm_ping_records',
+      'https://project-ref.supabase.co/rest/v1/rpc/cfm_ping_records',
+    ]);
+    assert.deepEqual(calls.map(call => call.body), [
+      { input_client: 'node-a', input_task_id: 1, input_limit: 12 },
+      { input_client: 'node-a', input_task_id: 2, input_limit: 34 },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('public query facade uses Supabase RPC in Data API mode', () => {

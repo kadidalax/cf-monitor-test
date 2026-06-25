@@ -9,6 +9,7 @@ const adminLayoutSource = readFileSync(join(import.meta.dirname, '..', 'src', 'p
 const aboutSource = readFileSync(join(import.meta.dirname, '..', 'src', 'pages', 'admin', 'About.tsx'), 'utf8');
 const loginSource = readFileSync(join(import.meta.dirname, '..', 'src', 'pages', 'Login.tsx'), 'utf8');
 const notFoundSource = readFileSync(join(import.meta.dirname, '..', 'src', 'pages', 'NotFound.tsx'), 'utf8');
+const detailsGridSource = readFileSync(join(import.meta.dirname, '..', 'src', 'components', 'DetailsGrid.tsx'), 'utf8');
 const deploySource = readFileSync(join(import.meta.dirname, '..', '..', 'scripts', 'deploy-cloudflare.mjs'), 'utf8');
 const workerIndexSource = readFileSync(join(import.meta.dirname, '..', '..', 'worker', 'src', 'index.ts'), 'utf8');
 const linuxInstallerSource = readFileSync(join(import.meta.dirname, '..', '..', 'agent', 'install-linux.sh'), 'utf8');
@@ -54,11 +55,12 @@ test('agent installers default to the latest GitHub release when worker assets a
   assert.match(dashboardSource, /placeholder="为空则使用最新发布版"/);
 });
 
-test('Worker version endpoint uses GitHub latest release and deploy does not bundle local agent assets', () => {
+test('Worker version endpoint uses the bundled deployment version and deploy does not bundle local agent assets', () => {
   assert.doesNotMatch(deploySource, /function buildAgentAssets\(\)/);
   assert.doesNotMatch(deploySource, /APP_VERSION|SOURCE_REVISION|tag_name/);
-  assert.match(workerIndexSource, /https:\/\/api\.github\.com\/repos\/\$\{CF_MONITOR_REPOSITORY\}\/releases\/latest/);
-  assert.match(workerIndexSource, /tag_name/);
+  assert.doesNotMatch(workerIndexSource, /https:\/\/api\.github\.com\/repos\/\$\{CF_MONITOR_REPOSITORY\}\/releases\/latest|tag_name|latestGithubVersion/);
+  assert.match(workerIndexSource, /workerPackage/);
+  assert.match(workerIndexSource, /BUNDLED_VERSION/);
   assert.doesNotMatch(deploySource, /\['describe', '--tags', '--match', 'v\[0-9\]\*', '--abbrev=0'\]/);
   assert.doesNotMatch(deploySource, /-X main\.Version=\$\{appVersion\(\)\}/);
   assert.doesNotMatch(deploySource, /cf-vps-monitor-agent-linux-amd64/);
@@ -71,6 +73,8 @@ test('frontend version labels come from the Worker version endpoint', () => {
   assert.match(versionUiSources, /formatAppVersion/);
   assert.match(adminLayoutSource, /fetch\("\/api\/version"\)/);
   assert.match(loginSource, /fetch\('\/api\/version'\)/);
+  assert.doesNotMatch(detailsGridSource, /fetch\('\/api\/version'\)/);
+  assert.match(detailsGridSource, /value:\s*client\.version \|\| '-'/);
 });
 
 test('custom agent binary install commands support checksum verification URL', () => {

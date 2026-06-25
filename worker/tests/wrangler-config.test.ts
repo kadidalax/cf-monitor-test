@@ -111,11 +111,15 @@ test('deploy script validates Supabase service role secret and generated config'
   assert.match(script, /requiredSecrets = \['JWT_SECRET', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SUPABASE_SERVICE_ROLE_KEY'\]/);
   assert.match(script, /\['secret', 'list', '--config', deployConfig\]/);
   assert.match(script, /const keepsExistingVars = deployArgs\.includes\('--keep-vars'\)/);
+  assert.match(script, /const skipMigrations = deployArgs\.includes\('--skip-migrations'\)/);
   assert.doesNotMatch(script, /SOURCE_REVISION|APP_VERSION/);
   assert.doesNotMatch(script, /releases\/latest|tag_name/);
-  assert.match(script, /SUPABASE_ACCESS_TOKEN is not set; skipping Supabase migrations/);
+  assert.doesNotMatch(script, /SUPABASE_ACCESS_TOKEN is not set; skipping Supabase migrations/);
   assert.match(script, /process\.env\.SUPABASE_URL/);
+  assert.match(script, /SUPABASE_URL must be set to a real Supabase project URL/);
+  assert.match(script, /source\.replace\(\s*\/SUPABASE_URL\\s\*=/);
   assert.match(script, /\['db', 'push', '--linked', '--workdir', '\.', '--yes'\]/);
+  assert.match(script, /migrateSupabase\(\);[\s\S]*const deploy = runWrangler/);
   assert.doesNotMatch(script, new RegExp(`\\b${removedDatabaseProxy}\\b`, 'i'));
   assert.doesNotMatch(script, /DATABASE_URL/);
 });

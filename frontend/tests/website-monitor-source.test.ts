@@ -120,6 +120,7 @@ test('admin website management route and menu are wired beside server management
   assert.match(websites, /对非管理员隐藏/);
   assert.match(websites, /Dialog\.Root/);
   assert.match(websites, /Table\.Root/);
+  assert.doesNotMatch(websites, /Table\.Root variant="surface"/);
   assert.match(websites, /DndContext/);
   assert.match(websites, /SortableWebsiteRow/);
   assert.match(websites, /GripVertical/);

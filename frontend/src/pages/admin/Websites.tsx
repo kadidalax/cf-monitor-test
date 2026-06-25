@@ -578,7 +578,7 @@ export default function AdminWebsites() {
         </Flex>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={filteredIds} strategy={rectSortingStrategy}>
-            <Table.Root variant="surface">
+            <Table.Root>
               <Table.Header>
                 <Table.Row>
                   <Table.ColumnHeaderCell className="admin-website-control-cell">
@@ -617,7 +617,7 @@ export default function AdminWebsites() {
       </Card>
 
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
-        <Dialog.Content className="admin-website-edit-dialog" style={{ maxWidth: 640 }}>
+        <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }}>
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
           <Flex direction="column" gap="3">
             <Grid columns={{ initial: '1', sm: '2' }} gap="3">

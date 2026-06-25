@@ -1228,7 +1228,7 @@ export default function AdminNotifications() {
 
       {/* ─── Load Add/Edit Dialog ─── */}
       <Dialog.Root open={loadDialogOpen} onOpenChange={setLoadDialogOpen}>
-        <Dialog.Content style={{ maxWidth: 480 }}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 480 }}>
           <Dialog.Title>{editingLoad ? '编辑负载通知规则' : '新建负载通知规则'}</Dialog.Title>
           <Flex direction="column" gap="3">
             <label>

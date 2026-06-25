@@ -14,3 +14,8 @@ test('ping snapshots persist all due results when any ping value needs a write',
   assert.match(method, /dueResults\.push\(result\);/);
   assert.match(method, /return accepted\.length > 0 \? dueResults : \[];/);
 });
+
+test('ping snapshot throttle uses each task interval before falling back to the global interval', () => {
+  assert.match(liveDataSource, /private pingResultIntervalMs\(intervalSec\?: number\): number/);
+  assert.match(liveDataSource, /const minIntervalMs = this\.pingResultIntervalMs\(result\.intervalSec\);/);
+});

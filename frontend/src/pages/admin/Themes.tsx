@@ -435,7 +435,7 @@ export default function AdminThemes() {
       </Grid>
 
       <Dialog.Root open={!!editing} onOpenChange={open => !open && closeConfig()}>
-        <Dialog.Content maxWidth="720px">
+        <Dialog.Content aria-describedby={undefined} maxWidth="720px">
           <Dialog.Title>配置主题</Dialog.Title>
           <Flex direction="column" gap="4">
             {(editing?.manifest?.configuration?.data || []).map(renderConfigField)}
@@ -473,7 +473,7 @@ export default function AdminThemes() {
       </Dialog.Root>
 
       <Dialog.Root open={!!deleting} onOpenChange={open => !open && setDeleting(null)}>
-        <Dialog.Content maxWidth="460px">
+        <Dialog.Content aria-describedby={undefined} maxWidth="460px">
           <Dialog.Title>删除主题</Dialog.Title>
           <Flex direction="column" gap="3">
             <Text size="2">删除后主题资源会被移除。若正在启用，会切回默认主题。</Text>

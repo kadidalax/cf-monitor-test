@@ -2134,7 +2134,11 @@ export class LiveDataDO {
     }
   }
 
-  private pingResultIntervalMs(): number {
+  private pingResultIntervalMs(intervalSec?: number): number {
+    const seconds = Number(intervalSec);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(Math.max(Math.floor(seconds), 3), 3600) * 1000;
+    }
     return this.pingRecordPersistIntervalMs;
   }
 
@@ -2190,7 +2194,7 @@ export class LiveDataDO {
     const accepted: PingPersistenceResult[] = [];
     const dueResults: PingPersistenceResult[] = [];
     for (const result of results) {
-      const minIntervalMs = this.pingResultIntervalMs();
+      const minIntervalMs = this.pingResultIntervalMs(result.intervalSec);
       const key = this.pingResultStateKey(clientId, result.taskId);
       const state = await this.readPingResultState(key);
       if (state.lastAcceptedMs && nowMs - state.lastAcceptedMs < minIntervalMs) {

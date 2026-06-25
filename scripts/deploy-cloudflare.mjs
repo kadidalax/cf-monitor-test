@@ -11,6 +11,8 @@ const requiredSecrets = ['JWT_SECRET', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SUPA
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const keepsExistingVars = deployArgs.includes('--keep-vars');
+const skipMigrations = deployArgs.includes('--skip-migrations');
+const wranglerDeployArgs = deployArgs.filter(arg => arg !== '--skip-migrations');
 
 function runWrangler(args, options = {}) {
   return spawnSync(process.execPath, [wrangler, ...args], {
@@ -25,20 +27,30 @@ function fail(message) {
   process.exit(1);
 }
 
-function supabaseProjectRef() {
+function resolveSupabaseUrl({ allowDryRunFallback = false } = {}) {
   const envUrl = process.env.SUPABASE_URL?.trim();
-  if (envUrl) {
-    const match = envUrl.match(/^https:\/\/([a-z0-9]+)\.supabase\.co$/i);
-    if (match) return match[1];
-  }
   const source = readFileSync(sourceConfig, 'utf8');
-  const match = source.match(/SUPABASE_URL\s*=\s*"https:\/\/([a-z0-9]+)\.supabase\.co"/i);
-  return match?.[1] || '';
+  const configUrl = source.match(/SUPABASE_URL\s*=\s*"([^"]+)"/i)?.[1]?.trim() || '';
+  const url = envUrl || configUrl;
+  if (!url || /PROJECT_REF/i.test(url)) {
+    if (allowDryRunFallback) return 'https://dry-run.supabase.co';
+    fail('SUPABASE_URL must be set to a real Supabase project URL before deploying.');
+  }
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(url)) {
+    fail('SUPABASE_URL must be set to a real Supabase project URL before deploying.');
+  }
+  return url.replace(/\/$/, '');
+}
+
+function supabaseProjectRef() {
+  return resolveSupabaseUrl().match(/^https:\/\/([a-z0-9-]+)\.supabase\.co$/i)?.[1] || '';
 }
 
 function writeDeployConfig() {
   const source = readFileSync(sourceConfig, 'utf8');
-  const generated = source
+  const supabaseUrl = resolveSupabaseUrl({ allowDryRunFallback: isDryRun });
+  let generated = source.replace(/SUPABASE_URL\s*=\s*"[^"]*"/, `SUPABASE_URL = "${supabaseUrl}"`);
+  generated = generated
     .replace('main = "worker/src/index.ts"', 'main = "../src/index.ts"')
     .replace('directory = "frontend/dist"', 'directory = "../../frontend/dist"');
   mkdirSync(dirname(deployConfig), { recursive: true });
@@ -76,8 +88,7 @@ function runSupabase(args) {
 
 function migrateSupabase() {
   if (!process.env.SUPABASE_ACCESS_TOKEN?.trim()) {
-    console.log('SUPABASE_ACCESS_TOKEN is not set; skipping Supabase migrations.');
-    return;
+    fail('SUPABASE_ACCESS_TOKEN is required for Supabase migrations. Use --skip-migrations to deploy without pushing migrations.');
   }
   const projectRef = supabaseProjectRef();
   if (!projectRef) fail('Could not infer Supabase project ref from SUPABASE_URL.');
@@ -92,7 +103,7 @@ function migrateSupabase() {
 writeDeployConfig();
 
 if (isDryRun) {
-  const deploy = runWrangler(['deploy', '--config', deployConfig, ...deployArgs], { stdio: 'inherit' });
+  const deploy = runWrangler(['deploy', '--config', deployConfig, ...wranglerDeployArgs], { stdio: 'inherit' });
   process.exit(deploy.status ?? 1);
 }
 
@@ -100,7 +111,11 @@ if (!keepsExistingVars) {
   checkSecrets();
 }
 
-const deploy = runWrangler(['deploy', '--config', deployConfig, ...deployArgs], { stdio: 'inherit' });
-if (deploy.status !== 0) process.exit(deploy.status ?? 1);
+if (skipMigrations) {
+  console.log('Skipping Supabase migrations because --skip-migrations was provided.');
+} else {
+  migrateSupabase();
+}
 
-migrateSupabase();
+const deploy = runWrangler(['deploy', '--config', deployConfig, ...wranglerDeployArgs], { stdio: 'inherit' });
+if (deploy.status !== 0) process.exit(deploy.status ?? 1);

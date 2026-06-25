@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shirou/gopsutil/v3/disk"
 	gnet "github.com/shirou/gopsutil/v3/net"
 )
 
@@ -183,6 +184,142 @@ func TestDefaultIntervalsStartInBackgroundMode(t *testing.T) {
 	}
 	if pingInterval != defaultPingIntervalSec {
 		t.Fatalf("default ping interval = %d, want %d seconds", pingInterval, defaultPingIntervalSec)
+	}
+}
+
+func TestReadCgroupMemoryUsesContainerLimits(t *testing.T) {
+	root := t.TempDir()
+	cgroupDir := filepath.Join(root, "lxc", "101")
+	if err := os.MkdirAll(cgroupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(cgroupDir, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("memory.max", "1073741824\n")
+	write("memory.current", "268435456\n")
+	write("memory.swap.max", "536870912\n")
+	write("memory.swap.current", "134217728\n")
+
+	procCgroup := filepath.Join(root, "self-cgroup")
+	if err := os.WriteFile(procCgroup, []byte("0::/lxc/101\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readCgroupMemory(root, procCgroup)
+	if !got.hasRAM || got.ramTotal != 1073741824 || got.ramUsed != 268435456 {
+		t.Fatalf("cgroup ram = %#v, want 1GiB total and 256MiB used", got)
+	}
+	if !got.hasSwap || got.swapTotal != 536870912 || got.swapUsed != 134217728 {
+		t.Fatalf("cgroup swap = %#v, want 512MiB total and 128MiB used", got)
+	}
+}
+
+func TestReadCgroupMemoryV1DerivesSwapFromMemsw(t *testing.T) {
+	root := t.TempDir()
+	cgroupDir := filepath.Join(root, "memory", "lxc", "101")
+	if err := os.MkdirAll(cgroupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"memory.limit_in_bytes":       "1073741824\n",
+		"memory.usage_in_bytes":       "268435456\n",
+		"memory.memsw.limit_in_bytes": "1610612736\n",
+		"memory.memsw.usage_in_bytes": "402653184\n",
+	} {
+		if err := os.WriteFile(filepath.Join(cgroupDir, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	procCgroup := filepath.Join(root, "self-cgroup")
+	if err := os.WriteFile(procCgroup, []byte("10:memory:/lxc/101\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readCgroupMemory(root, procCgroup)
+	if !got.hasSwap || got.swapTotal != 536870912 || got.swapUsed != 134217728 {
+		t.Fatalf("cgroup v1 swap = %#v, want memsw minus memory", got)
+	}
+}
+
+func TestParseProcMeminfoUsesKomariHtopLikeMemory(t *testing.T) {
+	got := parseProcMeminfo(`MemTotal:       1000 kB
+MemFree:         100 kB
+Buffers:          50 kB
+Cached:          200 kB
+SwapCached:       25 kB
+SwapTotal:       500 kB
+SwapFree:        100 kB
+Shmem:            10 kB
+SReclaimable:     40 kB
+`)
+
+	if !got.hasRAM || got.ramTotal != 1000*1024 || got.ramUsed != 620*1024 {
+		t.Fatalf("proc meminfo ram = %#v, want htop-like used memory", got)
+	}
+	if !got.hasSwap || got.swapTotal != 500*1024 || got.swapUsed != 375*1024 {
+		t.Fatalf("proc meminfo swap = %#v, want total-free-cached", got)
+	}
+}
+
+func TestKomariDiskPartitionsKeepRootAndDropVirtualMounts(t *testing.T) {
+	parts := []disk.PartitionStat{
+		{Device: "/dev/loop0", Mountpoint: "/", Fstype: "ext4"},
+		{Device: "tmpfs", Mountpoint: "/run", Fstype: "tmpfs"},
+		{Device: "overlay", Mountpoint: "/var/lib/docker/overlay2", Fstype: "overlay"},
+		{Device: "/dev/sda1", Mountpoint: "/data", Fstype: "ext4"},
+	}
+
+	got := selectDiskPartitions(parts, "", "")
+	if len(got) != 2 || got[0].Mountpoint != "/" || got[1].Mountpoint != "/data" {
+		t.Fatalf("selected partitions = %#v, want root and physical data only", got)
+	}
+}
+
+func TestProcNetConnectionsCountCountsIPv4AndIPv6Rows(t *testing.T) {
+	root := t.TempDir()
+	netDir := filepath.Join(root, "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"tcp":  "header\nrow1\nrow2\n",
+		"tcp6": "header\nrow3\n",
+		"udp":  "header\nrow1\n",
+		"udp6": "header\n",
+	} {
+		if err := os.WriteFile(filepath.Join(netDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tcp, udp, err := procNetConnectionsCount(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tcp != 3 || udp != 1 {
+		t.Fatalf("proc net counts = tcp %d udp %d, want 3/1", tcp, udp)
+	}
+}
+
+func TestLinuxOSNameReadsPrettyName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "os-release")
+	if err := os.WriteFile(path, []byte("NAME=Debian\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := linuxOSName(path); got != "Debian GNU/Linux 12 (bookworm)" {
+		t.Fatalf("linuxOSName() = %q, want Debian pretty name", got)
+	}
+}
+
+func TestDetectContainerFromCgroupFindsLXC(t *testing.T) {
+	if got := detectContainerFromCgroup("0::/lxc/101\n"); got != "lxc" {
+		t.Fatalf("detectContainerFromCgroup() = %q, want lxc", got)
 	}
 }
 

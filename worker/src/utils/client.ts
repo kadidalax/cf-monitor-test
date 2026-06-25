@@ -184,7 +184,8 @@ export function isAgentTokenHash(token: string): boolean {
 }
 
 export function isAgentTokenShape(token: string): boolean {
-  return token.length >= MIN_AGENT_TOKEN_LENGTH
+  return !isAgentTokenHash(token)
+    && token.length >= MIN_AGENT_TOKEN_LENGTH
     && token.length <= MAX_AGENT_TOKEN_LENGTH
     && AGENT_TOKEN_PATTERN.test(token);
 }
@@ -198,7 +199,7 @@ function readToken(value: unknown, fallback: string, errors: string[]): string {
 
   const text = value.trim();
   if (!isAgentTokenShape(text)) {
-    errors.push('token 只能包含字母、数字、点、下划线、冒号和连字符，长度 32-256');
+    errors.push('token 只能包含字母、数字、点、下划线、冒号和连字符，长度 32-256，且不能是 sha256 哈希格式');
     return fallback;
   }
   return text;

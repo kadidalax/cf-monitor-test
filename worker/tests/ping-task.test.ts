@@ -37,7 +37,17 @@ test('rejects localhost, private IP, and metadata targets', () => {
 });
 
 test('rejects TCP targets outside the public host:port boundary', () => {
-  for (const target of ['127.0.0.1:80', '172.16.0.10:443', 'example.com:70000', 'https://example.com:443']) {
+  for (const target of [
+    '127.0.0.1:80',
+    '172.16.0.10:443',
+    '2130706433:80',
+    '0x7f000001:80',
+    '0177.0.0.1:80',
+    '127.1:80',
+    '[::ffff:127.0.0.1]:80',
+    'example.com:70000',
+    'https://example.com:443',
+  ]) {
     const result = validatePingTaskInput({ ...baseTask, type: 'tcp', target });
     assert.equal(result.ok, false, target);
   }

@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import workerPackage from '../package.json';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -62,9 +63,7 @@ export type Variables = {
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-const CF_MONITOR_REPOSITORY = 'kadidalax/cf-monitor-test';
-const VERSION_CACHE_MS = 5 * 60_000;
-let versionCache: { version: string; expiresAt: number } | null = null;
+const BUNDLED_VERSION = workerPackage.version?.trim() || 'dev';
 const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
 const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
@@ -335,31 +334,9 @@ app.post('/api/admin/cron/run', async (c) => {
 // 健康检查
 app.get('/ping', (c) => c.text('pong'));
 
-// 版本信息
-async function latestGithubVersion(): Promise<string> {
-  const now = Date.now();
-  if (versionCache && versionCache.expiresAt > now) return versionCache.version;
-  try {
-    const response = await fetch(`https://api.github.com/repos/${CF_MONITOR_REPOSITORY}/releases/latest`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'cf-vps-monitor',
-      },
-    });
-    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
-    const release = await response.json() as { tag_name?: unknown };
-    const version = typeof release.tag_name === 'string' && release.tag_name.trim()
-      ? release.tag_name.trim()
-      : 'dev';
-    versionCache = { version, expiresAt: now + VERSION_CACHE_MS };
-    return version;
-  } catch {
-    return versionCache?.version || 'dev';
-  }
-}
-
-app.get('/api/version', async (c) => {
-  const appVersion = await latestGithubVersion();
+// 版本信息：面板版本固定为本次部署包内版本，不跟随 GitHub 最新 release 自动变化。
+app.get('/api/version', (c) => {
+  const appVersion = BUNDLED_VERSION;
   return c.json({
     version: appVersion,
     name: 'CF VPS Monitor',

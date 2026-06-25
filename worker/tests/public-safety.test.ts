@@ -106,6 +106,20 @@ test('Durable Object JSON responses are parsed through typed helpers', async () 
   );
 });
 
+test('public metadata cache is bounded and canonicalizes cache keys', () => {
+  assert.match(publicRoutes, /const PUBLIC_METADATA_CACHE_MAX_ENTRIES = PUBLIC_HISTORY_CACHE_MAX_ENTRIES/);
+  assert.match(publicRoutes, /function publicMetadataCacheKey\(c: PublicContext\): string/);
+  assert.match(publicRoutes, /publicMetadataResponseCache\.size >= PUBLIC_METADATA_CACHE_MAX_ENTRIES/);
+  assert.match(publicRoutes, /publicMetadataAllowedQueryParams\(url\.pathname\)/);
+  assert.match(publicRoutes, /publicMetadataEdgeCacheRequest\(c\)/);
+});
+
+test('authenticated agent writes use Durable Object rate limiting with local fallback', () => {
+  const limiter = clientRoutes.match(/async function enforceAgentRateLimit[\s\S]*?^}/m)?.[0] ?? '';
+  assert.match(limiter, /return enforceAgentBucketRateLimit\(c, bucket, tokenKey, max\)/);
+  assert.doesNotMatch(limiter, /return localAgentRateLimit/);
+});
+
 test('admin and public write routes use bounded JSON parsers', () => {
   assert.match(adminRoutes, /const MAX_ADMIN_JSON_BYTES = 256 \* 1024/);
   assert.match(adminRoutes, /function isJsonObjectBody/);
@@ -124,8 +138,17 @@ test('agent token utilities generate opaque hashed credentials', async () => {
   assert.equal(isAgentTokenShape(token), true);
   const hash = await hashAgentToken(token);
   assert.equal(isAgentTokenHash(hash), true);
+  assert.equal(isAgentTokenShape(hash), false);
   assert.equal(hash.includes(token), false);
   assert.equal(validateClientCreateInput({ uuid: 'node-1', name: 'Node 1', token }).ok, true);
+  assert.equal(validateClientCreateInput({ uuid: 'node-2', name: 'Node 2', token: hash }).ok, false);
+});
+
+test('agent auth hashes presented tokens instead of trusting stored hash strings', () => {
+  const lookupHelper = clientRoutes.match(/async function agentTokenLookupHash[\s\S]*?^}/m)?.[0] ?? '';
+  assert.match(lookupHelper, /return hashAgentToken\(token\)/);
+  assert.doesNotMatch(lookupHelper, /isAgentTokenHash/);
+  assert.doesNotMatch(supabaseClient, /isAgentTokenHash\(token\)/);
 });
 
 test('request IP and telegram helpers keep public boundaries explicit', () => {

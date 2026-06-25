@@ -37,7 +37,7 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
-import { invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
+import { deleteAdminSessionEdgeCache, invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
 import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
 import { getDatabase, type AppDatabase } from '../db/provider';
@@ -2343,12 +2343,16 @@ adminRoutes.post('/account/username', async (c) => {
       return c.json({ error: '用户名已存在' }, 409);
     }
 
-    await db.updateUserUsername(database, userId, nextUsername);
+    await deleteAdminSessionEdgeCache(c, userId, currentUser.session_version);
+    const updatedUser = await db.updateUserUsernameAndRotateSession(database, userId, nextUsername);
+    if (!updatedUser) {
+      return c.json({ error: 'User not found' }, 404);
+    }
     invalidateAdminSessionCache(userId);
 
     let token: string;
     try {
-      token = await generateToken(userId, nextUsername, currentUser.session_version, c.env);
+      token = await generateToken(updatedUser.uuid, updatedUser.username, updatedUser.session_version, c.env);
     } catch (error) {
       if (error instanceof AuthConfigurationError) {
         console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');

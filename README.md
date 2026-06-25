@@ -1,7 +1,5 @@
 # CF VPS Monitor
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor-test)
-
 CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers Static Assets 和 Supabase 的轻量 VPS 探针系统。Worker 负责页面、API、实时连接、定时任务和安全校验；Supabase 只通过 HTTP Data API/RPC 访问；Go Agent 在服务器上采集指标并按需上报。
 
 ## 功能总览
@@ -52,7 +50,7 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 
 ## 一键部署到 Cloudflare
 
-推荐使用 README 顶部的 **Deploy to Cloudflare** 按钮部署。Cloudflare 会读取仓库配置，安装依赖，构建前端和 Worker，然后发布到你的 Cloudflare 账号。
+推荐使用下面第 3 步的 **Deploy to Cloudflare** 按钮部署。Cloudflare 会读取仓库配置，安装依赖，构建前端和 Worker，然后发布到你的 Cloudflare 账号。
 
 ### 1. 准备账号
 
@@ -71,7 +69,9 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 
 ### 3. 点击部署按钮
 
-1. 点击 README 顶部的 **Deploy to Cloudflare**。
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor-test)
+
+1. 点击上方的 **Deploy to Cloudflare**。
 2. 登录 Cloudflare。
 3. 选择 Cloudflare 账号。
 4. 授权 Cloudflare 克隆仓库。

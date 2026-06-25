@@ -1,7 +1,7 @@
 import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
-import { generateAgentToken, hashAgentToken, isAgentTokenHash } from '../../utils/client.ts';
+import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
 
 export type SupabaseApiEnv = {
   SUPABASE_URL?: string;
@@ -149,7 +149,7 @@ export function getSupabaseClientIds(env: SupabaseApiEnv): Promise<string[]> {
 }
 
 export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: string): Promise<Client | null> {
-  const tokenHash = isAgentTokenHash(token) ? token.toLowerCase() : await hashAgentToken(token);
+  const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<Client | null>(env, 'cfm_agent_client_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
@@ -157,7 +157,7 @@ export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: strin
 }
 
 export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, token: string): Promise<ClientIdentity | null> {
-  const tokenHash = isAgentTokenHash(token) ? token.toLowerCase() : await hashAgentToken(token);
+  const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<ClientIdentity | null>(env, 'cfm_agent_client_identity_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
@@ -165,7 +165,7 @@ export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, toke
 }
 
 export async function supabaseClientTokenExists(env: SupabaseApiEnv, token: string): Promise<boolean> {
-  const tokenHash = isAgentTokenHash(token) ? token.toLowerCase() : await hashAgentToken(token);
+  const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<boolean>(env, 'cfm_client_token_exists', {
     input_token_hash: tokenHash,
     input_token: token,
@@ -173,7 +173,7 @@ export async function supabaseClientTokenExists(env: SupabaseApiEnv, token: stri
 }
 
 export async function getSupabaseClientCreateConflict(env: SupabaseApiEnv, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
-  const tokenHash = isAgentTokenHash(token) ? token.toLowerCase() : await hashAgentToken(token);
+  const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<'uuid' | 'token' | null>(env, 'cfm_client_create_conflict', {
     input_uuid: uuid,
     input_token_hash: tokenHash,
@@ -685,6 +685,9 @@ export function getSupabasePingRecordsForTasks(
   limit: number,
   cursor?: string,
 ): Promise<Record<string, PingHistoryRecord[]>> {
+  if (tasks.some(task => typeof task !== 'number')) {
+    return getSupabasePingRecordsForTaskSpecs(env, client, tasks as PingTaskHistoryRequest[], limit, cursor);
+  }
   const taskIds = tasks.map(task => typeof task === 'number' ? task : task.taskId);
   return callSupabaseRpc<Record<string, PingHistoryRecord[]>>(env, 'cfm_ping_records_for_tasks', {
     input_client: client,
@@ -692,6 +695,25 @@ export function getSupabasePingRecordsForTasks(
     input_limit: limit,
     input_cursor: cursor,
   });
+}
+
+async function getSupabasePingRecordsForTaskSpecs(
+  env: SupabaseApiEnv,
+  client: string,
+  tasks: PingTaskHistoryRequest[],
+  fallbackLimit: number,
+  cursor?: string,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  const entries = await Promise.all(tasks.map(async (task) => {
+    const taskLimit = Number.isInteger(task.limit) && task.limit && task.limit > 0
+      ? Math.min(task.limit, 1000)
+      : fallbackLimit;
+    const records = cursor
+      ? (await getSupabasePingRecordsCursor(env, client, task.taskId, cursor, taskLimit)).data
+      : await getSupabasePingRecords(env, client, task.taskId, taskLimit);
+    return [String(task.taskId), records] as const;
+  }));
+  return Object.fromEntries(entries);
 }
 
 export function getSupabaseHistoryStorageRowCounts(env: SupabaseApiEnv): Promise<HistoryTableRowCounts> {
@@ -836,6 +858,17 @@ export function updateSupabaseUserUsername(env: SupabaseApiEnv, uuid: string, us
   });
 }
 
+export function updateSupabaseUserUsernameAndRotateSession(
+  env: SupabaseApiEnv,
+  uuid: string,
+  username: string,
+): Promise<User | null> {
+  return callSupabaseRpc<User | null>(env, 'cfm_update_user_username_rotate_session', {
+    input_uuid: uuid,
+    input_username: username,
+  });
+}
+
 export function updateSupabaseUserPassword(env: SupabaseApiEnv, uuid: string, hashedPassword: string): Promise<void> {
   return callSupabaseRpc<void>(env, 'cfm_update_user_password', {
     input_uuid: uuid,
@@ -851,6 +884,12 @@ export function updateSupabaseUserPasswordAndRotateSession(
   return callSupabaseRpc<User | null>(env, 'cfm_update_user_password_rotate_session', {
     input_uuid: uuid,
     input_passwd: hashedPassword,
+  });
+}
+
+export function rotateSupabaseUserSession(env: SupabaseApiEnv, uuid: string): Promise<User | null> {
+  return callSupabaseRpc<User | null>(env, 'cfm_rotate_user_session', {
+    input_uuid: uuid,
   });
 }
 

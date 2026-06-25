@@ -20,6 +20,8 @@ const adminBootstrapSource = readFileSync(join(import.meta.dirname, '..', 'src',
 const adminSessionSource = readFileSync(join(import.meta.dirname, '..', 'src', 'auth', 'admin-session.ts'), 'utf8');
 const sessionSource = readFileSync(join(import.meta.dirname, '..', 'src', 'auth', 'session.ts'), 'utf8');
 const indexSource = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
+const publicRoutesSource = readFileSync(join(import.meta.dirname, '..', 'src', 'routes', 'public.ts'), 'utf8');
+const adminRoutesSource = readFileSync(join(import.meta.dirname, '..', 'src', 'routes', 'admin.ts'), 'utf8');
 const env = {
   JWT_SECRET: '0'.repeat(32),
 };
@@ -202,4 +204,23 @@ test('logout session helpers require CSRF for active sessions and clear browser-
   assert.match(setCookie, /cf_monitor_session=/);
   assert.match(setCookie, /cf_monitor_csrf=/);
   assert.match(setCookie, /Max-Age=0/i);
+});
+
+test('username changes and logout revoke existing admin JWTs server-side', () => {
+  assert.match(adminRoutesSource, /db\.updateUserUsernameAndRotateSession\(database, userId, nextUsername\)/);
+  assert.match(adminRoutesSource, /deleteAdminSessionEdgeCache\(c, userId, currentUser\.session_version\)/);
+  assert.match(publicRoutesSource, /payload = token \? await verifyAdminToken\(token, c\.env\) : null/);
+  assert.match(publicRoutesSource, /await db\.rotateUserSession\(database, user\.uuid\)/);
+  assert.match(publicRoutesSource, /invalidateAdminSessionCache\(user\.uuid\)/);
+  assert.match(publicRoutesSource, /deleteAdminSessionEdgeCache\(c, payload\.userId, payload\.sessionVersion\)/);
+});
+
+test('unknown login users still run dummy password verification', () => {
+  const unknownUserBranch = publicRoutesSource.match(
+    /if \(!user\) \{[\s\S]*?return c\.json\(\{ error: '用户名或密码错误' \}, 401\);\r?\n  \}/,
+  )?.[0] ?? '';
+
+  assert.match(publicRoutesSource, /const DUMMY_ADMIN_PASSWORD_HASH = 'pbkdf2_sha256\$/);
+  assert.match(unknownUserBranch, /timed\(metrics, 'verify_password'/);
+  assert.match(unknownUserBranch, /verifyPassword\(password, DUMMY_ADMIN_PASSWORD_HASH\)/);
 });

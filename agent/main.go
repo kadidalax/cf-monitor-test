@@ -41,6 +41,7 @@ const minReportInterval = 3 * time.Second
 const maxHTTPErrorBodyBytes = 4096
 const publicIPProbeTimeout = 3 * time.Second
 const publicIPProbeBodyLimit = 4096
+const maxReasonableCgroupLimit = uint64(1 << 60)
 
 var defaultExcludedNetworkInterfacePrefixes = []string{
 	"br",
@@ -162,6 +163,15 @@ type Report struct {
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
 	rawNetTotalDown int64
+}
+
+type memorySnapshot struct {
+	ramUsed   uint64
+	ramTotal  uint64
+	swapUsed  uint64
+	swapTotal uint64
+	hasRAM    bool
+	hasSwap   bool
 }
 
 type GPUInfo struct {
@@ -1323,28 +1333,23 @@ func getBasicInfo() BasicInfo {
 	if hostInfo, err := host.Info(); err == nil {
 		info.KernelVersion = hostInfo.KernelVersion
 		info.OS = strings.TrimSpace(hostInfo.Platform + " " + hostInfo.PlatformVersion)
-		info.Virtualization = hostInfo.VirtualizationSystem
+		if runtime.GOOS == "linux" {
+			info.OS = linuxOSName("/etc/os-release")
+		}
+		info.Virtualization = detectVirtualization(hostInfo.VirtualizationSystem)
 		info.Uptime = int64(hostInfo.Uptime)
 	}
-	if cpuInfo, err := cpu.Info(); err == nil && len(cpuInfo) > 0 {
-		info.CPUName = cpuInfo[0].ModelName
-		info.CPUCores = len(cpuInfo)
+	if cpuName, cpuCores := readCPUBasicInfo(); cpuName != "" || cpuCores > 0 {
+		info.CPUName = cpuName
+		info.CPUCores = cpuCores
 	}
-	if memInfo, err := mem.VirtualMemory(); err == nil {
-		info.MemTotal = int64(memInfo.Total)
-	}
-	if swapInfo, err := mem.SwapMemory(); err == nil {
-		info.SwapTotal = int64(swapInfo.Total)
-	}
-	if partitions, err := disk.Partitions(false); err == nil {
-		var totalDisk int64
-		for _, p := range selectDiskPartitions(partitions, mountInclude, mountExclude) {
-			if usage, err := disk.Usage(p.Mountpoint); err == nil {
-				totalDisk += int64(usage.Total)
-			}
+	if memory := readMemorySnapshot(); memory.hasRAM {
+		info.MemTotal = int64(memory.ramTotal)
+		if memory.hasSwap {
+			info.SwapTotal = int64(memory.swapTotal)
 		}
-		info.DiskTotal = totalDisk
 	}
+	_, info.DiskTotal = diskUsageTotals()
 
 	// GPU detection
 	gpuName, gpuDetails := detectGPU()
@@ -1356,6 +1361,273 @@ func getBasicInfo() BasicInfo {
 	gpuDetailsMu.Unlock()
 
 	return info
+}
+
+func linuxOSName(osReleasePath string) string {
+	data, err := os.ReadFile(osReleasePath)
+	if err != nil {
+		return "Linux"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PRETTY_NAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+		}
+	}
+	return "Linux"
+}
+
+func detectVirtualization(current string) string {
+	if runtime.GOOS != "linux" {
+		return current
+	}
+	if out, err := exec.Command("systemd-detect-virt").Output(); err == nil {
+		if virt := strings.TrimSpace(string(out)); virt != "" {
+			return virt
+		}
+	}
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		if container := detectContainerFromCgroup(string(data)); container != "" {
+			return container
+		}
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "docker"
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		return "container"
+	}
+	if _, err := os.Stat("/dev/.lxc-boot-id"); err == nil {
+		return "lxc"
+	}
+	if current != "" {
+		return current
+	}
+	return "none"
+}
+
+func detectContainerFromCgroup(data string) string {
+	lower := strings.ToLower(data)
+	switch {
+	case strings.Contains(lower, "/lxc/"):
+		return "lxc"
+	case strings.Contains(lower, "/docker/") || strings.Contains(lower, "/docker-") || strings.Contains(lower, "/cri-containerd/"):
+		return "docker"
+	case strings.Contains(lower, "/libpod") || strings.Contains(lower, "/podman"):
+		return "podman"
+	case strings.Contains(lower, "/kubepods"):
+		return "kubernetes"
+	case strings.Contains(lower, "/crio-"):
+		return "container"
+	default:
+		return ""
+	}
+}
+
+func readCPUBasicInfo() (string, int) {
+	cpuName := "Unknown"
+	if cpuInfo, err := cpu.Info(); err == nil && len(cpuInfo) > 0 {
+		cpuName = strings.TrimSpace(cpuInfo[0].ModelName)
+		if cpuName == "" {
+			cpuName = strings.TrimSpace(cpuInfo[0].VendorID + " " + cpuInfo[0].Family)
+		}
+	}
+	if cpuName == "" || cpuName == "Unknown" {
+		if name, err := readCPUNameFromProc("/proc/cpuinfo"); err == nil && name != "" {
+			cpuName = name
+		}
+	}
+	cores := 1
+	if count, err := cpu.Counts(true); err == nil && count > 0 {
+		cores = count
+	}
+	return cpuName, cores
+}
+
+func readCPUNameFromProc(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "Model\t") || strings.HasPrefix(line, "Hardware\t") ||
+			strings.HasPrefix(line, "Processor\t") || strings.HasPrefix(line, "model name") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1]), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func readMemorySnapshot() memorySnapshot {
+	snapshot := memorySnapshot{}
+	if runtime.GOOS == "linux" {
+		if procMem, err := readProcMeminfo("/proc/meminfo"); err == nil {
+			snapshot = procMem
+		}
+		cgroup := readCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup")
+		if cgroup.hasRAM {
+			snapshot.ramUsed = cgroup.ramUsed
+			snapshot.ramTotal = cgroup.ramTotal
+			snapshot.hasRAM = true
+		}
+		if cgroup.hasSwap {
+			snapshot.swapUsed = cgroup.swapUsed
+			snapshot.swapTotal = cgroup.swapTotal
+			snapshot.hasSwap = true
+		}
+	}
+	if !snapshot.hasRAM {
+		if memInfo, err := mem.VirtualMemory(); err == nil {
+			snapshot.ramUsed = memInfo.Used
+			snapshot.ramTotal = memInfo.Total
+			snapshot.hasRAM = true
+		}
+	}
+	if !snapshot.hasSwap {
+		if swapInfo, err := mem.SwapMemory(); err == nil {
+			snapshot.swapUsed = swapInfo.Used
+			snapshot.swapTotal = swapInfo.Total
+			snapshot.hasSwap = true
+		}
+	}
+	if snapshot.ramUsed > snapshot.ramTotal {
+		snapshot.ramUsed = snapshot.ramTotal
+	}
+	if snapshot.swapUsed > snapshot.swapTotal {
+		snapshot.swapUsed = snapshot.swapTotal
+	}
+	return snapshot
+}
+
+func readProcMeminfo(path string) (memorySnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return memorySnapshot{}, err
+	}
+	return parseProcMeminfo(string(data)), nil
+}
+
+func parseProcMeminfo(data string) memorySnapshot {
+	values := map[string]uint64{}
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		values[strings.TrimSuffix(fields[0], ":")] = value * 1024
+	}
+
+	total := values["MemTotal"]
+	free := values["MemFree"]
+	cached := values["Cached"]
+	reclaimable := values["SReclaimable"]
+	buffers := values["Buffers"]
+	shmem := values["Shmem"]
+	swapTotal := values["SwapTotal"]
+	swapFree := values["SwapFree"]
+	swapCached := values["SwapCached"]
+
+	snapshot := memorySnapshot{}
+	if total > 0 {
+		usedDiff := free + cached + reclaimable + buffers
+		if total >= usedDiff {
+			snapshot.ramUsed = total - usedDiff
+		} else {
+			snapshot.ramUsed = total - free
+		}
+		snapshot.ramUsed += shmem
+		snapshot.ramTotal = total
+		snapshot.hasRAM = true
+	}
+	if swapTotal > 0 {
+		usedDiff := swapFree + swapCached
+		if swapTotal >= usedDiff {
+			snapshot.swapUsed = swapTotal - usedDiff
+		} else {
+			snapshot.swapUsed = swapTotal - swapFree
+		}
+		snapshot.swapTotal = swapTotal
+		snapshot.hasSwap = true
+	}
+	return snapshot
+}
+
+func readCgroupMemory(cgroupRoot string, procSelfCgroup string) memorySnapshot {
+	snapshot := memorySnapshot{}
+	lines, err := os.ReadFile(procSelfCgroup)
+	if err != nil {
+		return snapshot
+	}
+
+	for _, rawLine := range strings.Split(string(lines), "\n") {
+		fields := strings.Split(rawLine, ":")
+		if len(fields) < 3 {
+			continue
+		}
+		controllers := fields[1]
+		rel := strings.TrimPrefix(filepath.Clean("/"+fields[2]), string(os.PathSeparator))
+		if controllers == "" {
+			dir := filepath.Join(cgroupRoot, rel)
+			if max, ok := readCgroupLimit(filepath.Join(dir, "memory.max")); ok {
+				current, _ := readCgroupLimit(filepath.Join(dir, "memory.current"))
+				snapshot.ramTotal = max
+				snapshot.ramUsed = current
+				snapshot.hasRAM = true
+			}
+			if max, ok := readCgroupLimit(filepath.Join(dir, "memory.swap.max")); ok {
+				current, _ := readCgroupLimit(filepath.Join(dir, "memory.swap.current"))
+				snapshot.swapTotal = max
+				snapshot.swapUsed = current
+				snapshot.hasSwap = true
+			}
+			return snapshot
+		}
+		if strings.Contains(","+controllers+",", ",memory,") {
+			for _, dir := range []string{filepath.Join(cgroupRoot, "memory", rel), filepath.Join(cgroupRoot, rel)} {
+				if max, ok := readCgroupLimit(filepath.Join(dir, "memory.limit_in_bytes")); ok {
+					current, _ := readCgroupLimit(filepath.Join(dir, "memory.usage_in_bytes"))
+					snapshot.ramTotal = max
+					snapshot.ramUsed = current
+					snapshot.hasRAM = true
+					if memswMax, ok := readCgroupLimit(filepath.Join(dir, "memory.memsw.limit_in_bytes")); ok {
+						memswCurrent, _ := readCgroupLimit(filepath.Join(dir, "memory.memsw.usage_in_bytes"))
+						if memswMax >= max {
+							snapshot.swapTotal = memswMax - max
+							snapshot.hasSwap = true
+						}
+						if memswCurrent >= current {
+							snapshot.swapUsed = memswCurrent - current
+						}
+					}
+					break
+				}
+			}
+			return snapshot
+		}
+	}
+	return snapshot
+}
+
+func readCgroupLimit(path string) (uint64, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "max" {
+		return 0, false
+	}
+	limit, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || limit > maxReasonableCgroupLimit {
+		return 0, false
+	}
+	return limit, true
 }
 
 func parseFilterList(value string) []string {
@@ -1399,12 +1671,100 @@ func selectDiskPartitions(partitions []disk.PartitionStat, include string, exclu
 		if len(includeFilters) > 0 && !partitionMatchesFilter(partition, includeFilters) {
 			continue
 		}
+		if len(includeFilters) == 0 && !isKomariPhysicalDisk(partition) {
+			continue
+		}
 		if partitionMatchesFilter(partition, excludeFilters) {
 			continue
 		}
 		selected = append(selected, partition)
 	}
 	return selected
+}
+
+func isKomariPhysicalDisk(partition disk.PartitionStat) bool {
+	if partition.Mountpoint == "/" {
+		return true
+	}
+	mountpoint := strings.ToLower(partition.Mountpoint)
+	for _, prefix := range []string{
+		"/tmp", "/var/tmp", "/dev", "/run", "/var/lib/containers", "/var/lib/docker",
+		"/proc", "/sys", "/sys/fs/cgroup", "/etc/resolv.conf", "/etc/host", "/nix/store",
+	} {
+		if mountpoint == prefix || strings.HasPrefix(mountpoint, prefix) {
+			return false
+		}
+	}
+
+	fstype := strings.ToLower(partition.Fstype)
+	if fstype == "autofs" && !strings.HasPrefix(partition.Device, "/dev/") {
+		return false
+	}
+	if fstype == "fuseblk" {
+		return true
+	}
+	for _, fs := range []string{
+		"tmpfs", "devtmpfs", "udev", "nfs", "cifs", "smb", "vboxsf", "9p", "fuse",
+		"overlay", "proc", "devpts", "sysfs", "cgroup", "mqueue", "hugetlbfs",
+		"debugfs", "binfmt_misc", "securityfs",
+	} {
+		if fstype == fs || strings.HasPrefix(fstype, fs) {
+			return false
+		}
+	}
+
+	opts := strings.ToLower(strings.Join(partition.Opts, ","))
+	if strings.Contains(opts, "remote") || strings.Contains(opts, "network") {
+		return false
+	}
+	return !strings.HasPrefix(partition.Device, "/dev/loop")
+}
+
+func diskDeviceID(partition disk.PartitionStat) string {
+	if strings.ToLower(partition.Fstype) == "zfs" {
+		if idx := strings.Index(partition.Device, "/"); idx != -1 {
+			return partition.Device[:idx]
+		}
+	}
+	return partition.Device
+}
+
+func diskUsageTotals() (int64, int64) {
+	partitions, err := disk.Partitions(true)
+	if err != nil {
+		return 0, 0
+	}
+	selected := selectDiskPartitions(partitions, mountInclude, mountExclude)
+	if strings.TrimSpace(mountInclude) != "" {
+		var usedDisk, totalDisk int64
+		for _, partition := range selected {
+			if usage, err := disk.Usage(partition.Mountpoint); err == nil {
+				usedDisk += int64(usage.Used)
+				totalDisk += int64(usage.Total)
+			}
+		}
+		return usedDisk, totalDisk
+	}
+
+	deviceMap := map[string]*disk.UsageStat{}
+	for _, partition := range selected {
+		usage, err := disk.Usage(partition.Mountpoint)
+		if err != nil {
+			continue
+		}
+		deviceID := diskDeviceID(partition)
+		if existing, ok := deviceMap[deviceID]; ok && existing.Total >= usage.Total {
+			continue
+		}
+		deviceMap[deviceID] = usage
+	}
+
+	var usedDisk, totalDisk int64
+	for _, usage := range deviceMap {
+		usedDisk += int64(usage.Used)
+		totalDisk += int64(usage.Total)
+	}
+	return usedDisk, totalDisk
 }
 
 func interfaceMatchesFilter(name string, filters []string) bool {
@@ -1446,6 +1806,97 @@ func sumNetworkCounters(counters []gnet.IOCountersStat, include string, exclude 
 		received += int64(counter.BytesRecv)
 	}
 	return sent, received
+}
+
+func processCount() int {
+	if runtime.GOOS == "linux" {
+		if count := processCountFromProc("/proc"); count > 0 {
+			return count
+		}
+	}
+	if processes, err := process.Processes(); err == nil {
+		return len(processes)
+	}
+	return 0
+}
+
+func processCountFromProc(root string) int {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if _, err := strconv.ParseInt(entry.Name(), 10, 64); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
+func connectionsCount() (int, int) {
+	if runtime.GOOS == "linux" {
+		if tcp, udp, err := procNetConnectionsCount("/proc"); err == nil {
+			return tcp, udp
+		}
+	}
+	tcpConns, tcpErr := gnet.Connections("tcp")
+	udpConns, udpErr := gnet.Connections("udp")
+	if tcpErr != nil || udpErr != nil {
+		return 0, 0
+	}
+	return len(tcpConns), len(udpConns)
+}
+
+func procNetConnectionsCount(root string) (int, int, error) {
+	tcp, err := countProcNetFiles(root, "tcp", "tcp6")
+	if err != nil {
+		return 0, 0, err
+	}
+	udp, err := countProcNetFiles(root, "udp", "udp6")
+	if err != nil {
+		return 0, 0, err
+	}
+	return tcp, udp, nil
+}
+
+func countProcNetFiles(root string, names ...string) (int, error) {
+	total := 0
+	readAny := false
+	for _, name := range names {
+		count, err := countProcNetFile(filepath.Join(root, "net", name))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, err
+		}
+		total += count
+		readAny = true
+	}
+	if !readAny {
+		return 0, fmt.Errorf("no proc net files found under %s", filepath.Join(root, "net"))
+	}
+	return total, nil
+}
+
+func countProcNetFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	header := true
+	for _, line := range strings.Split(string(data), "\n") {
+		if header {
+			header = false
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count, nil
 }
 
 type trafficResetState struct {
@@ -1727,28 +2178,18 @@ func collectReportWithInterval(intervalSec int) Report {
 	if percent, err := cpu.Percent(time.Second, false); err == nil && len(percent) > 0 {
 		r.CPU = percent[0]
 	}
-	if memInfo, err := mem.VirtualMemory(); err == nil {
-		r.RAM = int64(memInfo.Used)
-		r.RAMTotal = int64(memInfo.Total)
-	}
-	if swapInfo, err := mem.SwapMemory(); err == nil {
-		r.Swap = int64(swapInfo.Used)
-		r.SwapTotal = int64(swapInfo.Total)
+	if memory := readMemorySnapshot(); memory.hasRAM {
+		r.RAM = int64(memory.ramUsed)
+		r.RAMTotal = int64(memory.ramTotal)
+		if memory.hasSwap {
+			r.Swap = int64(memory.swapUsed)
+			r.SwapTotal = int64(memory.swapTotal)
+		}
 	}
 	if loadInfo, err := load.Avg(); err == nil {
 		r.Load = loadInfo.Load1
 	}
-	if partitions, err := disk.Partitions(false); err == nil {
-		var usedDisk, totalDisk int64
-		for _, p := range selectDiskPartitions(partitions, mountInclude, mountExclude) {
-			if usage, err := disk.Usage(p.Mountpoint); err == nil {
-				usedDisk += int64(usage.Used)
-				totalDisk += int64(usage.Total)
-			}
-		}
-		r.Disk = usedDisk
-		r.DiskTotal = totalDisk
-	}
+	r.Disk, r.DiskTotal = diskUsageTotals()
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
 		rawUp, rawDown := sumNetworkCounters(netIO, nicInclude, nicExclude)
 		r.hasRawNetTotals = true
@@ -1760,15 +2201,8 @@ func collectReportWithInterval(intervalSec int) Report {
 			r.NetTotalUp, r.NetTotalDown = rawUp, rawDown
 		}
 	}
-	if processes, err := process.Processes(); err == nil {
-		r.ProcessCount = len(processes)
-	}
-	if conns, err := gnet.Connections("tcp"); err == nil {
-		r.Connections = len(conns)
-	}
-	if udpConns, err := gnet.Connections("udp"); err == nil {
-		r.ConnectionsUdp = len(udpConns)
-	}
+	r.ProcessCount = processCount()
+	r.Connections, r.ConnectionsUdp = connectionsCount()
 	if hostInfo, err := host.Info(); err == nil {
 		r.Uptime = int64(hostInfo.Uptime)
 	}

@@ -142,6 +142,10 @@ export async function updateUserUsername(database: QueryDatabase, uuid: string, 
   return sba.updateSupabaseUserUsername(database.env, uuid, username);
 }
 
+export async function updateUserUsernameAndRotateSession(database: QueryDatabase, uuid: string, username: string): Promise<t.User | null> {
+  return sba.updateSupabaseUserUsernameAndRotateSession(database.env, uuid, username);
+}
+
 export async function updateUserPassword(database: QueryDatabase, uuid: string, hashedPassword: string): Promise<void> {
   return sba.updateSupabaseUserPassword(database.env, uuid, hashedPassword);
 }
@@ -152,6 +156,10 @@ export async function updateUserPasswordAndRotateSession(
   hashedPassword: string,
 ): Promise<t.User | null> {
   return sba.updateSupabaseUserPasswordAndRotateSession(database.env, uuid, hashedPassword);
+}
+
+export async function rotateUserSession(database: QueryDatabase, uuid: string): Promise<t.User | null> {
+  return sba.rotateSupabaseUserSession(database.env, uuid);
 }
 
 export async function getLoginRateLimit(database: QueryDatabase, bucket: string): Promise<t.LoginRateLimit | null> {

@@ -15,7 +15,7 @@ import { formatTelegramHtmlText, sendTelegramMessage } from '../utils/telegram';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { getAgentTokenMaxAgeMs, isAgentTokenExpired } from '../utils/agent-token-policy';
-import { hashAgentToken, isAgentTokenHash, isAgentTokenShape } from '../utils/client';
+import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
 import { invalidatePublicMetadataCache } from './public';
 
@@ -97,7 +97,7 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
 }
 
 async function agentTokenLookupHash(token: string): Promise<string> {
-  return isAgentTokenHash(token) ? token.toLowerCase() : hashAgentToken(token);
+  return hashAgentToken(token);
 }
 
 export function invalidateAgentPingTaskCache(): void {
@@ -907,8 +907,7 @@ async function enforceAgentRateLimit(
   max: number,
 ): Promise<Response | null> {
   const tokenKey = c.get('agentTokenKey') || requestClientIp(c) || 'unknown';
-  const localKey = `${bucket}:${tokenKey}`;
-  return localAgentRateLimit(c, localKey, max, AGENT_RATE_LIMIT_WINDOW_MS);
+  return enforceAgentBucketRateLimit(c, bucket, tokenKey, max);
 }
 
 async function agentPresentedTokenKey(c: ClientContext, token: string): Promise<string> {

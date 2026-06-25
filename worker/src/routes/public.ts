@@ -7,7 +7,7 @@ import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
-import { validateAdminSession } from '../auth/admin-session';
+import { invalidateAdminSessionCache, validateAdminSession } from '../auth/admin-session';
 import { AdminBootstrapError, ensureInitialAdmin } from '../auth/admin-bootstrap';
 import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth/jwt';
 import { hashPassword, needsPasswordRehash, verifyPassword } from '../auth/password';
@@ -54,8 +54,10 @@ const PUBLIC_HISTORY_MAX_OFFSET_ROWS = 5000;
 const PUBLIC_METADATA_CACHE_MS = PUBLIC_METADATA_CACHE_SECONDS * 1000;
 const PUBLIC_HISTORY_CACHE_MS = PUBLIC_HISTORY_CACHE_SECONDS * 1000;
 const PUBLIC_HISTORY_CACHE_MAX_ENTRIES = 256;
+const PUBLIC_METADATA_CACHE_MAX_ENTRIES = PUBLIC_HISTORY_CACHE_MAX_ENTRIES;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
 const LOGOUT_CLEAR_SITE_DATA_HEADER = '"cache", "storage"';
+const DUMMY_ADMIN_PASSWORD_HASH = 'pbkdf2_sha256$10000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 type PublicRateLimitBucket = {
   count: number;
@@ -128,6 +130,21 @@ function putAdminSessionEdgeCache(c: PublicContext, user: Pick<db.User, 'uuid' |
   else void task;
 }
 
+export async function deleteAdminSessionEdgeCache(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  userId: string,
+  sessionVersion: number,
+): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  try {
+    const task = caches.default.delete(adminSessionEdgeCacheRequest(userId, sessionVersion));
+    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(task.catch(() => undefined));
+    await task;
+  } catch {
+    // Session revocation is enforced by session_version; edge cache deletion shortens stale-cache windows.
+  }
+}
+
 function isJsonObjectPayload(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -176,7 +193,41 @@ function publicCacheRequest(c: PublicContext): Request {
   return new Request(url.toString(), { method: 'GET' });
 }
 
-function publicMetadataCacheRequest(c: Context<{ Bindings: Bindings; Variables: Variables }>, pathname: string): Request {
+function publicMetadataAllowedQueryParams(pathname: string): string[] {
+  if (pathname === '/api/websites') return ['hours'];
+  if (/^\/api\/websites\/\d+$/.test(pathname)) return ['limit'];
+  return [];
+}
+
+function publicMetadataCanonicalQueryValue(pathname: string, name: string, value: string | null): string | null {
+  if (pathname === '/api/websites' && name === 'hours') return String(readIntParam(value || undefined, 24, 72));
+  if (/^\/api\/websites\/\d+$/.test(pathname) && name === 'limit') return String(readIntParam(value || undefined, 120, 500));
+  return null;
+}
+
+function publicMetadataCacheKey(c: PublicContext): string {
+  const url = new URL(c.req.url);
+  const params = new URLSearchParams();
+  for (const name of publicMetadataAllowedQueryParams(url.pathname)) {
+    const value = publicMetadataCanonicalQueryValue(url.pathname, name, url.searchParams.get(name));
+    if (value) params.set(name, value);
+  }
+  params.sort();
+  return `metadata:${url.pathname}?${params.toString()}`;
+}
+
+function publicMetadataEdgeCacheRequest(c: PublicContext): Request {
+  const source = new URL(c.req.url);
+  const url = new URL(source.pathname, source.origin);
+  for (const name of publicMetadataAllowedQueryParams(url.pathname)) {
+    const value = publicMetadataCanonicalQueryValue(url.pathname, name, source.searchParams.get(name));
+    if (value) url.searchParams.set(name, value);
+  }
+  url.searchParams.sort();
+  return new Request(url.toString(), { method: 'GET' });
+}
+
+function publicMetadataPathCacheRequest(c: Context<{ Bindings: Bindings; Variables: Variables }>, pathname: string): Request {
   return new Request(new URL(pathname, c.req.url).toString(), { method: 'GET' });
 }
 
@@ -190,7 +241,7 @@ export function purgePublicMetadataEdgeCache(c: Context<{ Bindings: Bindings; Va
     '/api/task/ping',
     '/api/websites',
   ];
-  const task = Promise.all(paths.map(path => caches.default.delete(publicMetadataCacheRequest(c, path)))).catch(() => []);
+  const task = Promise.all(paths.map(path => caches.default.delete(publicMetadataPathCacheRequest(c, path)))).catch(() => []);
   if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(task);
   else void task;
   return task;
@@ -245,6 +296,30 @@ function putPublicEdgeCache(c: PublicContext, response: Response): void {
   }
 }
 
+async function getPublicMetadataEdgeCache(c: PublicContext): Promise<Response | null> {
+  if (c.req.method !== 'GET' || typeof caches === 'undefined') return null;
+  try {
+    const cached = await caches.default.match(publicMetadataEdgeCacheRequest(c));
+    return cached ? withPublicCacheHeader(c, cached, PUBLIC_METADATA_CACHE_SECONDS, 'edge-hit') : null;
+  } catch {
+    return null;
+  }
+}
+
+function putPublicMetadataEdgeCache(c: PublicContext, response: Response): void {
+  if (c.req.method !== 'GET' || typeof caches === 'undefined') return;
+  try {
+    const put = caches.default.put(publicMetadataEdgeCacheRequest(c), response.clone());
+    if (c.executionCtx?.waitUntil) {
+      c.executionCtx.waitUntil(put.catch(() => undefined));
+    } else {
+      void put.catch(() => undefined);
+    }
+  } catch {
+    // Edge cache is only a quota optimization; correctness comes from the database/DO.
+  }
+}
+
 async function getPublicHistoryCache(c: PublicContext, key: string): Promise<Response | null> {
   const entry = publicHistoryCache.get(key);
   if (entry && cacheIsFresh(entry)) {
@@ -269,13 +344,13 @@ function setPublicHistoryCache(c: PublicContext, key: string, value: unknown): R
 }
 
 async function getPublicMetadataResponse(c: PublicContext): Promise<Response | null> {
-  const key = publicHistoryCacheKey(c, 'metadata');
+  const key = publicMetadataCacheKey(c);
   const entry = publicMetadataResponseCache.get(key);
   if (entry && cacheIsFresh(entry)) {
     return publicJsonResponse(c, entry.value, PUBLIC_METADATA_CACHE_SECONDS, 'memory-hit');
   }
   if (entry) publicMetadataResponseCache.delete(key);
-  return getPublicEdgeCache(c, PUBLIC_METADATA_CACHE_SECONDS);
+  return getPublicMetadataEdgeCache(c);
 }
 
 async function getCachedPublicMetadataResponse(c: PublicContext, bucket: string): Promise<Response | null> {
@@ -285,12 +360,16 @@ async function getCachedPublicMetadataResponse(c: PublicContext, bucket: string)
 }
 
 function setPublicMetadataResponse(c: PublicContext, value: unknown, cacheEdge = true): Response {
-  publicMetadataResponseCache.set(publicHistoryCacheKey(c, 'metadata'), {
+  if (publicMetadataResponseCache.size >= PUBLIC_METADATA_CACHE_MAX_ENTRIES) {
+    const oldestKey = publicMetadataResponseCache.keys().next().value;
+    if (oldestKey) publicMetadataResponseCache.delete(oldestKey);
+  }
+  publicMetadataResponseCache.set(publicMetadataCacheKey(c), {
     value,
     expiresAt: Date.now() + PUBLIC_METADATA_CACHE_MS,
   });
   const response = publicJsonResponse(c, value, PUBLIC_METADATA_CACHE_SECONDS, 'miss');
-  if (cacheEdge) putPublicEdgeCache(c, response);
+  if (cacheEdge) putPublicMetadataEdgeCache(c, response);
   return response;
 }
 
@@ -844,6 +923,7 @@ publicRoutes.post('/login', async (c) => {
 
   const user = await timed(metrics, 'db_user', () => db.getUserByUsername(database, username));
   if (!user) {
+    await timed(metrics, 'verify_password', () => verifyPassword(password, DUMMY_ADMIN_PASSWORD_HASH));
     const failedAt = Date.now();
     await timed(metrics, 'db_record_failure', () => recordLoginFailure(database, rateLimitBuckets, failedAt, rateLimitStates));
     await timed(metrics, 'audit_failure', () => auditLoginFailure(database, username, clientIp, 'unknown_user', failedAt));
@@ -898,8 +978,27 @@ publicRoutes.post('/login', async (c) => {
 
 // 退出登录
 publicRoutes.post('/logout', async (c) => {
-  if (getAdminSessionToken(c) && !verifyAdminCsrfToken(c)) {
+  const token = getAdminSessionToken(c);
+  if (token && !verifyAdminCsrfToken(c)) {
     return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
+  }
+  let payload = null;
+  try {
+    payload = token ? await verifyAdminToken(token, c.env) : null;
+  } catch (error) {
+    if (error instanceof AuthConfigurationError) {
+      console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+    }
+  }
+  if (payload) {
+    await deleteAdminSessionEdgeCache(c, payload.userId, payload.sessionVersion);
+    const database = getDatabase(c.env);
+    const user = await validateAdminSession(database, payload);
+    if (user) {
+      await db.rotateUserSession(database, user.uuid);
+      invalidateAdminSessionCache(user.uuid);
+      await deleteAdminSessionEdgeCache(c, payload.userId, payload.sessionVersion);
+    }
   }
   clearAdminSessionCookie(c);
   c.header('Clear-Site-Data', LOGOUT_CLEAR_SITE_DATA_HEADER);

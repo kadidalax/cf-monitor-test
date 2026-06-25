@@ -275,7 +275,7 @@ export default function AdminAuditLogs() {
       </Flex>
 
       <Dialog.Root open={!!selectedLog} onOpenChange={(open) => !open && setSelectedLog(null)}>
-        <Dialog.Content style={{ maxWidth: 620 }}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 620 }}>
           <Dialog.Title>日志详情</Dialog.Title>
           {selectedLog && (
             <Flex direction="column" gap="3">

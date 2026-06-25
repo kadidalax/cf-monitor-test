@@ -66,6 +66,31 @@ test('website monitor validation rejects unsafe URLs', () => {
   }
 });
 
+test('website monitor TCP validation rejects ambiguous numeric loopback hosts', () => {
+  const base = {
+    name: 'Bad TCP',
+    method: 'TCP',
+    expected_status_min: 200,
+    expected_status_max: 399,
+    interval_sec: 300,
+    timeout_sec: 10,
+    grace_period_sec: 180,
+    enabled: true,
+    hidden: false,
+  };
+
+  for (const url of [
+    'tcp://2130706433:80',
+    'tcp://0x7f000001:80',
+    'tcp://0177.0.0.1:80',
+    'tcp://127.1:80',
+    'tcp://[::ffff:127.0.0.1]:80',
+  ]) {
+    const result = validateWebsiteMonitorInput({ ...base, url });
+    assert.equal(result.ok, false, url);
+  }
+});
+
 test('website monitor validation rejects invalid numeric boundaries', () => {
   const base = {
     name: 'Example',

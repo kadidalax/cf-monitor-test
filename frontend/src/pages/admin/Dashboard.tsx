@@ -635,7 +635,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="admin-node-dialog admin-node-edit-dialog" style={{ maxWidth: 640 }}>
+      <Dialog.Content aria-describedby={undefined} className="admin-node-dialog admin-node-edit-dialog" style={{ maxWidth: 640 }}>
         <Dialog.Title>编辑服务器</Dialog.Title>
         <div className="admin-node-dialog-scroll">
           <Flex className="admin-node-edit-form" direction="column" gap="3">
@@ -735,7 +735,7 @@ function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChang
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 420 }}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
         <Dialog.Title>添加服务器</Dialog.Title>
         <Flex direction="column" gap="3" mt="2">
           <FieldInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
@@ -773,7 +773,7 @@ function DeleteDialog({ client, open, onOpenChange, onDeleted }: { client: Admin
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 400 }}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
         <Dialog.Title>确认删除</Dialog.Title>
         <Text size="2">确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</Text>
         <Flex gap="3" justify="end" mt="4">
@@ -813,7 +813,7 @@ function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: 
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 420 }}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
         <Dialog.Title>重置 Agent Token</Dialog.Title>
         <Flex direction="column" gap="2">
           <Text size="2">确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</Text>
@@ -1202,7 +1202,7 @@ export default function AdminDashboard() {
 function BatchDeleteDialog({ count, open, onOpenChange, onConfirm }: { count: number; open: boolean; onOpenChange: (v: boolean) => void; onConfirm: () => void }) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 400 }}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
         <Dialog.Title>批量删除确认</Dialog.Title>
         <Text size="2">确定要删除选中的 {count} 个节点吗？此操作不可撤销。</Text>
         <Flex gap="3" justify="end" mt="4">

@@ -158,7 +158,7 @@ function TaskDialog({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 620 }}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 620 }}>
         <Dialog.Title>{editingTask ? '编辑 Ping 任务' : '添加 Ping 任务'}</Dialog.Title>
         <Flex direction="column" gap="3" style={{ padding: '8px 0', maxHeight: 560, overflow: 'auto' }}>
           <Grid columns={{ initial: '1', sm: '2' }} gap="3">
@@ -641,7 +641,7 @@ export default function AdminPingTasks() {
       />
 
       <Dialog.Root open={Boolean(deleteTask)} onOpenChange={(open) => !open && setDeleteTask(null)}>
-        <Dialog.Content style={{ maxWidth: 420 }}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
           <Dialog.Title>删除 Ping 任务</Dialog.Title>
           <Text size="2">
             确定删除 <strong>{deleteTask?.name}</strong> 吗？相关 Ping 记录也会被清理。
