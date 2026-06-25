@@ -67,6 +67,39 @@ export async function callSupabaseRpc<T>(
   return await response.json() as T;
 }
 
+function readRpcBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1';
+  }
+  return false;
+}
+
+function readRpcStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return value.split(',').map(item => item.trim()).filter(Boolean);
+  }
+}
+
+function normalizePingTask<T extends { clients?: unknown; all_clients?: unknown }>(task: T): T {
+  return {
+    ...task,
+    clients: readRpcStringArray((task as Record<string, unknown>).clients),
+    all_clients: readRpcBoolean((task as Record<string, unknown>).all_clients),
+  } as T;
+}
+
+function normalizePingTaskList<T extends { clients?: unknown; all_clients?: unknown }>(tasks: T[]): T[] {
+  return tasks.map(normalizePingTask);
+}
+
 export function getSupabasePublicSettings(env: SupabaseApiEnv): Promise<Record<string, string>> {
   return callSupabaseRpc<Record<string, string>>(env, 'cfm_public_settings');
 }
@@ -227,22 +260,22 @@ export function getSupabaseClientCapacityCounts(env: SupabaseApiEnv): Promise<Cl
 }
 
 export function getSupabasePingTaskEstimateRows(env: SupabaseApiEnv): Promise<PingTaskEstimateRow[]> {
-  return callSupabaseRpc<PingTaskEstimateRow[]>(env, 'cfm_ping_task_estimate_rows');
+  return callSupabaseRpc<PingTaskEstimateRow[]>(env, 'cfm_ping_task_estimate_rows').then(normalizePingTaskList);
 }
 
 export function getSupabasePingTask(env: SupabaseApiEnv, id: number): Promise<PingTask | null> {
-  return callSupabaseRpc<PingTask | null>(env, 'cfm_ping_task', { input_id: id });
+  return callSupabaseRpc<PingTask | null>(env, 'cfm_ping_task', { input_id: id }).then(task => task ? normalizePingTask(task) : null);
 }
 
 export function createSupabasePingTask(env: SupabaseApiEnv, task: PingTask): Promise<PingTask> {
-  return callSupabaseRpc<PingTask>(env, 'cfm_create_ping_task', { input_task: task });
+  return callSupabaseRpc<PingTask>(env, 'cfm_create_ping_task', { input_task: task }).then(normalizePingTask);
 }
 
 export function updateSupabasePingTaskAndReturn(env: SupabaseApiEnv, id: number, task: Partial<PingTask>): Promise<PingTask | null> {
   return callSupabaseRpc<PingTask | null>(env, 'cfm_update_ping_task', {
     input_id: id,
     input_task: task,
-  });
+  }).then(task => task ? normalizePingTask(task) : null);
 }
 
 export function reorderSupabasePingTasks(env: SupabaseApiEnv, ids: number[]): Promise<number> {
@@ -250,7 +283,7 @@ export function reorderSupabasePingTasks(env: SupabaseApiEnv, ids: number[]): Pr
 }
 
 export function deleteSupabasePingTask(env: SupabaseApiEnv, id: number): Promise<PingTask | null> {
-  return callSupabaseRpc<PingTask | null>(env, 'cfm_delete_ping_task', { input_id: id });
+  return callSupabaseRpc<PingTask | null>(env, 'cfm_delete_ping_task', { input_id: id }).then(task => task ? normalizePingTask(task) : null);
 }
 
 export function deleteSupabaseOldRecords(
@@ -684,8 +717,8 @@ export function getSupabaseExpiredRowCounts(
   });
 }
 
-export function getSupabasePublicPingTasks(env: SupabaseApiEnv): Promise<PingTask[]> {
-  return callSupabaseRpc<PingTask[]>(env, 'cfm_public_ping_tasks');
+export function getSupabasePublicPingTasks(env: SupabaseApiEnv, fetcher: typeof fetch = fetch): Promise<PingTask[]> {
+  return callSupabaseRpc<PingTask[]>(env, 'cfm_public_ping_tasks', {}, fetcher).then(normalizePingTaskList);
 }
 
 export function getSupabasePublicWebsites(

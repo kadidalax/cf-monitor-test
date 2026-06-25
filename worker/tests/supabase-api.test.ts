@@ -8,6 +8,7 @@ import {
   SupabaseApiError,
   callSupabaseRpc,
   ensureSupabaseInitialAdmin,
+  getSupabasePublicPingTasks,
   isSupabaseApiConfigured,
 } from '../src/db/supabase-api/client.ts';
 
@@ -99,6 +100,19 @@ test('ensureSupabaseInitialAdmin sends the required user uuid to the RPC', async
     input_username: 'admin',
     input_passwd: 'hash',
   });
+});
+
+test('Supabase ping tasks normalize smallint all_clients for Agent policies', async () => {
+  const tasks = await getSupabasePublicPingTasks(
+    env,
+    async () => new Response(JSON.stringify([
+      { id: 1, name: 'all', clients: [], all_clients: 1, type: 'tcp', target: 'example.com:80', interval_sec: 120 },
+      { id: 2, name: 'one', clients: ['node-1'], all_clients: 0, type: 'tcp', target: 'example.com:443', interval_sec: 120 },
+    ]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  );
+
+  assert.equal(tasks[0].all_clients, true);
+  assert.equal(tasks[1].all_clients, false);
 });
 
 test('public query facade uses Supabase RPC in Data API mode', () => {

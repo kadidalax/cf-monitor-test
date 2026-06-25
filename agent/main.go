@@ -180,12 +180,33 @@ type PingTask struct {
 	Target      string   `json:"target"`
 	IntervalSec int      `json:"interval_sec"`
 	Clients     []string `json:"clients"`
-	AllClients  bool     `json:"all_clients"`
+	AllClients  jsonBool `json:"all_clients"`
 }
 
 type PingResult struct {
 	TaskID int     `json:"task_id"`
 	Value  float64 `json:"value"`
+}
+
+type jsonBool bool
+
+func (b *jsonBool) UnmarshalJSON(data []byte) error {
+	text := strings.Trim(strings.ToLower(string(data)), `"`)
+	switch text {
+	case "true", "1":
+		*b = true
+		return nil
+	case "false", "0", "", "null":
+		*b = false
+		return nil
+	default:
+		parsed, err := strconv.ParseBool(text)
+		if err != nil {
+			return err
+		}
+		*b = jsonBool(parsed)
+		return nil
+	}
 }
 
 type pingTaskScheduler struct {

@@ -163,6 +163,20 @@ func TestReadWebSocketMessagesQueuesPoliciesOnly(t *testing.T) {
 	}
 }
 
+func TestPolicyDecodesNumericAllClients(t *testing.T) {
+	raw := []byte(`{"type":"policy","sample_interval_sec":120,"report_interval_sec":120,"ping_tasks":[{"id":1,"name":"tcp","type":"tcp","target":"example.com:80","interval_sec":120,"clients":[],"all_clients":1}]}`)
+	var policy serverMessage
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		t.Fatalf("decode policy with numeric all_clients: %v", err)
+	}
+	if len(policy.PingTasks) != 1 {
+		t.Fatalf("decoded %d ping tasks, want 1", len(policy.PingTasks))
+	}
+	if !bool(policy.PingTasks[0].AllClients) {
+		t.Fatal("numeric all_clients was not decoded as true")
+	}
+}
+
 func TestDefaultIntervalsStartInBackgroundMode(t *testing.T) {
 	if reportInterval != 120 {
 		t.Fatalf("default report interval = %d, want 120 seconds", reportInterval)
