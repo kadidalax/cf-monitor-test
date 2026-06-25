@@ -60,6 +60,12 @@ test('monitor resource rings omit detail values below cpu ram and disk', () => {
   assert.match(nodeCardSource, /<RingMetric label="Disk" percent=\{diskPct\} \/>/);
 });
 
+test('monitor title billing row shows ip family badges at the far right', () => {
+  assert.match(nodeCardSource, /className="node-card-title-meta"[\s\S]*<NodeIpBadges client=\{client\} className="node-card-title-ip-badges" \/>/);
+  assert.match(nodeCardSource, /function NodeIpBadges\(\{ client, className \}/);
+  assert.match(css, /\.node-card-title-ip-badges\s*\{[\s\S]{0,120}margin-left:\s*auto;[\s\S]{0,120}flex:\s*0 0 auto;/);
+});
+
 test('node metric motion keeps a brief chase under reduced motion', () => {
   assert.match(
     css,

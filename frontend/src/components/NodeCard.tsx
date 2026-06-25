@@ -156,6 +156,19 @@ function NetworkSummary({
   );
 }
 
+function NodeIpBadges({ client, className }: { client: ClientInfo; className?: string }) {
+  const hasIpv4 = Boolean(client.has_ipv4 || client.ipv4);
+  const hasIpv6 = Boolean(client.has_ipv6 || client.ipv6);
+  if (!hasIpv4 && !hasIpv6) return null;
+
+  return (
+    <Flex className={['node-ip-family-badges', className].filter(Boolean).join(' ')} align="center" gap="1" wrap="nowrap">
+      {hasIpv4 && <Badge size="1" variant="soft" color="gray">IPv4</Badge>}
+      {hasIpv6 && <Badge size="1" variant="soft" color="gray">IPv6</Badge>}
+    </Flex>
+  );
+}
+
 export default function NodeCard({ client, live, online }: NodeCardProps) {
   const isMobile = useIsMobile();
   const defaultLive: LiveRecord = {
@@ -250,6 +263,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                       showExpiry={false}
                     />
                   </span>
+                  <NodeIpBadges client={client} className="node-card-title-ip-badges" />
                 </Flex>
               </Flex>
             </Flex>
@@ -303,10 +317,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                   />
                 </span>
               </div>
-              <Flex align="center" gap="1" wrap="nowrap">
-                {(client.has_ipv4 || client.ipv4) && <Badge size="1" variant="soft" color="gray">IPv4</Badge>}
-                {(client.has_ipv6 || client.ipv6) && <Badge size="1" variant="soft" color="gray">IPv6</Badge>}
-              </Flex>
+              <NodeIpBadges client={client} />
             </div>
 
             <div className="node-card-next-layout" data-monitor-layout="next">
