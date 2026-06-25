@@ -1,4 +1,5 @@
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
+import { resolveFlagCode } from '../components/Flag';
 
 export type OfflinePosition = 'first' | 'keep' | 'last';
 export type NodeStatusFilter = 'all' | 'online' | 'offline';
@@ -78,7 +79,8 @@ export function getNodeStatsSummary(
   const regionSet = new Set(
     clients
       .filter((client) => liveData.online.includes(client.uuid) && client.region)
-      .map((client) => client.region),
+      .map((client) => resolveFlagCode(client.region))
+      .filter((code) => code !== 'UN'),
   );
 
   for (const client of clients) {
