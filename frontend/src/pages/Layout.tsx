@@ -128,7 +128,9 @@ export default function Layout() {
         <nav className="nav-bar">
           <div className="nav-brand">
             <Link to="/" className="nav-brand-link">
-              <span className="nav-logo-mark" aria-hidden="true">C</span>
+              <span className="nav-logo-mark" aria-hidden="true">
+                <img src="/app-icon.png" alt="" />
+              </span>
               <span className="nav-brand-title">{siteTitle}</span>
             </Link>
             {siteSubtitle && (

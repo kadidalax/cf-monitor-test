@@ -227,6 +227,14 @@ body {
   box-shadow: 0 10px 26px color-mix(in srgb, var(--monitor-accent) 28%, transparent);
   font-weight: 850;
   letter-spacing: 0;
+  overflow: hidden;
+}
+
+.nav-logo-mark img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .nav-actions {
