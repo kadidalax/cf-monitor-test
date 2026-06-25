@@ -1,3 +1,8 @@
+import {
+  buildWebsiteAlertNotification,
+  buildWebsiteRecoveryNotification,
+} from './notification-templates.ts';
+
 export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
 export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
 
@@ -421,14 +426,7 @@ export function buildWebsiteAlertMessage(input: {
   lastStatus: string;
   checkedAt: string;
 }): string {
-  return [
-    'CF VPS Monitor 网站告警',
-    `名称: ${input.name}`,
-    `地址: ${input.url}`,
-    `状态: ${input.lastStatus}`,
-    `持续: ${input.downMinutes} 分钟`,
-    `时间: ${input.checkedAt}`,
-  ].join('\n');
+  return buildWebsiteAlertNotification(input).body;
 }
 
 export function buildWebsiteRecoveryMessage(input: {
@@ -438,12 +436,5 @@ export function buildWebsiteRecoveryMessage(input: {
   statusCode: number | null;
   latencyMs: number | null;
 }): string {
-  return [
-    'CF VPS Monitor 网站恢复',
-    `名称: ${input.name}`,
-    `地址: ${input.url}`,
-    `状态: HTTP ${input.statusCode ?? 'unknown'}`,
-    `延迟: ${input.latencyMs ?? 0}ms`,
-    `故障时长: ${input.downMinutes} 分钟`,
-  ].join('\n');
+  return buildWebsiteRecoveryNotification(input).body;
 }

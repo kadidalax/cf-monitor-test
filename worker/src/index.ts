@@ -27,12 +27,18 @@ import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFai
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
 import {
-  buildWebsiteAlertMessage,
-  buildWebsiteRecoveryMessage,
   checkWebsiteMonitorHttp,
   shouldNotifyWebsiteDown,
   shouldNotifyWebsiteRecovery,
 } from './utils/website-monitor';
+import {
+  buildExpiryNotification,
+  buildLoadNotification,
+  buildOfflineNotification,
+  buildWebsiteAlertNotification,
+  buildWebsiteRecoveryNotification,
+  type NotificationMessage,
+} from './utils/notification-templates';
 import type {
   Client as MonitorClient,
   ExpiryNotification,
@@ -478,7 +484,7 @@ async function sendTelegram(context: ScheduledRunContext, text: string, settings
   }
 }
 
-async function sendNotification(context: ScheduledRunContext, text: string): Promise<boolean> {
+async function sendNotification(context: ScheduledRunContext, notification: NotificationMessage): Promise<boolean> {
   const settings = await context.getAdminSettings();
   switch (settings.notification_method) {
     case 'none':
@@ -497,7 +503,7 @@ async function sendNotification(context: ScheduledRunContext, text: string): Pro
           recipients: normalizeRecipients(settings.email_smtp_recipients),
           authMethod: settings.email_smtp_auth_method === 'login' ? 'login' : 'plain',
         };
-        const result = await sendSmtpEmail(config, 'CF VPS Monitor 通知', text);
+        const result = await sendSmtpEmail(config, notification.subject, notification.body);
         if (result.ok) {
           await bestEffortRecordHealthEvent(context.database, 'email', 'ok', 'SMTP notification sent', {
             successThrottleMs: 60 * 60 * 1000,
@@ -515,7 +521,7 @@ async function sendNotification(context: ScheduledRunContext, text: string): Pro
       return false;
     }
     default:
-      return sendTelegram(context, text, settings);
+      return sendTelegram(context, notification.body, settings);
   }
 }
 
@@ -632,9 +638,13 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
     if (!candidate) continue;
 
     const minutes = Math.floor(candidate.offlineMs / 60000);
-    const message = candidate.neverReported
-      ? `CF VPS Monitor 离线告警\n节点: ${client.name || client.uuid}\n离线时间: ${minutes} 分钟\n最后上报: ${candidate.lastSeenLabel}\n创建时间: ${candidate.createdAt}`
-      : `CF VPS Monitor 离线告警\n节点: ${client.name || client.uuid}\n离线时间: ${minutes} 分钟\n最后上报: ${candidate.lastSeenLabel}`;
+    const message = buildOfflineNotification({
+      nodeName: client.name || client.uuid,
+      offlineMinutes: minutes,
+      lastSeen: candidate.lastSeenLabel,
+      createdAt: candidate.createdAt,
+      eventTime: now,
+    });
     const sent = await sendNotification(context, message);
     await db.markOfflineNotificationSent(context.database, item.client, now.toISOString());
     await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${candidate.neverReported ? ' (从未上报)' : ''}`);
@@ -685,7 +695,12 @@ async function runExpiryCheck(context: ScheduledRunContext, now: Date): Promise<
     });
     if (!candidate) continue;
 
-    const message = `CF VPS Monitor 到期提醒\n节点: ${client.name || client.uuid}\n到期时间: ${candidate.expiredAt}\n剩余天数: ${candidate.daysLeft} 天`;
+    const message = buildExpiryNotification({
+      nodeName: client.name || client.uuid,
+      expiredAt: candidate.expiredAt,
+      daysLeft: candidate.daysLeft,
+      eventTime: now,
+    });
     const sent = await sendNotification(context, message);
     await db.markExpiryNotificationSent(context.database, item.client, now.toISOString());
     await db.insertAuditLog(context.database, 'system', 'expiry_notify', `${sent ? '已发送' : '已记录'}到期提醒: ${client.name || client.uuid} - ${candidate.daysLeft} 天`);
@@ -777,7 +792,16 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
         const exceedRatio = stats.exceeded / stats.samples;
         if (exceedRatio < plan.ratio) continue;
 
-        const message = `CF VPS Monitor 负载告警\n规则: ${plan.rule.name || plan.label + " 告警"}\n节点: ${client.name || clientUuid}\n指标: ${plan.label} 平均 ${stats.avg_value.toFixed(1)}% (阈值 ${group.threshold}%)\n超标率: ${(exceedRatio * 100).toFixed(0)}% / ${(plan.ratio * 100).toFixed(0)}%`;
+        const message = buildLoadNotification({
+          ruleName: plan.rule.name,
+          nodeName: client.name || clientUuid,
+          metricLabel: plan.label,
+          avgValue: stats.avg_value,
+          threshold: group.threshold,
+          exceedRatio,
+          requiredRatio: plan.ratio,
+          eventTime: now,
+        });
         const sent = await sendNotification(context, message);
         notified = true;
         await db.insertAuditLog(context.database, 'system', 'load_notify', `${sent ? '已发送' : '已记录'}负载告警: ${client.name || clientUuid} - ${plan.label}`);
@@ -800,7 +824,7 @@ async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date):
       const downSince = updated.down_since ? new Date(updated.down_since).getTime() : now.getTime();
       const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
       const lastStatus = updated.last_error || (updated.last_status_code ? `HTTP ${updated.last_status_code}` : 'network_error');
-      const sent = await sendNotification(context, buildWebsiteAlertMessage({
+      const sent = await sendNotification(context, buildWebsiteAlertNotification({
         name: updated.name,
         url: updated.url,
         downMinutes,
@@ -814,12 +838,13 @@ async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date):
     if (shouldNotifyWebsiteRecovery(updated)) {
       const downSince = monitor.down_since ? new Date(monitor.down_since).getTime() : now.getTime();
       const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const sent = await sendNotification(context, buildWebsiteRecoveryMessage({
+      const sent = await sendNotification(context, buildWebsiteRecoveryNotification({
         name: updated.name,
         url: updated.url,
         downMinutes,
         statusCode: updated.last_status_code,
         latencyMs: updated.last_latency_ms,
+        eventTime: now,
       }));
       await db.markWebsiteMonitorNotified(context.database, updated.id, null);
       await db.insertAuditLog(context.database, 'system', 'website_recovery', `${sent ? '已发送' : '已记录'}网站恢复: ${updated.name}`);

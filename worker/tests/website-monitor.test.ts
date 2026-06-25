@@ -298,9 +298,9 @@ test('alert and recovery messages include website identity without stack traces'
     latencyMs: 120,
   });
 
-  assert.match(down, /CF VPS Monitor 网站告警/);
+  assert.match(down, /事件: 网站告警/);
   assert.match(down, /Example/);
   assert.doesNotMatch(down, /Error:/);
-  assert.match(recovery, /CF VPS Monitor 网站恢复/);
+  assert.match(recovery, /事件: 网站恢复/);
   assert.match(recovery, /120ms/);
 });
