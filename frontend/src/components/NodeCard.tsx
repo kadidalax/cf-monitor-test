@@ -249,22 +249,6 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                 <Text className="node-card-region-line" size="1" color="gray" truncate title={client.region || '未知'}>
                   {client.region || '未知'}
                 </Text>
-                <Flex className="node-card-title-meta" align="center" gap="2">
-                  <span className="node-os-chip">
-                    <img src={osConfig.image} alt="" aria-hidden="true" />
-                    {osConfig.name}
-                  </span>
-                  <span className="node-card-billing-row" aria-hidden={!hasBillingInfo}>
-                    <PriceTags
-                      price={client.price}
-                      billing_cycle={client.billing_cycle}
-                      currency={client.currency}
-                      showTags={false}
-                      showExpiry={false}
-                    />
-                  </span>
-                  <NodeIpBadges client={client} className="node-card-title-ip-badges" />
-                </Flex>
               </Flex>
             </Flex>
 
@@ -296,6 +280,22 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                 {online ? '在线' : '离线'}
               </Badge>
             </Flex>
+          </Flex>
+          <Flex className="node-card-title-meta" align="center" gap="2">
+            <span className="node-os-chip">
+              <img src={osConfig.image} alt="" aria-hidden="true" />
+              {osConfig.name}
+            </span>
+            <span className="node-card-billing-row" aria-hidden={!hasBillingInfo}>
+              <PriceTags
+                price={client.price}
+                billing_cycle={client.billing_cycle}
+                currency={client.currency}
+                showTags={false}
+                showExpiry={false}
+              />
+            </span>
+            <NodeIpBadges client={client} className="node-card-title-ip-badges" />
           </Flex>
 
           <Separator size="4" className="-mt-1" />
