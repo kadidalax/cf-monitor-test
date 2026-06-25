@@ -19,9 +19,9 @@ function getLoadLevel(val: number): 'normal' | 'warm' | 'hot' {
 }
 
 function getBarGradient(level: 'normal' | 'warm' | 'hot'): string {
-  if (level === 'hot') return 'var(--monitor-load-hot, linear-gradient(90deg, var(--amber-6), var(--red-9)))';
-  if (level === 'warm') return 'var(--monitor-load-warm, linear-gradient(90deg, var(--green-6), var(--amber-9)))';
-  return 'var(--monitor-load-cool, linear-gradient(90deg, var(--green-5), var(--green-9)))';
+  if (level === 'hot') return 'var(--monitor-danger, #ef4444)';
+  if (level === 'warm') return 'var(--monitor-warning, #f59e0b)';
+  return 'var(--monitor-success, #22c55e)';
 }
 
 function getBarGlow(level: 'normal' | 'warm' | 'hot'): string {
@@ -46,11 +46,8 @@ export default function UsageBar({
   const barGlow = getBarGlow(loadLevel);
   const barH = height || (compact ? 6 : 8);
   const progressFillStyle = {
-    '--usage-progress-background-size': `${10000 / Math.max(pct, 1)}% 100%`,
     height: '100%',
-    background: `var(--monitor-resource-progress-gradient, ${barGradient})`,
-    backgroundSize: 'var(--monitor-resource-progress-background-size, 100% 100%)',
-    backgroundPosition: 'left center',
+    background: barGradient,
     borderRadius: '999px',
     width: '100%',
     transform: `scaleX(${pct / 100})`,

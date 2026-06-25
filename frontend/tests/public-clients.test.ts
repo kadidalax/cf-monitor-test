@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { normalizePublicClient, normalizePublicClients } from '../src/utils/publicClients.ts';
+import { mergePublicClientPatch, normalizePublicClient, normalizePublicClients } from '../src/utils/publicClients.ts';
 import {
   clearCachedPublicBootstrap,
   fetchPublicBootstrap,
@@ -60,6 +60,29 @@ test('normalizePublicClients drops malformed and hidden entries', () => {
       null,
     ],
   }).map((client) => client.uuid), ['node-1']);
+});
+
+test('partial public client patches preserve existing system metadata', () => {
+  const current = normalizePublicClients([{
+    uuid: 'node-debian',
+    name: 'Node Debian',
+    os: 'Debian GNU/Linux 12',
+    arch: 'amd64',
+    price: 9999,
+    billing_cycle: -1,
+    currency: '$',
+  }]);
+
+  const next = mergePublicClientPatch(current, {
+    clients: {
+      upsert: [{ uuid: 'node-debian', sort_order: 2 }],
+    },
+  });
+
+  assert.equal(next[0]?.os, 'Debian GNU/Linux 12');
+  assert.equal(next[0]?.arch, 'amd64');
+  assert.equal(next[0]?.price, 9999);
+  assert.equal(next[0]?.billing_cycle, -1);
 });
 
 test('public pages normalize client list responses before storing state', () => {

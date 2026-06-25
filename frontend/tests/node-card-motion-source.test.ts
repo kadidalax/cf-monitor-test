@@ -85,3 +85,11 @@ test('shared usage bars animate at the calmer node metric pace', () => {
     /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.usage-bar-fill\s*\{[\s\S]*transform\s+120ms\s+linear\s*!important;/,
   );
 });
+
+test('shared usage bars color by load level instead of compressing the rainbow gradient', () => {
+  assert.doesNotMatch(usageBarSource, /monitor-resource-progress-gradient/);
+  assert.match(usageBarSource, /background:\s*barGradient/);
+  assert.match(usageBarSource, /var\(--monitor-success,\s*#22c55e\)/);
+  assert.match(usageBarSource, /var\(--monitor-warning,\s*#f59e0b\)/);
+  assert.match(usageBarSource, /var\(--monitor-danger,\s*#ef4444\)/);
+});

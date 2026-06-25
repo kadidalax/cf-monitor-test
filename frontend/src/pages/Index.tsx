@@ -11,7 +11,7 @@ import {
   StatusCardKey,
 } from '../utils/dashboardStatus';
 import { clearCachedPublicBootstrap, fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
-import { normalizePublicClients } from '../utils/publicClients';
+import { mergePublicClientPatch, normalizePublicClients } from '../utils/publicClients';
 import { fetchWithBootstrapRetry } from '../utils/api';
 import { getLocalStorageItem } from '../utils/browserStorage';
 import WebsiteMonitorList, { WebsiteMonitorSummary } from '../components/WebsiteMonitorList';
@@ -87,22 +87,7 @@ function mergeLiveClientMetadata(clients: ClientInfo[], liveClients: LiveDataMap
 }
 
 function applyPublicClientUpdate(current: ClientInfo[], detail?: PublicDataUpdateDetail): ClientInfo[] {
-  const clientDelta = detail?.clients;
-  if (!clientDelta) return current;
-  const remove = new Set(clientDelta.remove || []);
-  const upserts = normalizePublicClients(clientDelta.upsert || []);
-  for (const client of upserts) {
-    if (client.hidden) remove.add(client.uuid);
-  }
-  const byUuid = new Map(
-    current
-      .filter((client) => !remove.has(client.uuid))
-      .map((client) => [client.uuid, client]),
-  );
-  for (const client of upserts) {
-    if (!client.hidden) byUuid.set(client.uuid, { ...byUuid.get(client.uuid), ...client });
-  }
-  return [...byUuid.values()];
+  return mergePublicClientPatch(current, detail);
 }
 
 function normalizeWebsiteSummary(input: unknown): WebsiteMonitorSummary | null {

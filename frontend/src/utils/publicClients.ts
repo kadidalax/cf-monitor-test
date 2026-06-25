@@ -1,5 +1,12 @@
 import type { ClientInfo } from '../types';
 
+export type PublicClientPatchDetail = {
+  clients?: {
+    upsert?: unknown[];
+    remove?: string[];
+  };
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -69,4 +76,49 @@ export function normalizePublicClients(payload: unknown): ClientInfo[] {
     const client = normalizePublicClient(item);
     return client && !client.hidden ? [client] : [];
   });
+}
+
+export function mergePublicClientPatch(current: ClientInfo[], detail?: PublicClientPatchDetail): ClientInfo[] {
+  const clientDelta = detail?.clients;
+  if (!clientDelta) return current;
+
+  const remove = new Set(Array.isArray(clientDelta.remove) ? clientDelta.remove : []);
+  const byUuid = new Map(
+    current
+      .filter((client) => !remove.has(client.uuid))
+      .map((client) => [client.uuid, client]),
+  );
+
+  for (const raw of Array.isArray(clientDelta.upsert) ? clientDelta.upsert : []) {
+    const record = asRecord(raw);
+    const uuid = typeof record?.uuid === 'string' ? record.uuid.trim() : '';
+    if (!record || !uuid) continue;
+    if (record.hidden === true) {
+      byUuid.delete(uuid);
+      remove.add(uuid);
+      continue;
+    }
+
+    const normalized = normalizePublicClient(record);
+    if (!normalized || normalized.hidden) continue;
+
+    const existing = byUuid.get(uuid);
+    if (!existing) {
+      byUuid.set(uuid, normalized);
+      remove.delete(uuid);
+      continue;
+    }
+
+    const next: ClientInfo = { ...existing };
+    const nextRecord = next as unknown as Record<string, unknown>;
+    for (const key of Object.keys(normalized) as Array<keyof ClientInfo>) {
+      if (key === 'uuid' || Object.prototype.hasOwnProperty.call(record, key)) {
+        nextRecord[key] = normalized[key];
+      }
+    }
+    byUuid.set(uuid, next);
+    remove.delete(uuid);
+  }
+
+  return [...byUuid.values()];
 }

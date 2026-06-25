@@ -76,14 +76,17 @@ export function getOSIcon(osString: string): string {
 
 /** Get friendly OS name */
 export function getOSName(osString: string): string {
+  if (!osString?.trim()) return '-';
   const config = findOS(osString);
   if (config.name !== 'Unknown') return config.name;
-  if (!osString) return '-';
   return osString.trim().split(/[\s/]/)[0] || '-';
 }
 
 /** Get both icon and name */
 export function getOSDisplay(osString: string): { icon: string; name: string; image: string } {
+  if (!osString?.trim()) {
+    return { icon: defaultConfig.icon, name: '-', image: defaultConfig.image };
+  }
   const config = findOS(osString);
   return {
     icon: config.icon,
