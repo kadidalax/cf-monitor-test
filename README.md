@@ -68,7 +68,7 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 
 ### 3. 点击部署按钮
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor-test)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor-test/tree/dev)
 
 1. 点击上方的 **Deploy to Cloudflare**。
 2. 登录 Cloudflare。
