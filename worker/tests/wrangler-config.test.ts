@@ -83,6 +83,8 @@ test('package scripts verify frontend, Worker, and Agent without postgres depend
   assert.equal(rootPkg.scripts?.build, 'npm --prefix frontend run build && npm --prefix worker run build');
   assert.equal(rootPkg.scripts?.test, 'npm --prefix frontend test && npm --prefix worker test && cd agent && go test ./...');
   assert.equal(rootPkg.scripts?.verify, 'npm run lint && npm run build && npm test');
+  assert.match(rootPkg.scripts?.['verify:cloudflare'] || '', /--dry-run/);
+  assert.doesNotMatch(rootPkg.scripts?.['verify:cloudflare'] || '', /x-autoconfig|xAutoconfig/);
   assert.equal(workerPkg.scripts?.deploy, 'node ../scripts/deploy-cloudflare.mjs');
   assert.equal(workerPkg.dependencies?.postgres, undefined);
 });
