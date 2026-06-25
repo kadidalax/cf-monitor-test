@@ -239,7 +239,7 @@ export function buildAgentInstallCommand({
       if (nicInclude) args.push('-NicInclude', nicInclude);
       if (nicExclude) args.push('-NicExclude', nicExclude);
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
-        `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map(psQuote).join(' ')}"`;
+        `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}"`;
     }
     case 'macos': {
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
@@ -282,7 +282,7 @@ export function buildAgentUninstallAllCommand({
   switch (platform) {
     case 'windows':
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
-        `"iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' '-UninstallAll' '-Yes'"`;
+        `"iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes"`;
     case 'macos':
       return rootAwareBashPipe(
         `curl -fsSL ${shellQuote(scriptUrl('install-linux.sh'))}`,

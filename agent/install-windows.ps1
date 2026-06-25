@@ -8,8 +8,9 @@ param(
 
   [Alias("n")]
   [string]$Name = $env:COMPUTERNAME,
-  [int]$Interval = 3,
-  [int]$PingInterval = 60,
+  [Alias("Interval")]
+  [int]$ReportInterval = 3,
+  [int]$PingInterval = 120,
   [Alias("r")]
   [ValidateRange(1, 31)]
   [int]$TrafficResetDay = 1,
@@ -451,7 +452,7 @@ $runnerContent = @"
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 
-& "`$PSScriptRoot\cf-vps-monitor-agent.exe" --interval $Interval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay
+& "`$PSScriptRoot\cf-vps-monitor-agent.exe" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay
 exit `$LASTEXITCODE
 "@
 Set-Content -LiteralPath $runnerPath -Value $runnerContent -Encoding UTF8

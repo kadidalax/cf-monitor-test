@@ -266,6 +266,32 @@ SReclaimable:     40 kB
 	}
 }
 
+func TestMergeMemorySnapshotZerosContainerSwapWhenCgroupSwapMissing(t *testing.T) {
+	procMem := parseProcMeminfo(`MemTotal:       65563288 kB
+MemFree:        10000000 kB
+Buffers:          100000 kB
+Cached:          1000000 kB
+SwapCached:            0 kB
+SwapTotal:      65660924 kB
+SwapFree:       60813916 kB
+SReclaimable:     100000 kB
+`)
+	cgroup := memorySnapshot{
+		ramUsed:  42 * 1024 * 1024,
+		ramTotal: 512000000,
+		hasRAM:   true,
+	}
+
+	got := mergeMemorySnapshot(procMem, cgroup, true)
+
+	if !got.hasRAM || got.ramTotal != 512000000 || got.ramUsed != 42*1024*1024 {
+		t.Fatalf("merged ram = %#v, want cgroup ram", got)
+	}
+	if !got.hasSwap || got.swapTotal != 0 || got.swapUsed != 0 {
+		t.Fatalf("merged swap = %#v, want container swap cleared instead of host swap", got)
+	}
+}
+
 func TestKomariDiskPartitionsKeepRootAndDropVirtualMounts(t *testing.T) {
 	parts := []disk.PartitionStat{
 		{Device: "/dev/loop0", Mountpoint: "/", Fstype: "ext4"},

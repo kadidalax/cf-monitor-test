@@ -29,10 +29,29 @@ test('default install command uses short flags and omits default traffic day', (
   assert.match(source, /const args = \['-s', serverUrl, '-t', token \|\| '<TOKEN>'\]/);
   assert.match(source, /if \(trafficResetDay !== '1'\) args\.push\('-r', trafficResetDay\)/);
   assert.doesNotMatch(source, /'--traffic-reset-day', trafficResetDay/);
+  assert.match(linuxInstallerSource, /PING_INTERVAL="120"/);
+  assert.match(linuxInstallerSource, /--ping-interval SECONDS   Ping task poll interval, default: 120\./);
+  assert.match(windowsInstallerSource, /\[int\]\$PingInterval = 120/);
   assert.match(linuxInstallerSource, /-s\|--server\) SERVER=/);
   assert.match(linuxInstallerSource, /-t\|--token\) TOKEN=/);
   assert.match(linuxInstallerSource, /-n\|--name\) NODE_NAME=/);
   assert.match(linuxInstallerSource, /-i\|--instance-id\) INSTANCE_ID=/);
+});
+
+test('windows installer keeps -i reserved for instance ids', () => {
+  assert.doesNotMatch(source, /args\.map\(psQuote\)\.join\(' '\)/);
+  assert.match(source, /args\.map\(\(arg, index\) => index % 2 === 0 \? arg : psQuote\(arg\)\)\.join\(' '\)/);
+  assert.match(windowsInstallerSource, /\[Alias\("Interval"\)\]\s*\[int\]\$ReportInterval = 3/);
+  assert.doesNotMatch(windowsInstallerSource, /\[int\]\$Interval =/);
+  assert.match(windowsInstallerSource, /--interval \$ReportInterval --ping-interval \$PingInterval/);
+});
+
+test('macOS installer uses launchd instead of systemd', () => {
+  assert.match(linuxInstallerSource, /PLATFORM_OS="\$\(uname -s \| tr '\[:upper:\]' '\[:lower:\]'\)"/);
+  assert.match(linuxInstallerSource, /is_macos\(\)/);
+  assert.match(linuxInstallerSource, /\/Library\/LaunchDaemons\/\$\{SERVICE_NAME\}\.plist/);
+  assert.match(linuxInstallerSource, /launchctl bootstrap system "\$PLIST_FILE"/);
+  assert.match(linuxInstallerSource, /if \[\[ "\$DRY_RUN" != "1" && "\$\(id -u\)" -ne 0 \]\]/);
 });
 
 test('agent installers can download architecture-specific binaries from an explicit asset base', () => {

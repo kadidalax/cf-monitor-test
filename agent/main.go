@@ -1463,20 +1463,9 @@ func readCPUNameFromProc(path string) (string, error) {
 func readMemorySnapshot() memorySnapshot {
 	snapshot := memorySnapshot{}
 	if runtime.GOOS == "linux" {
-		if procMem, err := readProcMeminfo("/proc/meminfo"); err == nil {
-			snapshot = procMem
-		}
+		procMem, _ := readProcMeminfo("/proc/meminfo")
 		cgroup := readCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup")
-		if cgroup.hasRAM {
-			snapshot.ramUsed = cgroup.ramUsed
-			snapshot.ramTotal = cgroup.ramTotal
-			snapshot.hasRAM = true
-		}
-		if cgroup.hasSwap {
-			snapshot.swapUsed = cgroup.swapUsed
-			snapshot.swapTotal = cgroup.swapTotal
-			snapshot.hasSwap = true
-		}
+		snapshot = mergeMemorySnapshot(procMem, cgroup, isLinuxContainer())
 	}
 	if !snapshot.hasRAM {
 		if memInfo, err := mem.VirtualMemory(); err == nil {
@@ -1499,6 +1488,44 @@ func readMemorySnapshot() memorySnapshot {
 		snapshot.swapUsed = snapshot.swapTotal
 	}
 	return snapshot
+}
+
+func mergeMemorySnapshot(procMem memorySnapshot, cgroup memorySnapshot, containerized bool) memorySnapshot {
+	snapshot := procMem
+	if cgroup.hasRAM {
+		snapshot.ramUsed = cgroup.ramUsed
+		snapshot.ramTotal = cgroup.ramTotal
+		snapshot.hasRAM = true
+	}
+	if cgroup.hasSwap {
+		snapshot.swapUsed = cgroup.swapUsed
+		snapshot.swapTotal = cgroup.swapTotal
+		snapshot.hasSwap = true
+	} else if containerized && cgroup.hasRAM {
+		snapshot.swapUsed = 0
+		snapshot.swapTotal = 0
+		snapshot.hasSwap = true
+	}
+	if snapshot.ramUsed > snapshot.ramTotal {
+		snapshot.ramUsed = snapshot.ramTotal
+	}
+	if snapshot.swapUsed > snapshot.swapTotal {
+		snapshot.swapUsed = snapshot.swapTotal
+	}
+	return snapshot
+}
+
+func isLinuxContainer() bool {
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil && detectContainerFromCgroup(string(data)) != "" {
+		return true
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/dev/.lxc-boot-id"); err == nil {
+		return true
+	}
+	return false
 }
 
 func readProcMeminfo(path string) (memorySnapshot, error) {

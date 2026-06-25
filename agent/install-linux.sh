@@ -5,7 +5,7 @@ SERVER=""
 TOKEN=""
 NODE_NAME="$(hostname)"
 INTERVAL="3"
-PING_INTERVAL="60"
+PING_INTERVAL="120"
 TRAFFIC_RESET_DAY="1"
 MODE="websocket"
 INSTALL_DIR=""
@@ -36,6 +36,7 @@ NIC_EXCLUDE=""
 DISABLE_WEB_SSH="0"
 DISABLE_AUTO_UPDATE="0"
 IGNORE_UNSAFE_CERT="0"
+PLATFORM_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 usage() {
   cat <<'EOF'
@@ -48,7 +49,7 @@ Options:
   --token TOKEN             Agent token from admin panel. Required.
   --name NAME               Node name, default: hostname.
   --interval SECONDS        Report interval, default: 3.
-  --ping-interval SECONDS   Ping task poll interval, default: 60.
+  --ping-interval SECONDS   Ping task poll interval, default: 120.
   --traffic-reset-day DAY   Monthly traffic reset day, default: 1.
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default service and install directory.
@@ -89,6 +90,14 @@ run() {
   else
     "$@"
   fi
+}
+
+is_macos() {
+  [[ "$PLATFORM_OS" == "darwin" ]]
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 normalize_proxy_url() {
@@ -307,7 +316,11 @@ apply_instance_defaults() {
     SERVICE_NAME="cf-vps-monitor-agent-${base}"
   fi
   if [[ -z "$INSTALL_DIR" ]]; then
-    INSTALL_DIR="/opt/cf-vps-monitor/${base}"
+    if is_macos; then
+      INSTALL_DIR="/usr/local/cf-vps-monitor/${base}"
+    else
+      INSTALL_DIR="/opt/cf-vps-monitor/${base}"
+    fi
   fi
 }
 
@@ -315,6 +328,20 @@ uninstall_all_agents() {
   if [[ "$YES" != "1" ]]; then
     echo "--uninstall-all requires --yes because it removes every cf-vps-monitor-agent service and /opt/cf-vps-monitor." >&2
     exit 1
+  fi
+
+  if is_macos; then
+    local plist
+    for plist in /Library/LaunchDaemons/cf-vps-monitor-agent*.plist; do
+      [[ -e "$plist" ]] || continue
+      run launchctl bootout system "$plist" || true
+    done
+    run rm -f /Library/LaunchDaemons/cf-vps-monitor-agent*.plist
+    if [[ "$KEEP_FILES" != "1" ]]; then
+      run rm -rf /usr/local/cf-vps-monitor /opt/cf-vps-monitor
+    fi
+    echo "Uninstalled all CF VPS Monitor agent services and files."
+    return
   fi
 
   local unit
@@ -405,7 +432,7 @@ if [[ "$DRY_RUN" != "1" && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "$DRY_RUN" != "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
+if [[ "$DRY_RUN" != "1" && ! is_macos ]] && ! command -v systemctl >/dev/null 2>&1; then
   echo "systemd is required for this installer." >&2
   exit 1
 fi
@@ -429,9 +456,20 @@ fi
 
 ENV_FILE="/etc/${SERVICE_NAME}.env"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+PLIST_FILE="/Library/LaunchDaemons/${SERVICE_NAME}.plist"
+RUNNER_FILE="${INSTALL_DIR}/run-agent.sh"
 STATE_DIR="${INSTALL_DIR}/state"
 
 if [[ "$UNINSTALL" == "1" ]]; then
+  if is_macos; then
+    run launchctl bootout system "$PLIST_FILE" || true
+    run rm -f "$PLIST_FILE"
+    if [[ "$KEEP_FILES" != "1" ]]; then
+      run rm -rf "$INSTALL_DIR"
+    fi
+    echo "Uninstalled ${SERVICE_NAME}."
+    exit 0
+  fi
   run systemctl disable --now "$SERVICE_NAME" || true
   run rm -f "$UNIT_FILE"
   run rm -f "$ENV_FILE"
@@ -556,11 +594,15 @@ if [[ -z "$WORK_BIN" && "$BUILD_FROM_SOURCE" == "1" ]]; then
   fi
 fi
 
-ensure_agent_user
+if ! is_macos; then
+  ensure_agent_user
+fi
 run mkdir -p "$INSTALL_DIR"
 run install -m 0755 "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
 run mkdir -p "$STATE_DIR"
-run chown -R cf-vps-monitor-agent:cf-vps-monitor-agent "$STATE_DIR"
+if ! is_macos; then
+  run chown -R cf-vps-monitor-agent:cf-vps-monitor-agent "$STATE_DIR"
+fi
 
 reject_env_value() {
   local name="$1"
@@ -582,6 +624,64 @@ reject_env_value "mount-exclude" "$MOUNT_EXCLUDE"
 reject_env_value "nic-include" "$NIC_INCLUDE"
 reject_env_value "nic-exclude" "$NIC_EXCLUDE"
 reject_env_value "traffic-reset-day" "$TRAFFIC_RESET_DAY"
+
+if is_macos; then
+  if [[ "$DRY_RUN" != "1" ]] && ! command -v launchctl >/dev/null 2>&1; then
+    echo "launchctl is required for macOS installation." >&2
+    exit 1
+  fi
+
+  RUNNER_CONTENT=$(cat <<EOF
+#!/usr/bin/env bash
+set -e
+export CF_MONITOR_SERVER=$(shell_quote "$SERVER")
+export CF_MONITOR_TOKEN=$(shell_quote "$TOKEN")
+export CF_MONITOR_NAME=$(shell_quote "$NODE_NAME")
+export CF_MONITOR_MODE=$(shell_quote "$MODE")
+export CF_MONITOR_MOUNT_INCLUDE=$(shell_quote "$MOUNT_INCLUDE")
+export CF_MONITOR_MOUNT_EXCLUDE=$(shell_quote "$MOUNT_EXCLUDE")
+export CF_MONITOR_NIC_INCLUDE=$(shell_quote "$NIC_INCLUDE")
+export CF_MONITOR_NIC_EXCLUDE=$(shell_quote "$NIC_EXCLUDE")
+export CF_MONITOR_TRAFFIC_RESET_DAY=$(shell_quote "$TRAFFIC_RESET_DAY")
+export CF_MONITOR_TRAFFIC_STATE_FILE=$(shell_quote "${STATE_DIR}/traffic-state.json")
+exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+EOF
+)
+  write_file "$RUNNER_FILE" "700" "$RUNNER_CONTENT"
+
+  PLIST_CONTENT=$(cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${SERVICE_NAME}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${RUNNER_FILE}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${INSTALL_DIR}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/${SERVICE_NAME}.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/${SERVICE_NAME}.log</string>
+</dict>
+</plist>
+EOF
+)
+  write_file "$PLIST_FILE" "644" "$PLIST_CONTENT"
+  run launchctl bootout system "$PLIST_FILE" || true
+  run launchctl bootstrap system "$PLIST_FILE"
+  echo "Installed ${SERVICE_NAME}."
+  echo "Status: launchctl print system/${SERVICE_NAME}"
+  echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
+  exit 0
+fi
 
 ENV_CONTENT=$(cat <<EOF
 CF_MONITOR_SERVER=${SERVER}
