@@ -51,6 +51,10 @@ test('windows installer runs the console agent through Task Scheduler instead of
   assert.match(windowsInstallerSource, /Register-ScheduledTask/);
   assert.match(windowsInstallerSource, /Start-ScheduledTask/);
   assert.match(windowsInstallerSource, /Unregister-ScheduledTask/);
+  assert.match(windowsInstallerSource, /Resolve-Path -LiteralPath \$BinaryPath/);
+  assert.match(windowsInstallerSource, /takeown\.exe \/F \$InstallDir \/R \/A/);
+  assert.match(windowsInstallerSource, /Get-ChildItem -LiteralPath \$StateDir -Force -Recurse -File/);
+  assert.match(windowsInstallerSource, /`\$env:ComSpec \/d \/c `\$command/);
 });
 
 test('macOS installer uses launchd instead of systemd', () => {

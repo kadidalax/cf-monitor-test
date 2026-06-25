@@ -363,6 +363,7 @@ if ([string]::IsNullOrWhiteSpace($InstallDir) -or [System.IO.Path]::GetPathRoot(
 $targetExe = Join-Path $InstallDir "cf-vps-monitor-agent.exe"
 $runnerPath = Join-Path $InstallDir "run-agent.ps1"
 $StateDir = Join-Path $InstallDir "state"
+$AgentLogPath = Join-Path $StateDir "agent.log"
 
 if ($Uninstall) {
   $removedTask = Remove-AgentTask $ServiceName
@@ -460,7 +461,9 @@ if ($DryRun) {
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 New-Item -ItemType Directory -Force $StateDir | Out-Null
-Copy-Item $BinaryPath $targetExe -Force
+if ((Resolve-Path -LiteralPath $BinaryPath).Path -ne (Resolve-Path -LiteralPath $targetExe -ErrorAction SilentlyContinue).Path) {
+  Copy-Item $BinaryPath $targetExe -Force
+}
 
 $runnerContent = @"
 `$ErrorActionPreference = "Stop"
@@ -475,15 +478,28 @@ $runnerContent = @"
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 `$logPath = Join-Path `$PSScriptRoot "state\agent.log"
+`$runnerLogPath = Join-Path `$PSScriptRoot "state\runner.log"
 Set-Location `$PSScriptRoot
 
-& "`$PSScriptRoot\cf-vps-monitor-agent.exe" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay >> `$logPath 2>&1
-exit `$LASTEXITCODE
+try {
+  `$agentPath = Join-Path `$PSScriptRoot "cf-vps-monitor-agent.exe"
+  `$command = '"' + `$agentPath + '" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay >> "' + `$logPath + '" 2>&1'
+  & `$env:ComSpec /d /c `$command
+  `$exitCode = `$LASTEXITCODE
+} catch {
+  `$exitCode = 1
+  `$_.Exception.Message | Out-File -FilePath `$runnerLogPath -Append -Encoding UTF8
+}
+exit `$exitCode
 "@
 Set-Content -LiteralPath $runnerPath -Value $runnerContent -Encoding UTF8
-icacls $InstallDir /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-19:RX" /T | Out-Null
-icacls $StateDir /grant:r "*S-1-5-19:(OI)(CI)M" /T | Out-Null
-icacls $runnerPath /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-19:RX" | Out-Null
+takeown.exe /F $InstallDir /R /A /D Y 2>$null | Out-Null
+icacls $InstallDir /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-19:RX" "*S-1-5-19:(OI)(CI)RX" /T /C | Out-Null
+icacls $StateDir /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-19:M" "*S-1-5-19:(OI)(CI)M" /T /C | Out-Null
+New-Item -ItemType File -Force $AgentLogPath | Out-Null
+Get-ChildItem -LiteralPath $StateDir -Force -Recurse -File | ForEach-Object {
+  icacls $_.FullName /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-19:M" /C | Out-Null
+}
 
 [void](Remove-AgentTask $ServiceName)
 [void](Remove-LegacyService $ServiceName)
