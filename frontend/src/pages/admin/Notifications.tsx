@@ -18,6 +18,7 @@ type NotificationClient = {
   uuid: string;
   name?: string;
   ipv4?: string;
+  ipv6?: string;
   region?: string;
   expired_at?: string;
 };
@@ -65,6 +66,10 @@ function NotificationTableHeader({ label, unit }: { label: string; unit?: string
       {unit && <span className="notification-table-header-unit">{unit}</span>}
     </span>
   );
+}
+
+function clientDisplayIp(client: NotificationClient) {
+  return client.ipv4 || client.ipv6 || '';
 }
 
 export default function AdminNotifications() {
@@ -259,7 +264,7 @@ export default function AdminNotifications() {
     const term = searchTerm.toLowerCase();
     return clients.filter((c) =>
       c.name?.toLowerCase().includes(term) ||
-      c.ipv4?.toLowerCase().includes(term) ||
+      clientDisplayIp(c).toLowerCase().includes(term) ||
       c.region?.toLowerCase().includes(term)
     );
   }, [clients, searchTerm]);
@@ -862,6 +867,7 @@ export default function AdminNotifications() {
                 <Table.Body>
                   {filteredClients.map((client) => {
                     const notification = notificationMap.get(client.uuid);
+                    const displayIp = clientDisplayIp(client);
                     const enabled = notification?.enable || false;
                     const gracePeriod = notification?.grace_period || 180;
                     const lastNotified = notification?.last_notified;
@@ -887,7 +893,7 @@ export default function AdminNotifications() {
                         </Table.Cell>
                         <Table.Cell>
                           <Text size="2" weight="medium">{client.name || '未命名'}</Text>
-                          {client.ipv4 && <Text size="1" color="gray" ml="2">{client.ipv4}</Text>}
+                          {displayIp && <Text size="1" color="gray" ml="2">{displayIp}</Text>}
                         </Table.Cell>
                         <Table.Cell>
                           <Switch
@@ -950,6 +956,7 @@ export default function AdminNotifications() {
                 <Table.Body>
                   {filteredClients.map((client) => {
                     const notification = expiryNotificationMap.get(client.uuid);
+                    const displayIp = clientDisplayIp(client);
                     const enabled = notification?.enable || false;
                     const advanceDays = notification?.advance_days || 7;
                     const lastNotified = notification?.last_notified;
@@ -978,7 +985,7 @@ export default function AdminNotifications() {
                         </Table.Cell>
                         <Table.Cell>
                           <Text size="2" weight="medium">{client.name || '未命名'}</Text>
-                          {client.ipv4 && <Text size="1" color="gray" ml="2">{client.ipv4}</Text>}
+                          {displayIp && <Text size="1" color="gray" ml="2">{displayIp}</Text>}
                         </Table.Cell>
                         <Table.Cell>
                           <Switch

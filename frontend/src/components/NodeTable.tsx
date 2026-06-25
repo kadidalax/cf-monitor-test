@@ -298,14 +298,14 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
         className="node-table-root"
         variant="surface"
         size="1"
-        style={{ width: '100%', minWidth: 1066, tableLayout: 'fixed' }}
+        style={{ width: '100%', minWidth: 1146, tableLayout: 'fixed' }}
       >
         <Table.Header>
           <Table.Row>
             <Table.ColumnHeaderCell style={{ width: 36 }} />
-            <SortHeader column="name" style={{ width: 148 }}>名称</SortHeader>
-            <SortHeader column="os" style={{ width: 116 }}>系统</SortHeader>
-            <SortHeader column="status" style={{ width: 104 }}>状态</SortHeader>
+            <SortHeader column="name" style={{ width: 180 }}>名称</SortHeader>
+            <SortHeader column="os" style={{ width: 132 }}>系统</SortHeader>
+            <SortHeader column="status" style={{ width: 136 }}>状态</SortHeader>
             <SortHeader column="cpu" style={{ width: 82 }}>CPU</SortHeader>
             <SortHeader column="ram" style={{ width: 82 }}>内存</SortHeader>
             <SortHeader column="disk" style={{ width: 82 }}>硬盘</SortHeader>
@@ -365,7 +365,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                     </Flex>
                   </Table.Cell>
                   <Table.Cell className="node-table-status-cell">
-                    <Flex direction="column" gap="1" align="start">
+                    <Flex className="node-table-status-stack" gap="1" align="center">
                       <Badge color={isOnline ? 'green' : 'red'} variant="soft" size="1">
                         {isOnline ? '在线' : '离线'}
                       </Badge>

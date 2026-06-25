@@ -1464,6 +1464,7 @@ html[data-monitor-theme='next'] .node-network-value strong {
 .node-table-root .rt-TableCell,
 .node-table-root .rt-TableColumnHeaderCell {
   min-width: 0;
+  vertical-align: middle;
 }
 
 .node-table-name-cell {
@@ -1473,7 +1474,12 @@ html[data-monitor-theme='next'] .node-network-value strong {
 
 .node-table-name-cell .rt-Text {
   display: block;
-  max-width: 104px;
+  max-width: 136px;
+}
+
+.node-table-status-stack {
+  align-items: center;
+  white-space: nowrap;
 }
 
 .node-table-resource-cell {
