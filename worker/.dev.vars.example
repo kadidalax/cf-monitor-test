@@ -1,0 +1,10 @@
+SUPABASE_URL=https://PROJECT_REF.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=replace-with-service-role-key
+JWT_SECRET=replace-with-a-long-random-local-dev-secret-at-least-32-bytes
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-local-dev-password-at-least-12-bytes
+# Optional: reject Agent tokens older than this many days.
+# Leave unset until existing nodes have been rotated or verified.
+# AGENT_TOKEN_MAX_AGE_DAYS=180
+# Optional: allows full /api/setup/status diagnostics after setup; use at least 32 bytes.
+# SETUP_DIAGNOSTICS_TOKEN=replace-with-a-random-setup-diagnostics-token-32-bytes

@@ -1,0 +1,20 @@
+{
+  "name": "cf-vps-monitor-monorepo",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "worker"
+  ],
+  "scripts": {
+    "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
+    "build": "npm --prefix frontend run build && npm --prefix worker run build",
+    "test": "npm --prefix frontend test && npm --prefix worker test && cd agent && go test ./...",
+    "verify": "npm run lint && npm run build && npm test",
+    "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json --x-autoconfig=false",
+    "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
+    "dev:worker": "npm --prefix worker run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
+  }
+}
