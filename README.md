@@ -65,7 +65,6 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 3. 进入 **Project Settings** -> **API**。
 4. 复制 **Project URL**，部署时填入 `SUPABASE_URL`。
 5. 复制 **Secret key** 或 **service_role key**，部署时填入 `SUPABASE_SERVICE_ROLE_KEY`。
-6. 打开 [Supabase Access Tokens](https://supabase.com/dashboard/account/tokens)，创建 Personal Access Token。它只用于部署时自动初始化数据库，可填入 `SUPABASE_ACCESS_TOKEN`。
 
 ### 3. 点击部署按钮
 
@@ -91,38 +90,27 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 | `ADMIN_USERNAME` | Secret | 初始后台用户名 |
 | `ADMIN_PASSWORD` | Secret | 初始后台密码 |
 
-可选填写：
+### 5. 一键初始化数据库
 
-| 名称 | 类型 | 说明 |
-| --- | --- | --- |
-| `SUPABASE_ACCESS_TOKEN` | Secret | 用于部署时自动初始化 Supabase 数据库 |
+1. 打开 [Supabase Access Tokens](https://supabase.com/dashboard/account/tokens)。
+2. 创建一个 **1 hour** 有效期的 Personal Access Token。
+3. 打开 `https://你的 Worker 域名/db-init`。
+4. 粘贴 Access Token，点击 **一键初始化数据库**。
+5. 页面提示完成后，删除或等待该 Access Token 过期即可。
 
-如果 Cloudflare 部署页面没有显示 `SUPABASE_ACCESS_TOKEN`，可以先完成 Worker 部署，再按下面的“数据库初始化兜底”执行一次。
-
-### 5. 数据库自动初始化
-
-项目的 `npm run deploy` 会先构建并部署 Worker；如果环境里存在 `SUPABASE_ACCESS_TOKEN` 和 `SUPABASE_URL`，随后会自动执行 Supabase 初始化脚本。
-
-数据库初始化兜底：
-
-```bash
-npm ci
-npx supabase link --project-ref 你的项目ref --yes --workdir .
-npx supabase db push --linked --workdir . --yes
-```
-
-`项目ref` 是 Supabase URL 中的子域名，例如 `https://abcd1234.supabase.co` 的项目 ref 是 `abcd1234`。
+Access Token 只会在本次初始化请求中使用，不会写入 Worker 变量、Supabase 数据库或浏览器存储。
 
 ## 部署后使用
 
 1. 打开 Worker 地址，例如 `https://你的项目名.你的账号.workers.dev`。
-2. 进入 `/admin/login`。
-3. 使用部署时设置的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
-4. 进入后台“服务器”，添加节点。
-5. 打开节点的安装命令窗口，选择 Linux 或 Windows。
-6. 复制命令到 VPS 执行，等待 Agent 上线。
-7. 需要监控网站时，进入后台“网站”，添加 HTTP/HTTPS 或 TCP 检测目标。
-8. 需要通知时，进入后台“通知管理”，配置 Telegram 或 SMTP Email，再启用离线、到期或负载规则。
+2. 第一次部署后先进入 `/db-init` 初始化数据库。
+3. 进入 `/admin/login`。
+4. 使用部署时设置的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
+5. 进入后台“服务器”，添加节点。
+6. 打开节点的安装命令窗口，选择 Linux 或 Windows。
+7. 复制命令到 VPS 执行，等待 Agent 上线。
+8. 需要监控网站时，进入后台“网站”，添加 HTTP/HTTPS 或 TCP 检测目标。
+9. 需要通知时，进入后台“通知管理”，配置 Telegram 或 SMTP Email，再启用离线、到期或负载规则。
 
 同一台服务器可以安装多个 Agent 实例。每个节点的安装命令会带独立 `instance-id`，默认生成独立的服务名和安装目录，因此互不覆盖。只卸载某一个实例时，使用对应节点的卸载命令或手动指定 `instance-id`：
 
@@ -168,14 +156,6 @@ npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npm run deploy
 ```
 
-Windows PowerShell 自动初始化数据库：
-
-```powershell
-$env:SUPABASE_URL = "https://你的项目ref.supabase.co"
-$env:SUPABASE_ACCESS_TOKEN = "你的token"
-npm run deploy
-```
-
 ## 常用命令
 
 完整检查：
@@ -212,5 +192,5 @@ git clean -fdX frontend/dist worker/.tmp worker/.wrangler agent/.tmp release
 - [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)
 - [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/)
 - [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
-- [Supabase CLI](https://supabase.com/docs/guides/local-development/cli/getting-started)
+- [Supabase Management API](https://supabase.com/docs/reference/api/introduction)
 - [Supabase Data API Security](https://supabase.com/docs/guides/api/securing-your-api)

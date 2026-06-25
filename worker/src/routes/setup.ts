@@ -12,6 +12,7 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { validateSetupDiagnosticsToken } from '../utils/setup-diagnostics-token';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
+import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
 
 type SetupCheckStatus = 'ok' | 'warning' | 'error' | 'pending' | 'disabled';
 
@@ -25,9 +26,12 @@ const setupRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type SetupContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 const SETUP_STATUS_RATE_LIMIT_WINDOW_MS = 60_000;
 const SETUP_STATUS_RATE_LIMIT_MAX = 30;
+const SETUP_INIT_RATE_LIMIT_WINDOW_MS = 60 * 60_000;
+const SETUP_INIT_RATE_LIMIT_MAX = 5;
 const SETUP_DO_FETCH_TIMEOUT_MS = 1_000;
 const SETUP_ADMIN_CHECK_TIMEOUT_MS = 1_000;
 const localSetupRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+const SUPABASE_MANAGEMENT_API = 'https://api.supabase.com/v1';
 
 function requestIp(c: SetupContext): string {
   return getCloudflareClientIp(c);
@@ -97,47 +101,47 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
   }
 }
 
-function localSetupRateLimit(c: SetupContext, ip: string): Response | null {
+function localSetupRateLimit(c: SetupContext, ip: string, bucket: string, max: number, windowMs: number): Response | null {
   const now = Date.now();
   for (const [key, value] of localSetupRateLimitBuckets) {
     if (value.resetAt <= now) localSetupRateLimitBuckets.delete(key);
   }
 
-  const key = `setup-status:${ip}`;
+  const key = `${bucket}:${ip}`;
   const current = localSetupRateLimitBuckets.get(key);
   const state = !current || current.resetAt <= now
-    ? { count: 0, resetAt: now + SETUP_STATUS_RATE_LIMIT_WINDOW_MS }
+    ? { count: 0, resetAt: now + windowMs }
     : current;
   state.count += 1;
   localSetupRateLimitBuckets.set(key, state);
 
-  const remaining = Math.max(0, SETUP_STATUS_RATE_LIMIT_MAX - state.count);
+  const remaining = Math.max(0, max - state.count);
   const retryAfter = Math.max(1, Math.ceil((state.resetAt - now) / 1000));
-  c.header('X-RateLimit-Limit', String(SETUP_STATUS_RATE_LIMIT_MAX));
+  c.header('X-RateLimit-Limit', String(max));
   c.header('X-RateLimit-Remaining', String(remaining));
   c.header('X-RateLimit-Reset', String(Math.ceil(state.resetAt / 1000)));
-  return state.count > SETUP_STATUS_RATE_LIMIT_MAX ? rateLimitResponse(c, retryAfter) : null;
+  return state.count > max ? rateLimitResponse(c, retryAfter) : null;
 }
 
-async function setupStatusRateLimit(c: SetupContext): Promise<Response | null> {
+async function setupRateLimit(c: SetupContext, bucket: string, max: number, windowMs: number): Promise<Response | null> {
   const ip = requestIp(c);
   try {
     const namespace = c.env.RATE_LIMIT;
-    if (!namespace) return localSetupRateLimit(c, ip);
-    const doId = namespace.idFromName('setup-status');
+    if (!namespace) return localSetupRateLimit(c, ip, bucket, max, windowMs);
+    const doId = namespace.idFromName(bucket);
     const stub = namespace.get(doId);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        bucket: 'setup-status',
+        bucket,
         ip,
-        max: SETUP_STATUS_RATE_LIMIT_MAX,
-        windowMs: SETUP_STATUS_RATE_LIMIT_WINDOW_MS,
+        max,
+        windowMs,
       }),
     }));
     if (!response.ok) throw new Error(`DO rate limit HTTP ${response.status}`);
-    const result = await readRateLimitResult(response, { limit: SETUP_STATUS_RATE_LIMIT_MAX, remaining: 0 });
+    const result = await readRateLimitResult(response, { limit: max, remaining: 0 });
     if (!result) throw new Error('DO rate limit returned an invalid response');
     c.header('X-RateLimit-Limit', String(result.limit));
     c.header('X-RateLimit-Remaining', String(result.remaining));
@@ -145,8 +149,16 @@ async function setupStatusRateLimit(c: SetupContext): Promise<Response | null> {
     if (result.allowed) return null;
     return rateLimitResponse(c, result.retryAfter);
   } catch {
-    return localSetupRateLimit(c, ip);
+    return localSetupRateLimit(c, ip, bucket, max, windowMs);
   }
+}
+
+async function setupStatusRateLimit(c: SetupContext): Promise<Response | null> {
+  return setupRateLimit(c, 'setup-status', SETUP_STATUS_RATE_LIMIT_MAX, SETUP_STATUS_RATE_LIMIT_WINDOW_MS);
+}
+
+async function setupInitRateLimit(c: SetupContext): Promise<Response | null> {
+  return setupRateLimit(c, 'setup-init', SETUP_INIT_RATE_LIMIT_MAX, SETUP_INIT_RATE_LIMIT_WINDOW_MS);
 }
 
 function databaseConfigCheck(): SetupCheck {
@@ -248,6 +260,127 @@ async function adminAccountStatus(database: AppDatabase): Promise<'present' | 'a
   }
 }
 
+function supabaseProjectRef(env: Bindings): string | null {
+  const url = env.SUPABASE_URL?.trim().replace(/\/+$/, '') || '';
+  return url.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co$/i)?.[1] || null;
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function redactSetupInitError(value: unknown): string {
+  return sanitizeSetupDiagnosticDetail(String(value ?? '').replace(/\bsbp_[A-Za-z0-9_]+/g, 'sbp_[REDACTED]'));
+}
+
+function extractQueryRows(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) return payload.filter(row => row && typeof row === 'object') as Record<string, unknown>[];
+  if (!payload || typeof payload !== 'object') return [];
+  const body = payload as Record<string, unknown>;
+  for (const key of ['data', 'result', 'rows']) {
+    const value = body[key];
+    if (Array.isArray(value)) return value.filter(row => row && typeof row === 'object') as Record<string, unknown>[];
+  }
+  const nestedRows = body.result && typeof body.result === 'object'
+    ? (body.result as Record<string, unknown>).rows
+    : null;
+  return Array.isArray(nestedRows)
+    ? nestedRows.filter(row => row && typeof row === 'object') as Record<string, unknown>[]
+    : [];
+}
+
+async function runSupabaseQuery(projectRef: string, accessToken: string, query: string): Promise<unknown> {
+  const response = await fetch(`${SUPABASE_MANAGEMENT_API}/projects/${encodeURIComponent(projectRef)}/database/query`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await response.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) as unknown : null;
+  } catch {
+    body = null;
+  }
+  if (!response.ok) {
+    const detail = typeof body === 'object' && body && 'message' in body
+      ? String((body as { message?: unknown }).message)
+      : text || `Supabase Management API HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+  return body;
+}
+
+async function ensureSetupMigrationTable(projectRef: string, accessToken: string): Promise<void> {
+  await runSupabaseQuery(projectRef, accessToken, `
+create schema if not exists cfm_internal;
+create table if not exists cfm_internal.setup_migrations (
+  version text primary key,
+  name text not null,
+  checksum text not null,
+  applied_at timestamptz not null default now()
+);
+`);
+}
+
+async function listAppliedMigrations(projectRef: string, accessToken: string): Promise<Set<string>> {
+  const payload = await runSupabaseQuery(projectRef, accessToken, 'select version from cfm_internal.setup_migrations order by version;');
+  return new Set(
+    extractQueryRows(payload)
+      .map(row => typeof row.version === 'string' ? row.version : '')
+      .filter(Boolean),
+  );
+}
+
+function migrationQuery(migration: BundledMigration): string {
+  return `
+begin;
+select pg_advisory_xact_lock(86421025);
+insert into cfm_internal.setup_migrations (version, name, checksum)
+values (${sqlString(migration.version)}, ${sqlString(migration.name)}, ${sqlString(migration.checksum)});
+
+${migration.sql}
+
+commit;
+`;
+}
+
+async function applyBundledMigrations(projectRef: string, accessToken: string) {
+  await ensureSetupMigrationTable(projectRef, accessToken);
+  const applied = await listAppliedMigrations(projectRef, accessToken);
+  const results: Array<{ version: string; name: string; status: 'applied' | 'skipped' }> = [];
+
+  for (const migration of BUNDLED_SUPABASE_MIGRATIONS) {
+    if (applied.has(migration.version)) {
+      results.push({ version: migration.version, name: migration.name, status: 'skipped' });
+      continue;
+    }
+    try {
+      await runSupabaseQuery(projectRef, accessToken, migrationQuery(migration));
+      applied.add(migration.version);
+      results.push({ version: migration.version, name: migration.name, status: 'applied' });
+    } catch (error) {
+      const afterFailure = await listAppliedMigrations(projectRef, accessToken).catch(() => applied);
+      if (afterFailure.has(migration.version)) {
+        applied.add(migration.version);
+        results.push({ version: migration.version, name: migration.name, status: 'skipped' });
+        continue;
+      }
+      throw new Error(`${migration.version}: ${redactSetupInitError(error)}`);
+    }
+  }
+
+  return {
+    total: BUNDLED_SUPABASE_MIGRATIONS.length,
+    applied: results.filter(item => item.status === 'applied').length,
+    skipped: results.filter(item => item.status === 'skipped').length,
+    results,
+  };
+}
+
 function limitedSetupResponse(
   c: SetupContext,
   ok: boolean,
@@ -345,6 +478,44 @@ setupRoutes.get('/status', async (c) => {
     checked_at: new Date().toISOString(),
     checks,
   }, ok ? 200 : 503);
+});
+
+setupRoutes.get('/database/init', (c) => {
+  const projectRef = supabaseProjectRef(c.env);
+  return c.json({
+    ok: Boolean(projectRef),
+    project_ref: projectRef,
+    migration_count: BUNDLED_SUPABASE_MIGRATIONS.length,
+  }, projectRef ? 200 : 503);
+});
+
+setupRoutes.post('/database/init', async (c) => {
+  const limited = await setupInitRateLimit(c);
+  if (limited) return limited;
+
+  const projectRef = supabaseProjectRef(c.env);
+  if (!projectRef) {
+    return c.json({ error: 'SUPABASE_URL is not configured as a Supabase project URL.' }, 503);
+  }
+
+  let payload: { accessToken?: unknown };
+  try {
+    payload = await c.req.json() as { accessToken?: unknown };
+  } catch {
+    return c.json({ error: 'Invalid JSON body.' }, 400);
+  }
+
+  const accessToken = typeof payload.accessToken === 'string' ? payload.accessToken.trim() : '';
+  if (!accessToken || accessToken.length > 4096) {
+    return c.json({ error: 'Supabase Access Token is required.' }, 400);
+  }
+
+  try {
+    const result = await applyBundledMigrations(projectRef, accessToken);
+    return c.json({ success: true, project_ref: projectRef, ...result });
+  } catch (error) {
+    return c.json({ error: redactSetupInitError(error) }, 500);
+  }
 });
 
 export { setupRoutes };

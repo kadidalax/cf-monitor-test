@@ -11,7 +11,6 @@ const requiredSecrets = ['JWT_SECRET', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SUPA
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const keepsExistingVars = deployArgs.includes('--keep-vars');
-const skipMigrations = deployArgs.includes('--skip-migrations');
 const wranglerDeployArgs = deployArgs.filter(arg => arg !== '--skip-migrations');
 
 function runWrangler(args, options = {}) {
@@ -40,10 +39,6 @@ function resolveSupabaseUrl({ allowDryRunFallback = false } = {}) {
     fail('SUPABASE_URL must be set to a real Supabase project URL before deploying.');
   }
   return url.replace(/\/$/, '');
-}
-
-function supabaseProjectRef() {
-  return resolveSupabaseUrl().match(/^https:\/\/([a-z0-9-]+)\.supabase\.co$/i)?.[1] || '';
 }
 
 function writeDeployConfig() {
@@ -77,29 +72,6 @@ function checkSecrets() {
   }
 }
 
-function runSupabase(args) {
-  return spawnSync('supabase', args, {
-    cwd: root,
-    encoding: 'utf8',
-    stdio: 'inherit',
-    env: process.env,
-  });
-}
-
-function migrateSupabase() {
-  if (!process.env.SUPABASE_ACCESS_TOKEN?.trim()) {
-    fail('SUPABASE_ACCESS_TOKEN is required for Supabase migrations. Use --skip-migrations to deploy without pushing migrations.');
-  }
-  const projectRef = supabaseProjectRef();
-  if (!projectRef) fail('Could not infer Supabase project ref from SUPABASE_URL.');
-
-  const link = runSupabase(['link', '--project-ref', projectRef, '--yes', '--workdir', '.']);
-  if (link.status !== 0) fail('Supabase project link failed.');
-
-  const push = runSupabase(['db', 'push', '--linked', '--workdir', '.', '--yes']);
-  if (push.status !== 0) fail('Supabase migration push failed.');
-}
-
 writeDeployConfig();
 
 if (isDryRun) {
@@ -111,11 +83,7 @@ if (!keepsExistingVars) {
   checkSecrets();
 }
 
-if (skipMigrations) {
-  console.log('Skipping Supabase migrations because --skip-migrations was provided.');
-} else {
-  migrateSupabase();
-}
+console.log('Deploying Worker. Initialize the database after deploy at /db-init.');
 
 const deploy = runWrangler(['deploy', '--config', deployConfig, ...wranglerDeployArgs], { stdio: 'inherit' });
 if (deploy.status !== 0) process.exit(deploy.status ?? 1);

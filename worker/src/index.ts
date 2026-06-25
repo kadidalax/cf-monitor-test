@@ -129,8 +129,17 @@ function databaseStartupErrorResponse(request: Request, error: unknown): Respons
 }
 
 function canServeWithoutDatabaseStartup(pathname: string): boolean {
-  return pathname === '/ping' ||
+  return pathname === '/db-init' ||
+    pathname === '/assets/' ||
+    pathname.startsWith('/assets/') ||
+    pathname === '/favicon.ico' ||
+    pathname === '/favicon-16x16.png' ||
+    pathname === '/favicon-32x32.png' ||
+    pathname === '/apple-touch-icon.png' ||
+    pathname === '/app-icon.png' ||
+    pathname === '/ping' ||
     pathname === '/api/setup/status' ||
+    pathname === '/api/setup/database/init' ||
     pathname === '/api/version' ||
     pathname === '/agent/install-linux.sh' ||
     pathname === '/agent/install-windows.ps1' ||

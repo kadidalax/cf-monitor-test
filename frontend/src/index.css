@@ -3748,6 +3748,43 @@ html[data-monitor-theme='next'] .node-network-value strong {
   box-shadow: 0 4px 16px rgba(0,0,0,0.12);
 }
 
+.db-init-card {
+  max-width: 520px;
+}
+
+.db-init-meta {
+  justify-content: center;
+}
+
+.db-init-result {
+  padding: 12px;
+  border: 1px solid var(--gray-a6);
+  border-radius: 8px;
+  background: var(--gray-a2);
+}
+
+.db-init-result.is-success {
+  color: var(--green-11);
+  border-color: var(--green-a6);
+  background: var(--green-a2);
+}
+
+.db-init-result.is-error {
+  color: var(--red-11);
+  border-color: var(--red-a6);
+  background: var(--red-a2);
+}
+
+.db-init-log {
+  max-height: 180px;
+  overflow: auto;
+  color: var(--gray-11);
+}
+
+.db-init-spin {
+  animation: spin 0.8s linear infinite;
+}
+
 /* ========== Scrollbar ========== */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }

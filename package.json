@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
+    "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
     "test": "cd agent && go test ./...",
     "verify": "npm run lint && npm run build && npm test",
@@ -16,9 +17,6 @@
     "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
     "dev:worker": "npm --prefix worker run dev",
     "dev:frontend": "npm --prefix frontend run dev"
-  },
-  "devDependencies": {
-    "supabase": "^2.107.0"
   },
   "cloudflare": {
     "bindings": {
