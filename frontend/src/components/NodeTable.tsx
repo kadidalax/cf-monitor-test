@@ -298,7 +298,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
         className="node-table-root"
         variant="surface"
         size="1"
-        style={{ width: '100%', minWidth: 1146, tableLayout: 'fixed' }}
+        style={{ width: '100%', minWidth: 1254, tableLayout: 'fixed' }}
       >
         <Table.Header>
           <Table.Row>
@@ -306,9 +306,9 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
             <SortHeader column="name" style={{ width: 180 }}>名称</SortHeader>
             <SortHeader column="os" style={{ width: 132 }}>系统</SortHeader>
             <SortHeader column="status" style={{ width: 136 }}>状态</SortHeader>
-            <SortHeader column="cpu" style={{ width: 82 }}>CPU</SortHeader>
-            <SortHeader column="ram" style={{ width: 82 }}>内存</SortHeader>
-            <SortHeader column="disk" style={{ width: 82 }}>硬盘</SortHeader>
+            <SortHeader column="cpu" style={{ width: 118 }}>CPU</SortHeader>
+            <SortHeader column="ram" style={{ width: 118 }}>内存</SortHeader>
+            <SortHeader column="disk" style={{ width: 118 }}>硬盘</SortHeader>
             <SortHeader column="network" style={{ width: 142 }}>网络</SortHeader>
             <SortHeader column="price" style={{ width: 108 }}>价格</SortHeader>
             <SortHeader column="traffic" style={{ width: 166 }}>流量</SortHeader>

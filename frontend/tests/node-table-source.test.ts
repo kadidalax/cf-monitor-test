@@ -23,3 +23,14 @@ test('public node table keeps identity and status content on one centered row', 
   assert.match(statusRule, /align-items:\s*center/);
   assert.match(statusRule, /white-space:\s*nowrap/);
 });
+
+test('public node table shows resource percentages beside progress bars', () => {
+  assert.match(source, /SortHeader column="cpu" style=\{\{ width: 118 \}\}/);
+  assert.match(source, /SortHeader column="ram" style=\{\{ width: 118 \}\}/);
+  assert.match(source, /SortHeader column="disk" style=\{\{ width: 118 \}\}/);
+
+  const cellRule = rule('.node-table-resource-cell');
+  assert.match(cellRule, /display:\s*grid/);
+  assert.match(cellRule, /grid-template-columns:\s*minmax\(58px,\s*1fr\) max-content/);
+  assert.match(cellRule, /align-items:\s*center/);
+});

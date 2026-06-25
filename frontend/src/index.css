@@ -1483,8 +1483,17 @@ html[data-monitor-theme='next'] .node-network-value strong {
 }
 
 .node-table-resource-cell {
-  width: 72px;
+  width: 108px;
   min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(58px, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-table-resource-cell .rt-Text {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .node-table-root .rt-Badge span {
