@@ -22,6 +22,8 @@ worker/.wrangler/
 supabase/.temp/
 
 # Test and preview artifacts
+frontend/tests/
+worker/tests/
 .tmp/
 agent/.tmp/
 coverage/

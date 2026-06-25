@@ -35,7 +35,7 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 - `worker/`: Hono API、Cloudflare Worker、Durable Objects、Cron Triggers、Supabase HTTP Data API/RPC。
 - `agent/`: Go Agent，支持 WebSocket 和 HTTP 上报，支持 Linux/Windows 安装脚本。
 - `supabase/migrations/`: 数据表、索引、RLS、RPC、授权和安全函数。
-- `.github/workflows/`: 测试和 Agent Release，不负责部署到 Cloudflare。
+- `.github/workflows/`: Agent Release，不负责部署到 Cloudflare。
 
 ## 安全设计
 
@@ -124,7 +124,18 @@ npx supabase db push --linked --workdir . --yes
 7. 需要监控网站时，进入后台“网站”，添加 HTTP/HTTPS 或 TCP 检测目标。
 8. 需要通知时，进入后台“通知管理”，配置 Telegram 或 SMTP Email，再启用离线、到期或负载规则。
 
-Linux Agent 使用 `install-linux.sh`，Windows Agent 使用 `install-windows.ps1`。发布新的 Agent 二进制时，进入 GitHub 仓库 **Actions** -> **Agent Release**，手动输入版本号，例如 `v2.0.1`。
+同一台服务器可以安装多个 Agent 实例。每个节点的安装命令会带独立 `instance-id`，默认生成独立的服务名和安装目录，因此互不覆盖。只卸载某一个实例时，使用对应节点的卸载命令或手动指定 `instance-id`：
+
+```bash
+sudo ./install-linux.sh --uninstall -i 实例ID
+```
+
+```powershell
+.\install-windows.ps1 -Uninstall -i '实例ID'
+```
+
+只有执行 `--uninstall-all --yes` 或 `-UninstallAll -Yes` 才会清理本机全部 CF VPS Monitor Agent 实例。
+
 
 ## 本地开发
 

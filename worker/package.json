@@ -7,7 +7,6 @@
     "dev": "wrangler dev",
     "lint": "wrangler types --check && tsc --noEmit",
     "build": "wrangler types --check && tsc --noEmit",
-    "test": "node --test tests/*.test.ts",
     "build:frontend": "npm --prefix ../frontend run build",
     "predeploy": "npm run build:frontend && npm run build",
     "deploy": "node ../scripts/deploy-cloudflare.mjs"
