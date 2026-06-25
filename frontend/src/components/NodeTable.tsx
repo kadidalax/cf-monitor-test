@@ -174,7 +174,7 @@ function ExpandedNodeDetails({
           <DetailSection title="网络与流量">
             <DetailRow
               label="当前速率"
-              value={`↑ ${formatSpeed(live?.net_in || 0)} ↓ ${formatSpeed(live?.net_out || 0)}`}
+              value={`↑ ${formatSpeed(live?.net_out || 0)} ↓ ${formatSpeed(live?.net_in || 0)}`}
             />
             <DetailRow
               label="总流量"
@@ -405,7 +405,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                   </Table.Cell>
                   <Table.Cell>
                     <Text size="2" style={{ whiteSpace: 'nowrap' }}>
-                      ↑ {formatSpeed(live?.net_in || 0)} ↓ {formatSpeed(live?.net_out || 0)}
+                      ↑ {formatSpeed(live?.net_out || 0)} ↓ {formatSpeed(live?.net_in || 0)}
                     </Text>
                   </Table.Cell>
                   <Table.Cell>
