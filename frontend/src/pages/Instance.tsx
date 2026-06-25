@@ -272,6 +272,7 @@ export default function Instance() {
 
   const chartData = buildMonitorChartData(records);
   const chartRenderData = getMonitorChartRenderData(chartData, timeRangeMs[timeRange], recordsRangeEnd);
+  const monitorXAxisDomain = [recordsRangeEnd - timeRangeMs[timeRange], recordsRangeEnd] as [number, number];
 
   const gpuChartData = gpuRecords.map((r) => ({
     time: new Date(r.time).getTime(),
@@ -358,7 +359,7 @@ export default function Instance() {
                   <XAxis
                     dataKey="time"
                     type="number"
-                    domain={['dataMin', 'dataMax']}
+                    domain={monitorXAxisDomain}
                     tickFormatter={chartTimeFormatter}
                     fontSize={12}
                     minTickGap={28}
@@ -385,7 +386,7 @@ export default function Instance() {
                   <XAxis
                     dataKey="time"
                     type="number"
-                    domain={['dataMin', 'dataMax']}
+                    domain={monitorXAxisDomain}
                     tickFormatter={chartTimeFormatter}
                     fontSize={12}
                     minTickGap={28}
@@ -408,7 +409,7 @@ export default function Instance() {
                   <XAxis
                     dataKey="time"
                     type="number"
-                    domain={['dataMin', 'dataMax']}
+                    domain={monitorXAxisDomain}
                     tickFormatter={chartTimeFormatter}
                     fontSize={12}
                     minTickGap={28}
@@ -431,7 +432,7 @@ export default function Instance() {
                   <XAxis
                     dataKey="time"
                     type="number"
-                    domain={['dataMin', 'dataMax']}
+                    domain={monitorXAxisDomain}
                     tickFormatter={chartTimeFormatter}
                     fontSize={12}
                     minTickGap={28}
@@ -453,7 +454,7 @@ export default function Instance() {
                   <XAxis
                     dataKey="time"
                     type="number"
-                    domain={['dataMin', 'dataMax']}
+                    domain={monitorXAxisDomain}
                     tickFormatter={chartTimeFormatter}
                     fontSize={12}
                     minTickGap={28}
