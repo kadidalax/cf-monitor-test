@@ -2188,6 +2188,7 @@ export class LiveDataDO {
     nowMs: number,
   ): Promise<PingPersistenceResult[]> {
     const accepted: PingPersistenceResult[] = [];
+    const dueResults: PingPersistenceResult[] = [];
     for (const result of results) {
       const minIntervalMs = this.pingResultIntervalMs();
       const key = this.pingResultStateKey(clientId, result.taskId);
@@ -2200,11 +2201,12 @@ export class LiveDataDO {
         ...state,
         lastAcceptedMs: nowMs,
       });
+      dueResults.push(result);
       if (!shouldPersist) {
         continue;
       }
       accepted.push(result);
     }
-    return accepted;
+    return accepted.length > 0 ? dueResults : [];
   }
 }
