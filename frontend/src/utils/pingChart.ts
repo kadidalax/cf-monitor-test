@@ -248,6 +248,10 @@ export function getPingValues(series: PingTaskSeries[]) {
   );
 }
 
+export function getPingSeriesWithRecords(series: PingTaskSeries[]) {
+  return series.filter((item) => item.records.length > 0);
+}
+
 export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
   const values = getPingValues(series);
   if (values.length === 0) return [0, 100];

@@ -14,6 +14,7 @@ import {
   fetchPingTaskSeries,
   formatPingMs,
   getPingSeriesAverage,
+  getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
   PingTaskSeries,
@@ -72,15 +73,15 @@ export default function MiniPingChart({
     return () => controller.abort();
   }, [limit, rangeHours, uuid]);
 
-  const chartRows = useMemo(() => buildPingChartRows(series), [series]);
-  const seriesWithData = useMemo(
-    () => series.filter((item) => item.records.some((record) => record.value >= 0)),
+  const seriesWithRecords = useMemo(
+    () => getPingSeriesWithRecords(series),
     [series],
   );
-  const yAxisDomain = useMemo(() => getPingYAxisDomain(seriesWithData), [seriesWithData]);
+  const chartRows = useMemo(() => buildPingChartRows(seriesWithRecords), [seriesWithRecords]);
+  const yAxisDomain = useMemo(() => getPingYAxisDomain(seriesWithRecords), [seriesWithRecords]);
   const xAxisDomain = useMemo(
-    () => getPingTimeDomain(seriesWithData, rangeHours),
-    [rangeHours, seriesWithData],
+    () => getPingTimeDomain(seriesWithRecords, rangeHours),
+    [rangeHours, seriesWithRecords],
   );
 
   const contentWidth = typeof width === 'number' ? `${width}px` : width;
@@ -109,7 +110,7 @@ export default function MiniPingChart({
     );
   }
 
-  if (chartRows.length === 0 || seriesWithData.length === 0) {
+  if (chartRows.length === 0 || seriesWithRecords.length === 0) {
     return (
       <Flex direction="column" gap="2" style={{ width: contentWidth, minHeight: 120, padding: 14 }}>
         <Text size="2" weight="bold">Ping 延迟</Text>
@@ -164,7 +165,7 @@ export default function MiniPingChart({
                 fontSize: 12,
               }}
             />
-            {seriesWithData.map((item) => (
+            {seriesWithRecords.map((item) => (
               <Line
                 key={item.task.key}
                 type="monotone"
@@ -185,7 +186,7 @@ export default function MiniPingChart({
       </Box>
 
       <Box className="mini-ping-chart-legend">
-        {seriesWithData.map((item) => {
+        {seriesWithRecords.map((item) => {
           const avg = getPingSeriesAverage(item.records);
           return (
             <Box
@@ -214,7 +215,7 @@ export default function MiniPingChart({
                 </Text>
               </Flex>
               <Text size="1" color="gray" className="mini-ping-chart-legend-stat">
-                平均 {formatPingMs(avg)}
+                {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
               </Text>
             </Box>
           );
