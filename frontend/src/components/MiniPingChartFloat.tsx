@@ -23,11 +23,8 @@ export default function MiniPingChartFloat({
   const [open, setOpen] = useState(false);
 
   const handleTriggerClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
-    const wasDefaultPrevented = event.defaultPrevented;
     trigger.props.onClick?.(event);
-    event.preventDefault();
     event.stopPropagation();
-    if (!wasDefaultPrevented) setOpen((current) => !current);
   }, [trigger]);
 
   const handleTriggerPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
@@ -38,15 +35,13 @@ export default function MiniPingChartFloat({
   const triggerElement = React.cloneElement(trigger, {
     onClick: handleTriggerClick,
     onPointerDown: handleTriggerPointerDown,
-    'aria-expanded': open,
-    'aria-haspopup': 'dialog',
   });
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <PopoverPrimitive.Anchor asChild>
+      <PopoverPrimitive.Trigger asChild>
         {triggerElement}
-      </PopoverPrimitive.Anchor>
+      </PopoverPrimitive.Trigger>
       <Popover.Content
         align="end"
         sideOffset={8}
