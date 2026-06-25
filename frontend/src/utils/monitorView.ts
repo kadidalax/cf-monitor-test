@@ -89,8 +89,8 @@ export function getNodeStatsSummary(
 
     totalUp += record.net_total_up || 0;
     totalDown += record.net_total_down || 0;
-    totalSpeedUp += record.net_in || 0;
-    totalSpeedDown += record.net_out || 0;
+    totalSpeedUp += record.net_out || 0;
+    totalSpeedDown += record.net_in || 0;
   }
 
   return {

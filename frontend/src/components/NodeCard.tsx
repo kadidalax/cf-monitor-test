@@ -198,8 +198,8 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
   const diskPct = diskTotal > 0 ? (d.disk / diskTotal) * 100 : 0;
   const totalUp = d.net_total_up || 0;
   const totalDown = d.net_total_down || 0;
-  const uploadSpeed = formatBytes(d.net_in || 0);
-  const downloadSpeed = formatBytes(d.net_out || 0);
+  const uploadSpeed = formatBytes(d.net_out || 0);
+  const downloadSpeed = formatBytes(d.net_in || 0);
   const osConfig = getOSDisplay(client.os || '');
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
   const uptimeLabel = online && d.uptime > 0 ? formatUptime(d.uptime) : '-';
