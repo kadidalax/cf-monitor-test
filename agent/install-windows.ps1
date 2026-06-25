@@ -287,20 +287,49 @@ function Test-DownloadedChecksum {
   }
 }
 
+function Remove-AgentTask {
+  param([string]$Name)
+  $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+  if (-not $task) {
+    return $false
+  }
+  Invoke-Step "Stop-ScheduledTask -TaskName `"$Name`"" {
+    Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+  }
+  Invoke-Step "Unregister-ScheduledTask -TaskName `"$Name`" -Confirm:`$false" {
+    Unregister-ScheduledTask -TaskName $Name -Confirm:$false
+  }
+  return $true
+}
+
+function Remove-LegacyService {
+  param([string]$Name)
+  $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
+  if (-not $existing) {
+    return $false
+  }
+  if ($existing.Status -ne "Stopped") {
+    Invoke-Step "Stop-Service -Name `"$Name`" -Force" {
+      Stop-Service -Name $Name -Force
+    }
+  }
+  Invoke-Step "sc.exe delete `"$Name`"" {
+    sc.exe delete $Name | Out-Null
+  }
+  return $true
+}
+
 function Uninstall-AllAgents {
   if (-not $Yes) {
-    throw "-UninstallAll requires -Yes because it removes every CFVpsMonitorAgent* service and C:\Program Files\CF VPS Monitor."
+    throw "-UninstallAll requires -Yes because it removes every CFVpsMonitorAgent* task/service and C:\Program Files\CF VPS Monitor."
+  }
+  $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like "CFVpsMonitorAgent*" }
+  foreach ($task in $tasks) {
+    [void](Remove-AgentTask $task.TaskName)
   }
   $services = Get-Service -Name "CFVpsMonitorAgent*" -ErrorAction SilentlyContinue
   foreach ($service in $services) {
-    if ($service.Status -ne "Stopped") {
-      Invoke-Step "Stop-Service -Name `"$($service.Name)`" -Force" {
-        Stop-Service -Name $service.Name -Force
-      }
-    }
-    Invoke-Step "sc.exe delete `"$($service.Name)`"" {
-      sc.exe delete $service.Name | Out-Null
-    }
+    [void](Remove-LegacyService $service.Name)
   }
   if (-not $KeepFiles) {
     $rootDir = "$env:ProgramFiles\CF VPS Monitor"
@@ -310,7 +339,7 @@ function Uninstall-AllAgents {
       }
     }
   }
-  Write-Host "Uninstalled all CF VPS Monitor agent services and files."
+  Write-Host "Uninstalled all CF VPS Monitor agent tasks/services and files."
 }
 
 if ($UninstallAll) {
@@ -323,6 +352,9 @@ Set-InstanceDefaults
 if ([string]::IsNullOrWhiteSpace($ServiceName)) {
   throw "-ServiceName cannot be empty."
 }
+if ($ServiceName -match '[\\/]') {
+  throw "-ServiceName cannot contain slash or backslash."
+}
 
 if ([string]::IsNullOrWhiteSpace($InstallDir) -or [System.IO.Path]::GetPathRoot($InstallDir) -eq $InstallDir) {
   throw "-InstallDir cannot be empty or a drive root."
@@ -333,18 +365,10 @@ $runnerPath = Join-Path $InstallDir "run-agent.ps1"
 $StateDir = Join-Path $InstallDir "state"
 
 if ($Uninstall) {
-  $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  if ($existing) {
-    if ($existing.Status -ne "Stopped") {
-      Invoke-Step "Stop-Service -Name `"$ServiceName`" -Force" {
-        Stop-Service -Name $ServiceName -Force
-      }
-    }
-    Invoke-Step "sc.exe delete `"$ServiceName`"" {
-      sc.exe delete $ServiceName | Out-Null
-    }
-  } else {
-    Write-Host "Service not found: $ServiceName"
+  $removedTask = Remove-AgentTask $ServiceName
+  $removedService = Remove-LegacyService $ServiceName
+  if (-not $removedTask -and -not $removedService) {
+    Write-Host "Task/service not found: $ServiceName"
   }
 
   if (-not $KeepFiles) {
@@ -420,18 +444,17 @@ if (-not (Test-Path $BinaryPath) -and -not $DryRun) {
 }
 
 $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$binaryPathName = '"' + $powerShellPath + '" -NoProfile -ExecutionPolicy Bypass -File "' + $runnerPath + '"'
+$taskArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $runnerPath + '"'
 
 if ($DryRun) {
   Write-Host "[dry-run] New-Item -ItemType Directory -Force `"$InstallDir`""
   Write-Host "[dry-run] New-Item -ItemType Directory -Force `"$StateDir`""
   Write-Host "[dry-run] Copy-Item `"$BinaryPath`" `"$targetExe`""
-  Write-Host "[dry-run] Write service runner `"$runnerPath`" (token hidden)"
+  Write-Host "[dry-run] Write scheduled task runner `"$runnerPath`" (token hidden)"
   Write-Host "[dry-run] Lock ACL on `"$InstallDir`" to SYSTEM, Administrators, and LocalService read/execute; grant LocalService modify on `"$StateDir`""
-  Write-Host "[dry-run] Stop/delete existing service if present: `"$ServiceName`""
-  Write-Host "[dry-run] New-Service -Name `"$ServiceName`" -BinaryPathName $binaryPathName -StartupType Automatic"
-  Write-Host "[dry-run] sc.exe config `"$ServiceName`" obj= `"NT AUTHORITY\LocalService`""
-  Write-Host "[dry-run] Start-Service -Name `"$ServiceName`""
+  Write-Host "[dry-run] Remove existing scheduled task and legacy service if present: `"$ServiceName`""
+  Write-Host "[dry-run] Register-ScheduledTask -TaskName `"$ServiceName`" -User `"NT AUTHORITY\LOCAL SERVICE`""
+  Write-Host "[dry-run] Start-ScheduledTask -TaskName `"$ServiceName`""
   exit 0
 }
 
@@ -451,8 +474,10 @@ $runnerContent = @"
 `$env:CF_MONITOR_NIC_EXCLUDE = $(ConvertTo-PowerShellLiteral $NicExclude)
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
+`$logPath = Join-Path `$PSScriptRoot "state\agent.log"
+Set-Location `$PSScriptRoot
 
-& "`$PSScriptRoot\cf-vps-monitor-agent.exe" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay
+& "`$PSScriptRoot\cf-vps-monitor-agent.exe" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay >> `$logPath 2>&1
 exit `$LASTEXITCODE
 "@
 Set-Content -LiteralPath $runnerPath -Value $runnerContent -Encoding UTF8
@@ -460,21 +485,26 @@ icacls $InstallDir /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1
 icacls $StateDir /grant:r "*S-1-5-19:(OI)(CI)M" /T | Out-Null
 icacls $runnerPath /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-19:RX" | Out-Null
 
-$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-  if ($existing.Status -ne "Stopped") {
-    Stop-Service -Name $ServiceName -Force
-  }
-  sc.exe delete $ServiceName | Out-Null
-  Start-Sleep -Seconds 2
-}
+[void](Remove-AgentTask $ServiceName)
+[void](Remove-LegacyService $ServiceName)
 
-New-Service `
-  -Name $ServiceName `
-  -DisplayName "CF VPS Monitor Agent" `
-  -StartupType Automatic `
-  -BinaryPathName $binaryPathName | Out-Null
-sc.exe config $ServiceName obj= "NT AUTHORITY\LocalService" | Out-Null
+$action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $taskArguments -WorkingDirectory $InstallDir
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -RestartCount 999 `
+  -RestartInterval (New-TimeSpan -Minutes 1)
+$principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\LOCAL SERVICE" -LogonType ServiceAccount -RunLevel Limited
+Register-ScheduledTask `
+  -TaskName $ServiceName `
+  -Description "CF VPS Monitor Agent" `
+  -Action $action `
+  -Trigger $trigger `
+  -Settings $settings `
+  -Principal $principal | Out-Null
 
-Start-Service -Name $ServiceName
-Get-Service -Name $ServiceName
+Start-ScheduledTask -TaskName $ServiceName
+Start-Sleep -Seconds 2
+Get-ScheduledTask -TaskName $ServiceName

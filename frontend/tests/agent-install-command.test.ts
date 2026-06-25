@@ -46,6 +46,13 @@ test('windows installer keeps -i reserved for instance ids', () => {
   assert.match(windowsInstallerSource, /--interval \$ReportInterval --ping-interval \$PingInterval/);
 });
 
+test('windows installer runs the console agent through Task Scheduler instead of a fake service', () => {
+  assert.doesNotMatch(windowsInstallerSource, /New-Service|Start-Service/);
+  assert.match(windowsInstallerSource, /Register-ScheduledTask/);
+  assert.match(windowsInstallerSource, /Start-ScheduledTask/);
+  assert.match(windowsInstallerSource, /Unregister-ScheduledTask/);
+});
+
 test('macOS installer uses launchd instead of systemd', () => {
   assert.match(linuxInstallerSource, /PLATFORM_OS="\$\(uname -s \| tr '\[:upper:\]' '\[:lower:\]'\)"/);
   assert.match(linuxInstallerSource, /is_macos\(\)/);
