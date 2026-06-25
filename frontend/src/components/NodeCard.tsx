@@ -221,6 +221,12 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
   })();
   const trafficPct = client.traffic_limit > 0 ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
   const hasBillingInfo = client.price !== undefined && client.price !== 0;
+  const handleCardLinkClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-node-card-action="true"]')) {
+      event.preventDefault();
+    }
+  };
 
   return (
     <Card
@@ -228,7 +234,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
       style={{ width: '100%', margin: '0 auto', opacity: online ? 1 : 0.75 }}
       id={client.uuid}
     >
-      <Link className="node-card-link" to={`/instance/${client.uuid}`} style={{ textDecoration: 'none', color: 'inherit' }}>
+      <Link className="node-card-link" to={`/instance/${client.uuid}`} onClick={handleCardLinkClick} style={{ textDecoration: 'none', color: 'inherit' }}>
         <Flex className="node-card-body" direction="column" gap="2">
           <Flex className="node-card-header" justify="between" align="start" my={isMobile ? '-1' : '0'}>
             <Flex justify="start" align="center" style={{ flex: 1, minWidth: 0 }}>
@@ -271,7 +277,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                 limit={360}
                 rangeHours={1}
                 trigger={
-                  <IconButton className="node-card-action" variant="ghost" size="2" aria-label="查看 Ping 延迟" title="查看 Ping 延迟走势">
+                  <IconButton className="node-card-action" data-node-card-action="true" variant="ghost" size="2" aria-label="查看 Ping 延迟" title="查看 Ping 延迟走势">
                     <TrendingUp size={16} />
                   </IconButton>
                 }
