@@ -4,10 +4,7 @@ import MiniPingChart from './MiniPingChart';
 
 interface MiniPingChartFloatProps {
   uuid: string;
-  trigger: React.ReactElement<{
-    onClick?: React.MouseEventHandler<HTMLElement>;
-    onPointerDown?: React.PointerEventHandler<HTMLElement>;
-  }>;
+  trigger: React.ReactElement<React.HTMLAttributes<HTMLElement>>;
   chartWidth?: string | number;
   chartHeight?: number;
   limit?: number;
@@ -40,13 +37,15 @@ export default function MiniPingChartFloat({
   const triggerElement = React.cloneElement(trigger, {
     onClick: handleTriggerClick,
     onPointerDown: handleTriggerPointerDown,
+    'aria-expanded': open,
+    'aria-haspopup': 'dialog',
   });
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger>
+      <Popover.Anchor asChild>
         {triggerElement}
-      </Popover.Trigger>
+      </Popover.Anchor>
       <Popover.Content
         align="end"
         sideOffset={8}
