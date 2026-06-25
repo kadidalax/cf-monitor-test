@@ -24,7 +24,6 @@ export default function MiniPingChartFloat({
 
   const handleTriggerClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
     trigger.props.onClick?.(event);
-    event.stopPropagation();
   }, [trigger]);
 
   const handleTriggerPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
