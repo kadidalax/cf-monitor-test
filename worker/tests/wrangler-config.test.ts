@@ -38,6 +38,7 @@ test('Wrangler configs are Supabase HTTP API only', () => {
     const source = readFileSync(path, 'utf8');
     const active = uncommentedLines(source);
     assert.match(active, /\bSUPABASE_URL\b/i, `${name} SUPABASE_URL`);
+    assert.doesNotMatch(active, /\bSITE_TITLE\b|\bSITE_DESCRIPTION\b/, `${name} site defaults`);
     assert.match(active, /\[secrets\]\s+required\s*=\s*\["JWT_SECRET", "ADMIN_USERNAME", "ADMIN_PASSWORD", "SUPABASE_SERVICE_ROLE_KEY"\]/, name);
     assert.doesNotMatch(active, /\bDATABASE_URL\b|\bPOSTGRES_/i, name);
     assert.doesNotMatch(active, new RegExp(`\\[\\[${legacyDatabaseList}\\]\\]`, 'i'), name);

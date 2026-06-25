@@ -31,8 +31,6 @@ tag = "v2"
 new_sqlite_classes = ["RateLimitDO"]
 
 [vars]
-SITE_TITLE = "CF VPS Monitor"
-SITE_DESCRIPTION = "Server monitor probe"
 SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
 [secrets]

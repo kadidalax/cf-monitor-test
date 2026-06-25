@@ -22,8 +22,6 @@ Cloudflare Worker + Supabase HTTP Data API/RPC based VPS monitor.
 Plain variables:
 
 - `SUPABASE_URL`
-- `SITE_TITLE`
-- `SITE_DESCRIPTION`
 
 Secrets:
 

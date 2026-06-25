@@ -115,6 +115,7 @@ test('public active theme stylesheet loader is installed once', () => {
   assert.match(layout, /subscribeThemeUpdated/);
   assert.match(layout, /fetchPublicSettings\(\{ force: true/);
   assert.match(layout, /refreshActiveThemeStylesheet/);
+  assert.match(layout, /document\.title = data\.site_title/);
 });
 
 test('top-right display theme toggle survives public settings refreshes', () => {

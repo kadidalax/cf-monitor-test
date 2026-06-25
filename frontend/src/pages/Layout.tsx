@@ -57,7 +57,10 @@ export default function Layout() {
       refreshActiveThemeStylesheet();
       fetchPublicSettings({ force: true })
       .then((data) => {
-        if (data.site_title) setSiteTitle(data.site_title);
+        if (data.site_title) {
+          setSiteTitle(data.site_title);
+          document.title = data.site_title;
+        }
         if (typeof data.site_subtitle === "string" && data.site_subtitle.trim()) {
           setSiteSubtitle(data.site_subtitle);
         }
