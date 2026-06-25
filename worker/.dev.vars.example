@@ -8,3 +8,5 @@ ADMIN_PASSWORD=replace-with-a-local-dev-password-at-least-12-bytes
 # AGENT_TOKEN_MAX_AGE_DAYS=180
 # Optional: allows full /api/setup/status diagnostics after setup; use at least 32 bytes.
 # SETUP_DIAGNOSTICS_TOKEN=replace-with-a-random-setup-diagnostics-token-32-bytes
+# Optional: public demo mode. Restores the saved demo snapshot every 30 minutes.
+# DEMO_RESET_ENABLED=true

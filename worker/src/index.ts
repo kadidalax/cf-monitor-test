@@ -26,6 +26,7 @@ import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability'
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
+import { runDemoResetIfDue } from './utils/demo-reset';
 import {
   checkWebsiteMonitorHttp,
   shouldNotifyWebsiteDown,
@@ -53,6 +54,7 @@ type RuntimeBindings = {
   SETUP_DIAGNOSTICS_ENABLED?: string;
   SETUP_DIAGNOSTICS_TOKEN?: string;
   AGENT_TOKEN_MAX_AGE_DAYS?: string;
+  DEMO_RESET_ENABLED?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.
@@ -889,6 +891,9 @@ async function runScheduledStep(
 async function runScheduled(env: Bindings): Promise<void> {
   const now = new Date();
   const context = createScheduledRunContext(env);
+  await runScheduledStep(context, 'cron_demo_reset', 'cron_demo_reset_error', 'demo reset', async () => {
+    await runDemoResetIfDue(context.database, env, now.getTime());
+  });
   await runScheduledStep(context, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now));
   await runScheduledStep(context, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now));
   await runScheduledStep(context, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now));

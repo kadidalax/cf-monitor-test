@@ -13,6 +13,8 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { validateSetupDiagnosticsToken } from '../utils/setup-diagnostics-token';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
+import { buildBackupSnapshot } from '../utils/backup-snapshot';
+import { summarizeBackup } from '../utils/backup';
 
 type SetupCheckStatus = 'ok' | 'warning' | 'error' | 'pending' | 'disabled';
 
@@ -513,6 +515,43 @@ setupRoutes.post('/database/init', async (c) => {
   try {
     const result = await applyBundledMigrations(projectRef, accessToken);
     return c.json({ success: true, project_ref: projectRef, ...result });
+  } catch (error) {
+    return c.json({ error: redactSetupInitError(error) }, 500);
+  }
+});
+
+setupRoutes.post('/demo-reset/snapshot', async (c) => {
+  const limited = await setupInitRateLimit(c);
+  if (limited) return limited;
+
+  const projectRef = supabaseProjectRef(c.env);
+  if (!projectRef) {
+    return c.json({ error: 'SUPABASE_URL is not configured as a Supabase project URL.' }, 503);
+  }
+
+  let payload: { accessToken?: unknown };
+  try {
+    payload = await c.req.json() as { accessToken?: unknown };
+  } catch {
+    return c.json({ error: 'Invalid JSON body.' }, 400);
+  }
+
+  const accessToken = typeof payload.accessToken === 'string' ? payload.accessToken.trim() : '';
+  if (!accessToken || accessToken.length > 4096) {
+    return c.json({ error: 'Supabase Access Token is required.' }, 400);
+  }
+
+  try {
+    await runSupabaseQuery(projectRef, accessToken, 'select 1;');
+    const database = getDatabase(c.env);
+    const snapshot = await buildBackupSnapshot(database);
+    await db.saveDemoSnapshot(database, snapshot);
+    return c.json({
+      success: true,
+      project_ref: projectRef,
+      saved_at: new Date().toISOString(),
+      summary: summarizeBackup(snapshot),
+    });
   } catch (error) {
     return c.json({ error: redactSetupInitError(error) }, 500);
   }

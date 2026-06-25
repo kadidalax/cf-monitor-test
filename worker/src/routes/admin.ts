@@ -12,19 +12,16 @@ import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../
 import { setAdminSessionCookie } from '../auth/session';
 import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
-  BACKUP_EXCLUDED_MODULES,
   BACKUP_ENCRYPTION_ALGORITHM,
   ENCRYPTED_BACKUP_SCHEMA_ID,
-  BACKUP_SCHEMA_ID,
   BACKUP_SCOPE,
-  BACKUP_VERSION,
   MAX_BACKUP_BYTES,
   decryptBackup,
   encryptBackup,
   summarizeBackup,
   validateBackup,
-  type BackupData,
 } from '../utils/backup';
+import { buildBackupSnapshot } from '../utils/backup-snapshot';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
@@ -584,30 +581,6 @@ function pingTaskAuditDetail(event: string, task: PingTaskAuditSource, previous?
     task: current,
     ...(previous ? { previous: pingTaskAuditSnapshot(previous) } : {}),
   });
-}
-
-async function buildBackupSnapshot(database: db.QueryDatabase): Promise<BackupData> {
-  const clients = await db.listClients(database);
-  const settings = buildAdminSettings(await db.getAllSettings(database));
-  const pingTasks = await db.listPingTasks(database);
-  const offlineNotifications = await db.listOfflineNotifications(database);
-  const expiryNotifications = await db.listExpiryNotifications(database);
-  const loadNotifications = await db.listLoadNotifications(database);
-
-  return {
-    schema: BACKUP_SCHEMA_ID,
-    version: BACKUP_VERSION,
-    scope: BACKUP_SCOPE,
-    timestamp: new Date().toISOString(),
-    excluded: [...BACKUP_EXCLUDED_MODULES],
-    sensitive: true,
-    clients,
-    settings,
-    ping_tasks: pingTasks,
-    offline_notifications: offlineNotifications,
-    expiry_notifications: expiryNotifications,
-    load_notifications: loadNotifications,
-  };
 }
 
 function isQueryFlagEnabled(value: string | undefined): boolean {

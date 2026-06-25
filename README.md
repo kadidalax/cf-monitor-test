@@ -90,6 +90,12 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 | `ADMIN_USERNAME` | Secret | 初始后台用户名 |
 | `ADMIN_PASSWORD` | Secret | 初始后台密码 |
 
+可选：
+
+| 名称 | 类型 | 说明 |
+| --- | --- | --- |
+| `DEMO_RESET_ENABLED` | Variable | 公开演示站使用。设为 `true` 后，Worker 会每 30 分钟恢复一次已保存的演示快照，并把管理员账号密码重置为 `ADMIN_USERNAME` / `ADMIN_PASSWORD`。默认关闭。 |
+
 ### 5. 一键初始化数据库
 
 1. 打开 [Supabase Access Tokens](https://supabase.com/dashboard/account/tokens)。
@@ -99,6 +105,12 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 5. 页面提示完成后，删除或等待该 Access Token 过期即可。
 
 Access Token 只会在本次初始化请求中使用，不会写入 Worker 变量、Supabase 数据库或浏览器存储。
+
+### 公开演示站自动回档
+
+如果你公开了后台管理员账号密码，可以在 Cloudflare Worker 变量里设置 `DEMO_RESET_ENABLED=true`。先把站点调整成希望展示的状态，然后打开 `/db-init`，粘贴 1 小时有效期的 Supabase Access Token，点击 **保存当前演示快照**。之后 Worker 定时任务会每 30 分钟恢复这份快照，并把管理员账号密码恢复为 Worker Secret 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
+
+这个 Access Token 只用于当次保存快照，不会保存到 Worker、Supabase 或浏览器。普通后台管理员无法覆盖演示快照。
 
 ## 部署后使用
 
