@@ -521,6 +521,10 @@ function positiveNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function nonNegativeNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 function clientFieldChanged(current: unknown, next: unknown): boolean {
   if (typeof next === 'number') return Number(current || 0) !== next;
   return String(current ?? '') !== String(next ?? '');
@@ -777,7 +781,7 @@ async function syncBasicInfoFromReportBatch(
       ? preferredRegion(basicInfoPayload.region, edgeRegion, oldClient?.region)
       : preferredRegion(basicInfoPayload.region, oldClient?.region, edgeRegion),
     mem_total: positiveNumber(basicInfoPayload.mem_total, oldClient?.mem_total || 0),
-    swap_total: positiveNumber(basicInfoPayload.swap_total, oldClient?.swap_total || 0),
+    swap_total: nonNegativeNumber(basicInfoPayload.swap_total, oldClient?.swap_total || 0),
     disk_total: positiveNumber(basicInfoPayload.disk_total, oldClient?.disk_total || 0),
     version: nonEmptyString(basicInfoPayload.version, oldClient?.version || ''),
   });
@@ -1146,7 +1150,7 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
         ? preferredRegion(body.region, edgeRegion, oldClient?.region)
         : preferredRegion(body.region, oldClient?.region, edgeRegion),
       mem_total: positiveNumber(body.mem_total, oldClient?.mem_total || 0),
-      swap_total: positiveNumber(body.swap_total, oldClient?.swap_total || 0),
+      swap_total: nonNegativeNumber(body.swap_total, oldClient?.swap_total || 0),
       disk_total: positiveNumber(body.disk_total, oldClient?.disk_total || 0),
       version: nonEmptyString(body.version, oldClient?.version || ''),
     });

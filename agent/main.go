@@ -1497,7 +1497,15 @@ func mergeMemorySnapshot(procMem memorySnapshot, cgroup memorySnapshot, containe
 		snapshot.ramTotal = cgroup.ramTotal
 		snapshot.hasRAM = true
 	}
-	if cgroup.hasSwap {
+	if containerized && cgroup.hasRAM && procMem.hasSwap {
+		snapshot.swapUsed = procMem.swapUsed
+		snapshot.swapTotal = procMem.swapTotal
+		snapshot.hasSwap = true
+		if snapshot.swapTotal > snapshot.ramTotal*4 {
+			snapshot.swapUsed = 0
+			snapshot.swapTotal = 0
+		}
+	} else if cgroup.hasSwap {
 		snapshot.swapUsed = cgroup.swapUsed
 		snapshot.swapTotal = cgroup.swapTotal
 		snapshot.hasSwap = true
@@ -1556,7 +1564,7 @@ func parseProcMeminfo(data string) memorySnapshot {
 	reclaimable := values["SReclaimable"]
 	buffers := values["Buffers"]
 	shmem := values["Shmem"]
-	swapTotal := values["SwapTotal"]
+	swapTotal, hasSwapTotal := values["SwapTotal"]
 	swapFree := values["SwapFree"]
 	swapCached := values["SwapCached"]
 
@@ -1572,7 +1580,7 @@ func parseProcMeminfo(data string) memorySnapshot {
 		snapshot.ramTotal = total
 		snapshot.hasRAM = true
 	}
-	if swapTotal > 0 {
+	if hasSwapTotal {
 		usedDiff := swapFree + swapCached
 		if swapTotal >= usedDiff {
 			snapshot.swapUsed = swapTotal - usedDiff

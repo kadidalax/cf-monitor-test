@@ -1399,7 +1399,7 @@ export class LiveDataDO {
     }
     for (const field of numberFields) {
       const value = Number(basicInfo[field]);
-      if (Number.isFinite(value) && value > 0) {
+      if (Number.isFinite(value) && (field === 'swap_total' ? value >= 0 : value > 0)) {
         patch[field] = value;
       }
     }
