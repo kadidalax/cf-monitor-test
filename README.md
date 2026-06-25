@@ -28,6 +28,8 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 - Worker 使用 Durable Objects 保存实时快照、观看者状态、Agent 策略和限流状态。
 - 公开元数据、历史数据和实时快照有短缓存，降低重复读取。
 - 历史记录、Ping 记录、网站检测记录和审计日志会按设置定期清理。
+- CF免费配额在默认配置下可足够监控50台vps节点。
+
 
 ## 技术架构
 
