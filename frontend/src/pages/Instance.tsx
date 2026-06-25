@@ -32,6 +32,7 @@ import {
   fetchPingTaskSeries,
   formatPingMs,
   getPingSeriesAverage,
+  getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
   PingTaskSeries,
@@ -279,12 +280,10 @@ export default function Instance() {
     temp: r.temperature || 0,
   }));
 
-  const pingSeriesWithData = pingSeries.filter((item) =>
-    item.records.some((record) => Number(record.value) >= 0),
-  );
-  const pingChartRows = buildPingChartRows(pingSeriesWithData);
-  const pingYAxisDomain = getPingYAxisDomain(pingSeriesWithData);
-  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithData, timeRangeHours[timeRange]);
+  const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
+  const pingChartRows = buildPingChartRows(pingSeriesWithRecords);
+  const pingYAxisDomain = getPingYAxisDomain(pingSeriesWithRecords);
+  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithRecords, timeRangeHours[timeRange]);
 
   return (
     <div className="instance-page">
@@ -491,7 +490,7 @@ export default function Instance() {
           <Text weight="bold">Ping 延迟</Text>
           {pingSeries.length > 0 && (
             <Text size="1" color="gray">
-              {pingSeriesWithData.length} / {pingSeries.length} 个任务有记录
+              {pingSeriesWithRecords.length} / {pingSeries.length} 个任务有记录
             </Text>
           )}
         </Flex>
@@ -506,7 +505,7 @@ export default function Instance() {
           <Text size="2" color="gray" align="center" style={{ display: 'block', padding: '20px' }}>
             暂无 Ping 任务
           </Text>
-        ) : pingChartRows.length === 0 || pingSeriesWithData.length === 0 ? (
+        ) : pingChartRows.length === 0 || pingSeriesWithRecords.length === 0 ? (
           <Text size="2" color="gray" align="center" style={{ display: 'block', padding: '20px' }}>
             暂无该节点的 Ping 记录
           </Text>
@@ -538,7 +537,7 @@ export default function Instance() {
                     name,
                   ]}
                 />
-                {pingSeriesWithData.map((item) => (
+                {pingSeriesWithRecords.map((item) => (
                   <Line
                     key={item.task.key}
                     type="monotone"
@@ -555,7 +554,7 @@ export default function Instance() {
             </ResponsiveContainer>
 
             <div className="instance-ping-series-grid">
-              {pingSeriesWithData.map((item) => {
+              {pingSeriesWithRecords.map((item) => {
                 const avg = getPingSeriesAverage(item.records);
                 return (
                   <div
@@ -583,7 +582,7 @@ export default function Instance() {
                       </Text>
                     </Flex>
                     <Text size="1" color="gray" className="instance-ping-series-stat">
-                      平均 {formatPingMs(avg)}
+                      {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
                     </Text>
                   </div>
                 );
