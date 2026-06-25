@@ -427,7 +427,15 @@ function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClient
   for (const raw of overlay.clients) {
     const client = toPublicClient(raw as Parameters<typeof toPublicClient>[0]);
     if (!client.uuid || client.hidden || removed.has(client.uuid)) continue;
-    byUuid.set(client.uuid, { ...byUuid.get(client.uuid), ...client });
+    const existing = byUuid.get(client.uuid);
+    const next = { ...existing, ...client };
+    if (existing) {
+      if (client.price === 0 && existing.price !== 0) next.price = existing.price;
+      if (client.billing_cycle === 0 && existing.billing_cycle !== 0) next.billing_cycle = existing.billing_cycle;
+      if (!client.currency && existing.currency) next.currency = existing.currency;
+      if (!client.expired_at && existing.expired_at) next.expired_at = existing.expired_at;
+    }
+    byUuid.set(client.uuid, next);
   }
   return [...byUuid.values()];
 }

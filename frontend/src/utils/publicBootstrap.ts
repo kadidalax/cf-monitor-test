@@ -129,6 +129,8 @@ function applyClientPatch(clients: ClientInfo[] | undefined, patch: PublicBootst
           (next as Record<string, unknown>)[key] = existing[key as keyof ClientInfo];
         }
       }
+      if (client.price === 0 && existing.price !== 0) next.price = existing.price;
+      if (client.billing_cycle === 0 && existing.billing_cycle !== 0) next.billing_cycle = existing.billing_cycle;
     }
     byUuid.set(client.uuid, next);
   }

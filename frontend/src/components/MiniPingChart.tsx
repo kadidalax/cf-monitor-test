@@ -167,7 +167,7 @@ export default function MiniPingChart({
             {seriesWithData.map((item) => (
               <Line
                 key={item.task.key}
-                type="linear"
+                type="monotone"
                 dataKey={item.task.key}
                 name={item.task.label}
                 stroke={item.task.color}

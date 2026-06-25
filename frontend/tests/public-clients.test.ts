@@ -269,3 +269,55 @@ test('optimistic client patches do not erase fresh server region metadata', asyn
   assert.equal(refreshed.clients?.[0]?.region, 'Buffalo, New York, US');
   assert.equal(refreshed.nodes?.[0]?.region, 'Buffalo, New York, US');
 });
+
+test('optimistic client patches do not erase fresh server billing metadata', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    clearCachedPublicBootstrap();
+  });
+
+  installLocalStorage();
+  clearCachedPublicBootstrap();
+  patchCachedPublicBootstrapClients({
+    clients: {
+      upsert: [{
+        uuid: 'node-billing',
+        name: 'Node Billing',
+        price: 0,
+        billing_cycle: 0,
+        currency: '',
+        expired_at: '',
+      }],
+    },
+  });
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    clients: [
+      {
+        uuid: 'node-billing',
+        name: 'Node Billing',
+        price: 9999,
+        billing_cycle: -1,
+        currency: '$',
+        expired_at: '2077-07-07T00:00:00+00:00',
+      },
+    ],
+    nodes: [
+      {
+        uuid: 'node-billing',
+        name: 'Node Billing',
+        price: 9999,
+        billing_cycle: -1,
+        currency: '$',
+        expired_at: '2077-07-07T00:00:00+00:00',
+      },
+    ],
+  }));
+
+  const refreshed = await fetchPublicBootstrap({ cacheBust: true });
+  assert.equal(refreshed.clients?.[0]?.price, 9999);
+  assert.equal(refreshed.clients?.[0]?.billing_cycle, -1);
+  assert.equal(refreshed.clients?.[0]?.currency, '$');
+  assert.equal(refreshed.clients?.[0]?.expired_at, '2077-07-07T00:00:00+00:00');
+});
