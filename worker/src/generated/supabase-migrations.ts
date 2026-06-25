@@ -145,5 +145,11 @@ export const BUNDLED_SUPABASE_MIGRATIONS: BundledMigration[] = [
     "name": "rotate_admin_sessions",
     "checksum": "74ad80604488db7ef9e88a01098499b0a14b50a84ce0b6119cfdba51c1d9109d",
     "sql": "create or replace function public.cfm_rotate_user_session(input_uuid text)\nreturns jsonb\nlanguage sql\nset search_path = public\nas $$\n  update users\n  set session_version = session_version + 1,\n      updated_at = now()\n  where uuid = input_uuid\n  returning to_jsonb(users);\n$$;\n\ncreate or replace function public.cfm_update_user_username_rotate_session(input_uuid text, input_username text)\nreturns jsonb\nlanguage sql\nset search_path = public\nas $$\n  update users\n  set username = input_username,\n      session_version = session_version + 1,\n      updated_at = now()\n  where uuid = input_uuid\n  returning to_jsonb(users);\n$$;\n\nrevoke all on function public.cfm_rotate_user_session(text) from public;\nrevoke all on function public.cfm_rotate_user_session(text) from anon;\nrevoke all on function public.cfm_rotate_user_session(text) from authenticated;\ngrant execute on function public.cfm_rotate_user_session(text) to service_role;\n\nrevoke all on function public.cfm_update_user_username_rotate_session(text, text) from public;\nrevoke all on function public.cfm_update_user_username_rotate_session(text, text) from anon;\nrevoke all on function public.cfm_update_user_username_rotate_session(text, text) from authenticated;\ngrant execute on function public.cfm_update_user_username_rotate_session(text, text) to service_role;"
+  },
+  {
+    "version": "20260626030000_allow_backup_restore_safeupdate",
+    "name": "allow_backup_restore_safeupdate",
+    "checksum": "23ccdd4c7a9200398119de1f6f3b23c5ef946d50db1a7a3c366738429c0cda61",
+    "sql": "alter function public.cfm_restore_backup_data(jsonb)\n  set safeupdate.enabled = '0';\n\nrevoke all on function public.cfm_restore_backup_data(jsonb) from public;\nrevoke all on function public.cfm_restore_backup_data(jsonb) from anon;\nrevoke all on function public.cfm_restore_backup_data(jsonb) from authenticated;\ngrant execute on function public.cfm_restore_backup_data(jsonb) to service_role;\n\nnotify pgrst, 'reload schema';"
   }
 ];
