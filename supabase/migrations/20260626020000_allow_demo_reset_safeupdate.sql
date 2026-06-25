@@ -11,10 +11,8 @@ begin
     raise exception 'admin uuid, username, and password hash are required';
   end if;
 
-  perform set_config('safeupdate.enabled', '0', true);
-
-  delete from login_rate_limits;
-  delete from users;
+  delete from login_rate_limits where true;
+  delete from users where true;
 
   insert into users (uuid, username, passwd, session_version, password_changed_at)
   values (input_uuid, input_username, input_passwd, 1, now());
@@ -31,7 +29,6 @@ declare
   item jsonb;
   monitor_ids bigint[];
 begin
-  perform set_config('safeupdate.enabled', '0', true);
   perform public.cfm_restore_backup_data(input_backup);
 
   if input_backup ? 'website_monitors' and jsonb_typeof(input_backup->'website_monitors') = 'array' then
@@ -47,7 +44,7 @@ begin
       delete from website_checks where not (monitor_id = any(monitor_ids));
       delete from website_monitors where not (id = any(monitor_ids));
     else
-      delete from website_monitors;
+      delete from website_monitors where true;
     end if;
 
     for item in select value from jsonb_array_elements(input_backup->'website_monitors')
