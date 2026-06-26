@@ -32,7 +32,7 @@ const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
   live_poll_active_interval_sec: '3',
   live_poll_idle_interval_sec: '120',
   live_poll_active_max_duration_sec: '600',
-  active_theme: 'default',
+  active_theme: 'monitor',
   theme_settings: {
     backgroundImageUrlDesktop: '',
     backgroundImageUrlMobile: '',
@@ -64,6 +64,12 @@ function secondsSetting(value: unknown, fallback: string, min: number, max: numb
   return String(integerSetting(value, Number(fallback), min, max));
 }
 
+function activeThemeSetting(value: unknown, fallback: string): string {
+  const text = stringSetting(value, fallback, 64);
+  const activeTheme = text === 'default' ? 'monitor' : text;
+  return /^[A-Za-z0-9_-]+$/.test(activeTheme) ? activeTheme : fallback;
+}
+
 export function normalizePublicSettings(payload: unknown): PublicSettings | null {
   const record = asRecord(payload);
   if (!record) return null;
@@ -79,9 +85,7 @@ export function normalizePublicSettings(payload: unknown): PublicSettings | null
     live_poll_active_interval_sec: secondsSetting(record.live_poll_active_interval_sec, '3', 3, 300),
     live_poll_idle_interval_sec: secondsSetting(record.live_poll_idle_interval_sec, '120', 60, 3600),
     live_poll_active_max_duration_sec: secondsSetting(record.live_poll_active_max_duration_sec, '600', 60, 3600),
-    active_theme: /^[A-Za-z0-9_-]+$/.test(String(record.active_theme || ''))
-      ? String(record.active_theme)
-      : DEFAULT_PUBLIC_SETTINGS.active_theme,
+    active_theme: activeThemeSetting(record.active_theme, DEFAULT_PUBLIC_SETTINGS.active_theme),
     theme_settings: {
       backgroundImageUrlDesktop: stringSetting(
         theme?.backgroundImageUrlDesktop,

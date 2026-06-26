@@ -11,7 +11,7 @@
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
-    "test": "node scripts/check-mini-ping-toggle.mjs && node scripts/check-instance-chart-range.mjs && node scripts/check-ping-chart-failed-series.mjs && node scripts/check-demo-reset-safeupdate.mjs && node scripts/check-region-count-country.mjs && npm run test:worker && cd agent && go test ./...",
+    "test": "node scripts/check-mini-ping-toggle.mjs && node scripts/check-instance-chart-range.mjs && node scripts/check-ping-chart-failed-series.mjs && node scripts/check-theme-active-default.mjs && node scripts/check-demo-reset-safeupdate.mjs && node scripts/check-region-count-country.mjs && npm run test:worker && cd agent && go test ./...",
     "test:worker": "node --test worker/src/utils/*.test.ts",
     "verify": "npm run lint && npm run build && npm test",
     "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json",
