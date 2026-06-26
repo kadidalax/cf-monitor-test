@@ -331,7 +331,7 @@ insert into settings (key, value) values
   ('telegram_bot_token', ''),
   ('telegram_chat_id', ''),
   ('enable_ip_change_notification', 'false'),
-  ('active_theme', 'default')
+  ('active_theme', 'monitor')
 on conflict (key) do nothing;
 
 alter table public.clients enable row level security;

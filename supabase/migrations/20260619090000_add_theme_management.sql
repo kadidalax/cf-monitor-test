@@ -31,7 +31,7 @@ create table if not exists theme_assets (
 );
 
 insert into settings (key, value)
-values ('active_theme', 'default')
+values ('active_theme', 'monitor')
 on conflict (key) do nothing;
 
 alter table public.themes enable row level security;

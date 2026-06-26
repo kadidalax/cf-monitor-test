@@ -804,6 +804,49 @@ func TestExecuteICMPPingUsesResolvedPublicIP(t *testing.T) {
 	}
 }
 
+func TestExecuteTCPPingExcludesDNSResolutionTime(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		close(accepted)
+	}()
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+
+	oldResolve := resolvePublicIPsForPing
+	resolveDelay := 400 * time.Millisecond
+	resolvePublicIPsForPing = func(context.Context, string) ([]net.IP, error) {
+		time.Sleep(resolveDelay)
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	t.Cleanup(func() { resolvePublicIPsForPing = oldResolve })
+
+	elapsed := executeTCPPing(net.JoinHostPort("example.test", port))
+	if elapsed < 0 {
+		t.Fatalf("executeTCPPing() = %v, want successful TCP ping", elapsed)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("tcp listener did not accept connection")
+	}
+	if elapsed >= float64(resolveDelay.Milliseconds()/2) {
+		t.Fatalf("executeTCPPing() = %.0fms, want DNS resolution time excluded", elapsed)
+	}
+}
+
 func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("10.0.0.2 203.0.113.10 8.8.8.8 fc00::1 2001:db8::1 2606:4700:4700::1111"))

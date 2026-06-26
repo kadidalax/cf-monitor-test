@@ -780,6 +780,8 @@ func resolvePublicIPs(ctx context.Context, host string) ([]net.IP, error) {
 	return ips, nil
 }
 
+var resolvePublicIPsForPing = resolvePublicIPs
+
 func normalizeTCPTargetAddress(target string) (string, string, string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -801,10 +803,14 @@ func normalizeTCPTargetAddress(target string) (string, string, string, error) {
 }
 
 func dialPublicTCP(ctx context.Context, network, host, port string, timeout time.Duration) (net.Conn, error) {
-	ips, err := resolvePublicIPs(ctx, host)
+	ips, err := resolvePublicIPsForPing(ctx, host)
 	if err != nil {
 		return nil, err
 	}
+	return dialResolvedTCP(ctx, network, ips, port, timeout)
+}
+
+func dialResolvedTCP(ctx context.Context, network string, ips []net.IP, port string, timeout time.Duration) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	var lastErr error
 	for _, ip := range ips {
@@ -817,7 +823,7 @@ func dialPublicTCP(ctx context.Context, network, host, port string, timeout time
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("no dialable IP addresses for %q", host)
+	return nil, fmt.Errorf("no dialable IP addresses")
 }
 
 func executeICMPPing(target string) float64 {
@@ -852,9 +858,15 @@ func executeTCPPing(target string) float64 {
 	if err != nil {
 		return -1
 	}
+	ctx := context.Background()
+	ips, err := resolvePublicIPsForPing(ctx, host)
+	if err != nil {
+		log.Printf("TCP ping failed for %q: %v", address, err)
+		return -1
+	}
 
 	start := time.Now()
-	conn, err := dialPublicTCP(context.Background(), "tcp", host, port, 3*time.Second)
+	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, 3*time.Second)
 	elapsed := time.Since(start).Milliseconds()
 
 	if err != nil {

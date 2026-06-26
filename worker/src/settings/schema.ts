@@ -240,7 +240,7 @@ export const SETTING_SCHEMA = {
   },
   active_theme: {
     type: 'string',
-    defaultValue: 'default',
+    defaultValue: 'monitor',
     public: true,
     maxLength: 64,
   },
@@ -369,8 +369,9 @@ export function normalizeSettingValue(
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);
       else if (key === 'active_theme') {
-        const text = settingToString(value)?.trim() || 'default';
-        normalized = /^[A-Za-z0-9_-]+$/.test(text) ? text : null;
+        const text = settingToString(value)?.trim() || SETTING_SCHEMA.active_theme.defaultValue;
+        const activeTheme = text === 'default' ? 'monitor' : text;
+        normalized = /^[A-Za-z0-9_-]+$/.test(activeTheme) ? activeTheme : null;
       } else normalized = settingToString(value);
       break;
   }
