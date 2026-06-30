@@ -72,6 +72,7 @@ export type Variables = {
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const BUNDLED_VERSION = workerPackage.version?.trim() || 'dev';
+const BUILD_MARK = 'dev-agent-ws-query-token-20260701';
 const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
 const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
@@ -358,6 +359,7 @@ app.get('/api/version', (c) => {
     version: appVersion,
     name: 'CF VPS Monitor',
     hash: appVersion.replace(/^v/i, '') || 'dev',
+    build: BUILD_MARK,
   });
 });
 
