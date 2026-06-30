@@ -505,15 +505,10 @@ export async function generateUniqueClientToken(
   return token;
 }
 
-async function getOrCreateInstallToken(database: db.QueryDatabase, uuid: string): Promise<{ token: string } | null> {
+async function getInstallToken(database: db.QueryDatabase, uuid: string): Promise<{ token: string } | null> {
   const client = await db.getClientTokenMeta(database, uuid);
   if (!client) return null;
-  if (client.token) return { token: client.token };
-
-  const token = await generateUniqueClientToken(database);
-  if (!token) return { token: '' };
-  const updatedClient = await db.setClientInstallToken(database, uuid, token);
-  return updatedClient ? { token } : null;
+  return { token: client.token || '' };
 }
 
 async function refreshLivePingTasks(c: AdminContext): Promise<void> {
@@ -1462,13 +1457,13 @@ adminRoutes.post('/clients/:uuid/token', async (c) => {
   const parsed = await readAdminJsonObject(c);
   if (!parsed.ok) return parsed.response;
   const database = getDatabase(c.env);
-  const installToken = await getOrCreateInstallToken(database, uuid);
+  const installToken = await getInstallToken(database, uuid);
   if (!installToken) {
     return c.json({ error: '客户端不存在' }, 404);
   }
   const { token } = installToken;
   if (!token) {
-    return c.json({ error: 'Token 不存在' }, 404);
+    return c.json({ error: 'Token 明文不存在，请手动重置 Token 后再复制安装命令' }, 409);
   }
   return c.json({ token });
 });
@@ -1476,13 +1471,13 @@ adminRoutes.post('/clients/:uuid/token', async (c) => {
 adminRoutes.post('/clients/:uuid/token/install', async (c) => {
   const uuid = c.req.param('uuid');
   const database = getDatabase(c.env);
-  const installToken = await getOrCreateInstallToken(database, uuid);
+  const installToken = await getInstallToken(database, uuid);
   if (!installToken) {
     return c.json({ error: '客户端不存在' }, 404);
   }
   const { token } = installToken;
   if (!token) {
-    return c.json({ error: 'Token 不存在' }, 404);
+    return c.json({ error: 'Token 明文不存在，请手动重置 Token 后再复制安装命令' }, 409);
   }
   return c.json({ token, rotated: false });
 });

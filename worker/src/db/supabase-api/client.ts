@@ -187,6 +187,7 @@ export async function createSupabaseClient(env: SupabaseApiEnv, client: Partial<
     input_client: {
       uuid: client.uuid || crypto.randomUUID(),
       name: client.name || '',
+      token,
       token_hash: client.token_hash || await hashAgentToken(token),
       sort_order: client.sort_order,
     },
@@ -203,6 +204,7 @@ export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, i
 export async function rotateSupabaseClientToken(env: SupabaseApiEnv, uuid: string, token: string): Promise<Client | null> {
   return callSupabaseRpc<Client | null>(env, 'cfm_rotate_client_token', {
     input_uuid: uuid,
+    input_token: token,
     input_token_hash: await hashAgentToken(token),
   });
 }
@@ -218,13 +220,6 @@ export function updateSupabaseClientAndReturn(env: SupabaseApiEnv, uuid: string,
   return callSupabaseRpc<Client | null>(env, 'cfm_update_client_returning', {
     input_uuid: uuid,
     input_patch: data,
-  });
-}
-
-export function setSupabaseClientInstallToken(env: SupabaseApiEnv, uuid: string, token: string): Promise<Client | null> {
-  return callSupabaseRpc<Client | null>(env, 'cfm_set_client_install_token', {
-    input_uuid: uuid,
-    input_token: token,
   });
 }
 
