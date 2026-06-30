@@ -88,10 +88,6 @@ export async function rotateClientToken(database: QueryDatabase, uuid: string, t
   return sba.rotateSupabaseClientToken(database.env, uuid, token);
 }
 
-export async function setClientInstallToken(database: QueryDatabase, uuid: string, token: string): Promise<t.Client | null> {
-  return sba.setSupabaseClientInstallToken(database.env, uuid, token);
-}
-
 export async function markClientTokenUsed(database: QueryDatabase, uuid: string, ip = ''): Promise<boolean> {
   return sba.markSupabaseClientTokenUsed(database.env, uuid, ip);
 }
