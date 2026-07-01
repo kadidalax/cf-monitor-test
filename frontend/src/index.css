@@ -5441,6 +5441,10 @@ html[data-monitor-theme='next'] .node-network-value strong {
   padding-right: 2px;
 }
 
+.admin-website-edit-dialog label {
+  min-width: 0;
+}
+
 @media (max-width: 760px) {
   .nav-bar {
     min-height: 104px;
@@ -5500,17 +5504,22 @@ html[data-monitor-theme='next'] .node-network-value strong {
   }
 
   .admin-website-card-header {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
   }
 
   .admin-website-card-header .admin-row-actions {
-    grid-column: 1 / -1;
+    grid-column: auto;
+    display: grid;
+    grid-template-columns: repeat(3, 26px);
+    gap: 4px;
     justify-content: flex-end;
-    flex-wrap: wrap;
+    align-content: start;
+    width: 86px;
   }
 
   .admin-website-card-meta-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .admin-website-edit-dialog {
@@ -5523,6 +5532,14 @@ html[data-monitor-theme='next'] .node-network-value strong {
 
   .admin-website-dialog-scroll {
     max-height: calc(100vh - 116px);
+  }
+
+  .admin-website-compact-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .admin-website-toggle {
+    min-height: 32px;
   }
 
   .nav-monitor-switch {

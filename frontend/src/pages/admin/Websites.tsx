@@ -34,7 +34,7 @@ import {
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
-import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import WebsiteHeartbeatBar from '../../components/WebsiteHeartbeatBar';
@@ -295,7 +295,7 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
           <Flex className="admin-row-actions">
             <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
             <Tooltip content={monitor.hidden ? '公开' : '隐藏'}><IconButton size="1" variant="soft" onClick={() => onVisibility(monitor, !monitor.hidden)}>{monitor.hidden ? <Eye size={13} /> : <EyeOff size={13} />}</IconButton></Tooltip>
-            <Tooltip content={monitor.enabled ? '停用' : '启用'}><Button size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)}>{monitor.enabled ? '停用' : '启用'}</Button></Tooltip>
+            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={13} /></IconButton></Tooltip>
             <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
             <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
           </Flex>
@@ -772,7 +772,7 @@ export default function AdminWebsites() {
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
           <div className="admin-website-dialog-scroll">
           <Flex direction="column" gap="3">
-            <Grid columns={{ initial: '1', sm: '2' }} gap="3">
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '2' }} gap="3">
               <label>
                 <Text size="2" weight="bold">名称</Text>
                 <TextField.Root value={form.name} onChange={(event) => update('name', event.target.value)} />
@@ -797,7 +797,7 @@ export default function AdminWebsites() {
                 onChange={(event) => update('url', event.target.value)}
               />
             </label>
-            <Grid columns={{ initial: '1', sm: '3' }} gap="3">
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
               <label><Text size="2" weight="bold">检测间隔(秒)</Text><TextField.Root type="number" value={String(form.interval_sec)} onChange={(event) => update('interval_sec', Number(event.target.value))} /></label>
               <label><Text size="2" weight="bold">超时(秒)</Text><TextField.Root type="number" value={String(form.timeout_sec)} onChange={(event) => update('timeout_sec', Number(event.target.value))} /></label>
               <label><Text size="2" weight="bold">宽限期(秒)</Text><TextField.Root type="number" value={String(form.grace_period_sec)} onChange={(event) => update('grace_period_sec', Number(event.target.value))} /></label>
@@ -812,7 +812,7 @@ export default function AdminWebsites() {
               <label className="admin-website-toggle"><Switch checked={form.enabled} onCheckedChange={(value) => update('enabled', value)} />启用检测</label>
               <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对非管理员隐藏</label>
             </Flex>
-            <Grid columns={{ initial: '1', sm: '3' }} gap="3">
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
               <label>
                 <Text size="2" weight="bold">Agent 探测</Text>
                 <Select.Root value={form.agent_probe_mode} onValueChange={(value) => update('agent_probe_mode', value as WebsiteAgentProbeMode)}>
