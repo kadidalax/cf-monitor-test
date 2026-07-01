@@ -248,6 +248,87 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
   );
 }
 
+function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onCheck, onVisibility, onEnabled, onEdit, onRemove }: SortableWebsiteRowProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: monitor.id,
+    disabled: dragDisabled,
+  });
+
+  const cardStyle = {
+    opacity: isDragging ? 0.72 : 1,
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div ref={setNodeRef} className={`admin-website-card-shell${isDragging ? ' is-dragging' : ''}`} style={cardStyle}>
+      <Card className={`admin-node-card admin-website-card${selected ? ' is-selected' : ''}`}>
+        <div className="admin-website-card-header">
+          <div className="admin-node-card-controls">
+            <Tooltip content={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}>
+              <button
+                type="button"
+                className="admin-row-drag-handle"
+                aria-label={`拖拽排序 ${monitor.name}`}
+                disabled={dragDisabled}
+                {...attributes}
+                {...listeners}
+              >
+                <GripVertical size={15} />
+              </button>
+            </Tooltip>
+            <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />
+          </div>
+
+          <div className="admin-website-card-title">
+            <Flex align="center" gap="2">
+              <span className={`website-status-dot is-${monitor.status}`} />
+              <Text weight="bold" className="admin-website-name-text">{monitor.name}</Text>
+            </Flex>
+            <Flex className="admin-node-card-badges" align="center" gap="1" wrap="wrap">
+              <Badge color={statusColor(monitor.status)} variant="soft">{statusLabel(monitor.status)}</Badge>
+              <Badge color={monitor.enabled ? 'green' : 'gray'} variant="soft">{monitor.enabled ? '启用' : '停用'}</Badge>
+              {monitor.hidden && <Badge color="orange" variant="soft">隐藏</Badge>}
+            </Flex>
+          </div>
+
+          <Flex className="admin-row-actions">
+            <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
+            <Tooltip content={monitor.hidden ? '公开' : '隐藏'}><IconButton size="1" variant="soft" onClick={() => onVisibility(monitor, !monitor.hidden)}>{monitor.hidden ? <Eye size={13} /> : <EyeOff size={13} />}</IconButton></Tooltip>
+            <Tooltip content={monitor.enabled ? '停用' : '启用'}><Button size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)}>{monitor.enabled ? '停用' : '启用'}</Button></Tooltip>
+            <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
+            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
+          </Flex>
+        </div>
+
+        <div className="admin-website-card-body">
+          <a className="admin-website-url admin-website-card-url" href={monitor.url} target="_blank" rel="noopener noreferrer">
+            {monitor.url}<ExternalLink size={12} aria-hidden="true" />
+          </a>
+          <div className="admin-website-card-meta-grid">
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">原始响应</Text>
+              <Text size="1" title={effectiveReasonLabel(monitor.last_effective_reason)}>{rawStatusLabel(monitor)}</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">检测</Text>
+              <Text size="1">{monitor.interval_sec}s</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">最近检测</Text>
+              <Text size="1">{formatTime(monitor.last_checked_at)}</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">显示</Text>
+              <Text size="1">{monitor.hidden ? '对非管理员隐藏' : '公开'}</Text>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 export default function AdminWebsites() {
   const apiFetch = useApi();
   const [loading, setLoading] = useState(true);
@@ -264,6 +345,7 @@ export default function AdminWebsites() {
   const [editMonitor, setEditMonitor] = useState<WebsiteMonitor | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [selectedWebsites, setSelectedWebsites] = useState<number[]>([]);
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -339,6 +421,14 @@ export default function AdminWebsites() {
     if (!editMonitor) return;
     loadChecks(editMonitor.id).catch(() => setChecks([]));
   }, [editMonitor?.id]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const updateMobile = () => setIsMobile(media.matches);
+    updateMobile();
+    media.addEventListener('change', updateMobile);
+    return () => media.removeEventListener('change', updateMobile);
+  }, []);
 
   const update = (key: keyof typeof emptyForm, value: string | number | boolean | string[]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -618,25 +708,10 @@ export default function AdminWebsites() {
         </Flex>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={filteredIds} strategy={rectSortingStrategy}>
-            <Table.Root>
-              <Table.Header>
-                <Table.Row>
-                  <Table.ColumnHeaderCell className="admin-website-control-cell">
-                    <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
-                  </Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-name-cell">名称</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-url-cell">网址</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-status-cell">状态</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-raw-cell">原始响应</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-interval-cell">检测</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-checked-cell">最近检测</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-visibility-cell">显示</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-actions-cell">操作</Table.ColumnHeaderCell>
-                </Table.Row>
-              </Table.Header>
-              <Table.Body>
+            {isMobile ? (
+              <div className="admin-website-card-grid">
                 {filtered.map((monitor) => (
-                  <SortableWebsiteRow
+                  <SortableWebsiteCard
                     key={monitor.id}
                     monitor={monitor}
                     selected={selectedWebsites.includes(monitor.id)}
@@ -649,8 +724,44 @@ export default function AdminWebsites() {
                     onRemove={(target) => remove(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))}
                   />
                 ))}
-              </Table.Body>
-            </Table.Root>
+              </div>
+            ) : (
+              <div className="admin-website-table-wrap">
+                <Table.Root>
+                  <Table.Header>
+                    <Table.Row>
+                      <Table.ColumnHeaderCell className="admin-website-control-cell">
+                        <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
+                      </Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-name-cell">名称</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-url-cell">网址</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-status-cell">状态</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-raw-cell">原始响应</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-interval-cell">检测</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-checked-cell">最近检测</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-visibility-cell">显示</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-actions-cell">操作</Table.ColumnHeaderCell>
+                    </Table.Row>
+                  </Table.Header>
+                  <Table.Body>
+                    {filtered.map((monitor) => (
+                      <SortableWebsiteRow
+                        key={monitor.id}
+                        monitor={monitor}
+                        selected={selectedWebsites.includes(monitor.id)}
+                        dragDisabled={dragDisabled}
+                        onSelect={toggleSelect}
+                        onCheck={(target) => checkNow(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '检测失败'))}
+                        onVisibility={(target, hidden) => setVisibility(target, hidden).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
+                        onEnabled={(target, enabled) => setEnabled(target, enabled).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
+                        onEdit={openEdit}
+                        onRemove={(target) => remove(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))}
+                      />
+                    ))}
+                  </Table.Body>
+                </Table.Root>
+              </div>
+            )}
           </SortableContext>
         </DndContext>
         {filtered.length === 0 && <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{search ? '未找到匹配的网站' : '暂无网站监控'}</Text>}
@@ -659,6 +770,7 @@ export default function AdminWebsites() {
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
         <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }}>
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
+          <div className="admin-website-dialog-scroll">
           <Flex direction="column" gap="3">
             <Grid columns={{ initial: '1', sm: '2' }} gap="3">
               <label>
@@ -743,6 +855,7 @@ export default function AdminWebsites() {
               </Flex>
             </Flex>
           </Flex>
+          </div>
         </Dialog.Content>
       </Dialog.Root>
     </Flex>

@@ -5285,7 +5285,11 @@ html[data-monitor-theme='next'] .node-network-value strong {
   overflow-x: auto;
 }
 
-.admin-website-table-card .rt-TableRoot {
+.admin-website-table-wrap {
+  overflow-x: auto;
+}
+
+.admin-website-table-wrap .rt-TableRoot {
   min-width: 1180px;
   table-layout: fixed;
 }
@@ -5385,6 +5389,58 @@ html[data-monitor-theme='next'] .node-network-value strong {
   font-size: 14px;
 }
 
+.admin-website-card-grid {
+  display: none;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.admin-website-card-shell {
+  min-width: 0;
+}
+
+.admin-website-card-header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.admin-website-card-title {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.admin-website-card-body {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-website-card-url {
+  min-width: 0;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  background: var(--monitor-panel-muted);
+}
+
+.admin-website-card-meta-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-website-dialog-scroll {
+  max-height: min(72vh, 680px);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 @media (max-width: 760px) {
   .nav-bar {
     min-height: 104px;
@@ -5412,10 +5468,42 @@ html[data-monitor-theme='next'] .node-network-value strong {
 
   .admin-website-table-card {
     margin-inline: -4px;
+    overflow-x: hidden;
+  }
+
+  .admin-website-table-wrap {
+    display: none;
+  }
+
+  .admin-website-card-grid {
+    display: grid;
   }
 
   .admin-website-url {
-    max-width: 220px;
+    max-width: 100%;
+  }
+
+  .admin-website-card-header {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .admin-website-card-header .admin-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .admin-website-card-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-website-edit-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .admin-website-dialog-scroll {
+    max-height: calc(100vh - 116px);
   }
 
   .nav-monitor-switch {
