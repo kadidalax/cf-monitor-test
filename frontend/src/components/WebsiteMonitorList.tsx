@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { Box, Flex, SegmentedControl, Text } from '@radix-ui/themes';
 import { ExternalLink } from 'lucide-react';
 import WebsiteHeartbeatBar, { WebsiteHeartbeatPoint } from './WebsiteHeartbeatBar';
@@ -91,6 +91,14 @@ export default function WebsiteMonitorList({
   onPeriodChange: (hours: number) => void;
   periods?: readonly number[];
 }) {
+  // ponytail: 切换周期时 checks 数据异步到达，用新周期对旧数据分桶会产生大量空桶闪灰。
+  // loading 期间保持上一个已渲染周期，数据就绪后一并切换。
+  const lastPeriodRef = useRef(periodHours);
+  if (!loading) {
+    lastPeriodRef.current = periodHours;
+  }
+  const renderPeriodHours = loading ? lastPeriodRef.current : periodHours;
+
   const summary = useMemo(() => {
     const up = monitors.filter((monitor) => monitor.status === 'up').length;
     const down = monitors.filter((monitor) => monitor.status === 'down').length;
@@ -120,9 +128,9 @@ export default function WebsiteMonitorList({
       </div>
       <div className="kuma-monitor-items">
         {monitors.map((monitor) => {
-          const periodChecks = checksInPeriod(monitor.checks || [], periodHours);
-          const segmentCount = heartbeatSegmentCount(periodHours, monitor.interval_sec);
-          const bucketedChecks = bucketChecksByPeriod(monitor.checks || [], periodHours, segmentCount);
+          const periodChecks = checksInPeriod(monitor.checks || [], renderPeriodHours);
+          const segmentCount = heartbeatSegmentCount(renderPeriodHours, monitor.interval_sec);
+          const bucketedChecks = bucketChecksByPeriod(monitor.checks || [], renderPeriodHours, segmentCount);
           return (
           <article
             key={monitor.id}
@@ -148,7 +156,7 @@ export default function WebsiteMonitorList({
             <Box className="kuma-monitor-row-heartbeat">
               <WebsiteHeartbeatBar checks={bucketedChecks} max={segmentCount} />
               <Flex justify="between" className="kuma-monitor-row-time">
-                <Text size="1" color="gray">{periodHours}h</Text>
+                <Text size="1" color="gray">{renderPeriodHours}h</Text>
                 <Text size="1" color="gray">{lastSeenText(monitor.last_checked_at)}</Text>
               </Flex>
             </Box>
