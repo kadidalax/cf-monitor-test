@@ -1,0 +1,40 @@
+{
+  "name": "cf-vps-monitor-monorepo",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "worker"
+  ],
+  "scripts": {
+    "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
+    "build:migrations": "node scripts/generate-migrations.mjs",
+    "build": "npm --prefix frontend run build && npm --prefix worker run build",
+    "test": "node scripts/check-mini-ping-toggle.mjs && node scripts/check-instance-chart-range.mjs && node scripts/check-ping-chart-failed-series.mjs && node scripts/check-theme-active-default.mjs && node scripts/check-backup-restore-safeupdate.mjs && node scripts/check-region-count-country.mjs && node scripts/check-agent-ws-query-token.mjs && node scripts/check-agent-install-token-persistence.mjs && cd agent && go test ./...",
+    "verify": "npm run lint && npm run build && npm test",
+    "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json",
+    "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
+    "dev:worker": "npm --prefix worker run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SUPABASE_URL": {
+        "description": "Supabase Project URL, for example `https://PROJECT_REF.supabase.co`. Find it in Supabase **Project Settings** -> **API**."
+      },
+      "SUPABASE_SERVICE_ROLE_KEY": {
+        "description": "Supabase secret/service role key. Store it as a Worker secret; never expose it in frontend code."
+      },
+      "JWT_SECRET": {
+        "description": "Admin session signing secret. Use a random string with at least 32 characters."
+      },
+      "ADMIN_USERNAME": {
+        "description": "Initial admin login username."
+      },
+      "ADMIN_PASSWORD": {
+        "description": "Initial admin login password."
+      }
+    }
+  }
+}
