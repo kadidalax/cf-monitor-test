@@ -248,7 +248,7 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
   );
 }
 
-function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onCheck, onVisibility, onEnabled, onEdit, onRemove }: SortableWebsiteRowProps) {
+function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onCheck, onEnabled, onEdit, onRemove }: SortableWebsiteRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: monitor.id,
     disabled: dragDisabled,
@@ -293,11 +293,10 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
           </div>
 
           <Flex className="admin-row-actions">
-            <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
-            <Tooltip content={monitor.hidden ? '公开' : '隐藏'}><IconButton size="1" variant="soft" onClick={() => onVisibility(monitor, !monitor.hidden)}>{monitor.hidden ? <Eye size={13} /> : <EyeOff size={13} />}</IconButton></Tooltip>
-            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={13} /></IconButton></Tooltip>
-            <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
-            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
+            <Tooltip content="检测"><IconButton size="2" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={14} /></IconButton></Tooltip>
+            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="2" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={14} /></IconButton></Tooltip>
+            <Tooltip content="编辑"><IconButton size="2" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={14} /></IconButton></Tooltip>
+            <Tooltip content="删除"><IconButton size="2" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={14} /></IconButton></Tooltip>
           </Flex>
         </div>
 
@@ -523,7 +522,7 @@ export default function AdminWebsites() {
     });
     assertSuccess(result, '设置失败');
     setMonitors((current) => current.map((item) => item.id === monitor.id ? { ...item, hidden } : item));
-    notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, hidden }], remove: hidden ? [monitor.id] : undefined });
+    notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, hidden }] });
   };
 
   const setEnabled = async (monitor: WebsiteMonitor, enabled: boolean) => {
@@ -565,7 +564,6 @@ export default function AdminWebsites() {
       setMonitors((current) => current.map((monitor) => ids.has(monitor.id) ? { ...monitor, hidden } : monitor));
       notifyWebsiteMonitorsUpdated({
         upsert: targets.map((monitor) => ({ ...monitor, hidden })),
-        remove: hidden ? targets.map((monitor) => monitor.id) : undefined,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '设置失败');
@@ -600,6 +598,7 @@ export default function AdminWebsites() {
   };
 
   const remove = async (monitor: WebsiteMonitor) => {
+    if (!window.confirm(`确定删除网站监控「${monitor.name}」吗？`)) return;
     const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
     assertSuccess(result, '删除失败');
     toast.success('已删除');
@@ -768,7 +767,7 @@ export default function AdminWebsites() {
       </Card>
 
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
-        <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }}>
+        <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }} onOpenAutoFocus={(event) => event.preventDefault()}>
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
           <div className="admin-website-dialog-scroll">
           <Flex direction="column" gap="3">

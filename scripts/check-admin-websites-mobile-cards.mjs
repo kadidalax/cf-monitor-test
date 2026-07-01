@@ -16,6 +16,19 @@ const checks = [
   [css.includes('left: 50% !important') && css.includes('transform: translateX(-50%) !important'), 'mobile website dialog must be viewport-centered'],
 ];
 
+const mobileCard = page.slice(page.indexOf('function SortableWebsiteCard'), page.indexOf('export default function AdminWebsites'));
+const setVisibility = page.slice(page.indexOf('const setVisibility'), page.indexOf('const setEnabled'));
+const setSelectedVisibility = page.slice(page.indexOf('const setSelectedVisibility'), page.indexOf('const handleDragEnd'));
+const remove = page.slice(page.indexOf('const remove'), page.indexOf('const checkNow'));
+
+checks.push(
+  [!mobileCard.includes('onVisibility(monitor'), 'mobile website card must not show the hide action'],
+  [!setVisibility.includes('remove: hidden ? [monitor.id]'), 'single visibility updates must preserve admin ordering'],
+  [!setSelectedVisibility.includes('remove: hidden ? targets.map'), 'bulk visibility updates must preserve admin ordering'],
+  [remove.includes('window.confirm('), 'website delete must ask for confirmation'],
+  [page.includes('onOpenAutoFocus={(event) => event.preventDefault()}'), 'website edit dialog must not autofocus on mobile'],
+);
+
 const failures = checks.filter(([ok]) => !ok).map(([, message]) => message);
 
 if (failures.length) {
