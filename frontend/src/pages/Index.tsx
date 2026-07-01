@@ -229,6 +229,12 @@ export default function Index() {
   const [websitePeriodHours, setWebsitePeriodHours] = useState(24);
   const offlinePosition = useMemo(loadOfflinePosition, []);
 
+  const handleWebsitePeriodChange = (hours: number) => {
+    if (hours === websitePeriodHours) return;
+    setWebsitesLoading(true);
+    setWebsitePeriodHours(hours);
+  };
+
   // Load client list
   useEffect(() => {
     let cancelled = false;
@@ -451,7 +457,7 @@ export default function Index() {
       ) : (
         <section className="website-monitor-shell">
           {websitesError && <ApiUnavailableNotice error={websitesError} />}
-          <WebsiteMonitorList monitors={websites} loading={websitesLoading} periodHours={websitePeriodHours} onPeriodChange={setWebsitePeriodHours} periods={WEBSITE_MONITOR_PERIODS} />
+          <WebsiteMonitorList monitors={websites} loading={websitesLoading} periodHours={websitePeriodHours} onPeriodChange={handleWebsitePeriodChange} periods={WEBSITE_MONITOR_PERIODS} />
         </section>
       )}
     </div>
