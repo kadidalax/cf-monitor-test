@@ -1535,7 +1535,8 @@ adminRoutes.post('/clients/reorder', async (c) => {
     const missing = uuids.filter(uuid => !existingSet.has(uuid));
     const updated = existingUuids.length > 0 ? await db.reorderClients(database, existingUuids) : 0;
     if (updated > 0) {
-      invalidateAdminClientsCache();
+      const refreshedClients = (await listAdminClientsCached(database, true)).map(hideAdminClientToken);
+      await writeAdminClientsSnapshot(c, refreshedClients);
       await Promise.all([
         purgeAdminClientsEdgeCache(c),
         broadcastLiveMetadataChanged(c, {

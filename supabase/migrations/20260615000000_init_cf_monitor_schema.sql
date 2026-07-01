@@ -200,6 +200,10 @@ create table if not exists website_monitors (
   grace_period_sec integer not null default 180,
   enabled boolean not null default true,
   hidden boolean not null default false,
+  agent_probe_mode text not null default 'off',
+  agent_probe_clients jsonb not null default '[]'::jsonb,
+  agent_probe_limit integer not null default 3,
+  agent_probe_status_enabled boolean not null default false,
   sort_order integer not null default 0,
   status text not null default 'pending',
   last_checked_at timestamptz,
@@ -223,7 +227,9 @@ create table if not exists website_monitors (
   ),
   constraint website_monitors_interval_check check (interval_sec between 60 and 86400),
   constraint website_monitors_timeout_check check (timeout_sec between 1 and 30 and timeout_sec <= interval_sec),
-  constraint website_monitors_grace_check check (grace_period_sec between 30 and 86400)
+  constraint website_monitors_grace_check check (grace_period_sec between 30 and 86400),
+  constraint website_monitors_agent_probe_mode_check check (agent_probe_mode in ('off', 'selected', 'country_auto')),
+  constraint website_monitors_agent_probe_limit_check check (agent_probe_limit between 1 and 10)
 );
 
 create table if not exists website_checks (
@@ -237,12 +243,17 @@ create table if not exists website_checks (
   raw_status_code integer,
   latency_ms integer,
   error text,
+  source_type text not null default 'worker',
+  source_client text,
+  constraint website_checks_source_type_check check (source_type in ('worker', 'agent')),
+  constraint website_checks_source_client_fkey foreign key (source_client) references clients(uuid) on delete set null,
   constraint website_checks_monitor_id_fkey foreign key (monitor_id) references website_monitors(id) on delete cascade
 );
 
 create index if not exists idx_website_monitors_sort_order on website_monitors(sort_order, id);
 create index if not exists idx_website_monitors_due on website_monitors(enabled, last_checked_at, interval_sec);
 create index if not exists idx_website_checks_monitor_time on website_checks(monitor_id, checked_at desc);
+create index if not exists idx_website_checks_monitor_source_time on website_checks(monitor_id, source_type, source_client, checked_at desc);
 
 create table if not exists offline_notifications (
   client text primary key references clients(uuid) on delete cascade,

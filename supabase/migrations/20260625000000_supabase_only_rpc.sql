@@ -336,7 +336,7 @@ begin
     if coalesce(array_length(task_ids, 1), 0) > 0 then
       delete from ping_tasks where not (id = any(task_ids));
     else
-      delete from ping_tasks;
+      delete from ping_tasks where true;
     end if;
 
     for item in select value from jsonb_array_elements(input_backup->'ping_tasks')
@@ -379,7 +379,7 @@ begin
   end if;
 
   if input_backup ? 'offline_notifications' and jsonb_typeof(input_backup->'offline_notifications') = 'array' then
-    delete from offline_notifications;
+    delete from offline_notifications where true;
     insert into offline_notifications (client, enable, grace_period, last_notified)
     select
       value->>'client',
@@ -391,7 +391,7 @@ begin
   end if;
 
   if input_backup ? 'expiry_notifications' and jsonb_typeof(input_backup->'expiry_notifications') = 'array' then
-    delete from expiry_notifications;
+    delete from expiry_notifications where true;
     insert into expiry_notifications (client, enable, advance_days, last_notified)
     select
       value->>'client',
@@ -403,7 +403,7 @@ begin
   end if;
 
   if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then
-    delete from load_notifications;
+    delete from load_notifications where true;
     for item in select value from jsonb_array_elements(input_backup->'load_notifications')
     loop
       if coalesce(item->>'id', '') ~ '^[0-9]+$' and (item->>'id')::bigint > 0 then

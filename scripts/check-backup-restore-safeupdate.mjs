@@ -18,11 +18,11 @@ function functionBody(name) {
 
 const restoreBackup = functionBody('cfm_restore_backup_data');
 
-assert.match(
-  source.slice(source.lastIndexOf(restoreBackup)),
-  /set_config\('safeupdate\.enabled',\s*'0',\s*true\)|alter function public\.cfm_restore_backup_data\(jsonb\)\s+set safeupdate\.enabled\s*=\s*'0'/i,
-  'backup restore must disable pg-safeupdate for the restore transaction',
-);
+assert.doesNotMatch(source, /safeupdate\.enabled/i, 'migrations must not set safeupdate.enabled');
+assert.match(restoreBackup, /delete from ping_tasks\s+where true;/i, 'backup restore must safely clear ping_tasks');
+assert.match(restoreBackup, /delete from offline_notifications\s+where true;/i, 'backup restore must safely clear offline_notifications');
+assert.match(restoreBackup, /delete from expiry_notifications\s+where true;/i, 'backup restore must safely clear expiry_notifications');
+assert.match(restoreBackup, /delete from load_notifications\s+where true;/i, 'backup restore must safely clear load_notifications');
 assert.match(
   source,
   /revoke all on function public\.cfm_restore_backup_data\(jsonb\) from public;/i,

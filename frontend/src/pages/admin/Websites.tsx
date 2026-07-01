@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DndContext,
   type DragEndEvent,
@@ -34,7 +34,7 @@ import {
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
-import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import WebsiteHeartbeatBar from '../../components/WebsiteHeartbeatBar';
@@ -43,6 +43,7 @@ import { notifyWebsiteMonitorsUpdated, subscribeWebsiteMonitorsUpdated, type Web
 
 type WebsiteStatus = 'pending' | 'up' | 'down' | 'paused';
 type WebsiteMethod = 'GET' | 'HEAD' | 'TCP';
+type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
 type WebsiteStatusFilter = 'all' | 'up' | 'down' | 'hidden';
 type WebsiteSortKey = 'manual' | 'name' | 'status';
 type WebsiteSortDir = 'asc' | 'desc';
@@ -62,6 +63,10 @@ interface WebsiteMonitor {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  agent_probe_mode: WebsiteAgentProbeMode;
+  agent_probe_clients: string[];
+  agent_probe_limit: number;
+  agent_probe_status_enabled: boolean;
   status: WebsiteStatus;
   last_checked_at: string | null;
   last_status_code: number | null;
@@ -76,6 +81,12 @@ interface WebsiteCheck {
   latency_ms: number | null;
 }
 
+interface ClientLite {
+  uuid: string;
+  name: string;
+  region?: string;
+}
+
 const emptyForm = {
   name: '',
   url: 'https://',
@@ -87,6 +98,10 @@ const emptyForm = {
   grace_period_sec: 180,
   enabled: true,
   hidden: false,
+  agent_probe_mode: 'country_auto' as WebsiteAgentProbeMode,
+  agent_probe_clients: [] as string[],
+  agent_probe_limit: 3,
+  agent_probe_status_enabled: true,
 };
 
 function statusLabel(status: WebsiteStatus) {
@@ -233,11 +248,93 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
   );
 }
 
+function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onCheck, onEnabled, onEdit, onRemove }: SortableWebsiteRowProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: monitor.id,
+    disabled: dragDisabled,
+  });
+
+  const cardStyle = {
+    opacity: isDragging ? 0.72 : 1,
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div ref={setNodeRef} className={`admin-website-card-shell${isDragging ? ' is-dragging' : ''}`} style={cardStyle}>
+      <Card className={`admin-node-card admin-website-card${selected ? ' is-selected' : ''}`}>
+        <div className="admin-website-card-header">
+          <div className="admin-node-card-controls">
+            <Tooltip content={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}>
+              <button
+                type="button"
+                className="admin-row-drag-handle"
+                aria-label={`拖拽排序 ${monitor.name}`}
+                disabled={dragDisabled}
+                {...attributes}
+                {...listeners}
+              >
+                <GripVertical size={15} />
+              </button>
+            </Tooltip>
+            <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />
+          </div>
+
+          <div className="admin-website-card-title">
+            <Flex align="center" gap="2">
+              <span className={`website-status-dot is-${monitor.status}`} />
+              <Text weight="bold" className="admin-website-name-text">{monitor.name}</Text>
+            </Flex>
+            <Flex className="admin-node-card-badges" align="center" gap="1" wrap="wrap">
+              <Badge color={statusColor(monitor.status)} variant="soft">{statusLabel(monitor.status)}</Badge>
+              <Badge color={monitor.enabled ? 'green' : 'gray'} variant="soft">{monitor.enabled ? '启用' : '停用'}</Badge>
+              {monitor.hidden && <Badge color="orange" variant="soft">隐藏</Badge>}
+            </Flex>
+          </div>
+
+          <Flex className="admin-row-actions">
+            <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
+            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={13} /></IconButton></Tooltip>
+            <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
+            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
+          </Flex>
+        </div>
+
+        <div className="admin-website-card-body">
+          <a className="admin-website-url admin-website-card-url" href={monitor.url} target="_blank" rel="noopener noreferrer">
+            {monitor.url}<ExternalLink size={12} aria-hidden="true" />
+          </a>
+          <div className="admin-website-card-meta-grid">
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">原始响应</Text>
+              <Text size="1" title={effectiveReasonLabel(monitor.last_effective_reason)}>{rawStatusLabel(monitor)}</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">检测</Text>
+              <Text size="1">{monitor.interval_sec}s</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">最近检测</Text>
+              <Text size="1">{formatTime(monitor.last_checked_at)}</Text>
+            </div>
+            <div className="admin-node-card-meta">
+              <Text className="admin-node-card-section-label" size="1" weight="bold">显示</Text>
+              <Text size="1">{monitor.hidden ? '对非管理员隐藏' : '公开'}</Text>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 export default function AdminWebsites() {
   const apiFetch = useApi();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [monitors, setMonitors] = useState<WebsiteMonitor[]>([]);
+  const [clients, setClients] = useState<ClientLite[]>([]);
+  const [clientsLoaded, setClientsLoaded] = useState(false);
   const [checks, setChecks] = useState<WebsiteCheck[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<WebsiteStatusFilter>('all');
@@ -245,8 +342,12 @@ export default function AdminWebsites() {
   const [sortDir, setSortDir] = useState<WebsiteSortDir>('asc');
   const [editOpen, setEditOpen] = useState(false);
   const [editMonitor, setEditMonitor] = useState<WebsiteMonitor | null>(null);
+  const [deleteMonitor, setDeleteMonitor] = useState<WebsiteMonitor | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [selectedWebsites, setSelectedWebsites] = useState<number[]>([]);
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
+  const editDialogRef = useRef<HTMLDivElement | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -295,6 +396,15 @@ export default function AdminWebsites() {
     setChecks(Array.isArray(data) ? data as WebsiteCheck[] : []);
   };
 
+  const ensureClients = async () => {
+    if (clientsLoaded) return;
+    const data = await apiFetch('/admin/clients');
+    if (Array.isArray(data)) {
+      setClients(data as ClientLite[]);
+      setClientsLoaded(true);
+    }
+  };
+
   useEffect(() => {
     loadMonitors()
       .catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'))
@@ -314,8 +424,25 @@ export default function AdminWebsites() {
     loadChecks(editMonitor.id).catch(() => setChecks([]));
   }, [editMonitor?.id]);
 
-  const update = (key: keyof typeof emptyForm, value: string | number | boolean) => {
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const updateMobile = () => setIsMobile(media.matches);
+    updateMobile();
+    media.addEventListener('change', updateMobile);
+    return () => media.removeEventListener('change', updateMobile);
+  }, []);
+
+  const update = (key: keyof typeof emptyForm, value: string | number | boolean | string[]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const toggleAgentProbeClient = (uuid: string, checked: boolean | 'indeterminate') => {
+    setForm((prev) => {
+      const current = new Set(prev.agent_probe_clients);
+      if (checked === true) current.add(uuid);
+      else current.delete(uuid);
+      return { ...prev, agent_probe_clients: Array.from(current) };
+    });
   };
 
   const updateMethod = (method: WebsiteMethod) => {
@@ -327,6 +454,7 @@ export default function AdminWebsites() {
   };
 
   const openEdit = (monitor: WebsiteMonitor | null) => {
+    ensureClients().catch((error: unknown) => toast.error(error instanceof Error ? error.message : '服务列表加载失败'));
     setEditMonitor(monitor);
     setForm(monitor ? {
       name: monitor.name,
@@ -339,6 +467,10 @@ export default function AdminWebsites() {
       grace_period_sec: monitor.grace_period_sec,
       enabled: monitor.enabled,
       hidden: monitor.hidden,
+      agent_probe_mode: monitor.agent_probe_mode || 'off',
+      agent_probe_clients: Array.isArray(monitor.agent_probe_clients) ? monitor.agent_probe_clients : [],
+      agent_probe_limit: monitor.agent_probe_limit || 3,
+      agent_probe_status_enabled: Boolean(monitor.agent_probe_status_enabled),
     } : emptyForm);
     if (!monitor) setChecks([]);
     setEditOpen(true);
@@ -393,7 +525,7 @@ export default function AdminWebsites() {
     });
     assertSuccess(result, '设置失败');
     setMonitors((current) => current.map((item) => item.id === monitor.id ? { ...item, hidden } : item));
-    notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, hidden }], remove: hidden ? [monitor.id] : undefined });
+    notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, hidden }] });
   };
 
   const setEnabled = async (monitor: WebsiteMonitor, enabled: boolean) => {
@@ -435,7 +567,6 @@ export default function AdminWebsites() {
       setMonitors((current) => current.map((monitor) => ids.has(monitor.id) ? { ...monitor, hidden } : monitor));
       notifyWebsiteMonitorsUpdated({
         upsert: targets.map((monitor) => ({ ...monitor, hidden })),
-        remove: hidden ? targets.map((monitor) => monitor.id) : undefined,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '设置失败');
@@ -451,7 +582,10 @@ export default function AdminWebsites() {
     if (oldIndex < 0 || newIndex < 0) return;
 
     const previousMonitors = monitors;
-    const nextMonitors = arrayMove(monitors, oldIndex, newIndex);
+    const nextMonitors = arrayMove(monitors, oldIndex, newIndex).map((monitor, index) => ({
+      ...monitor,
+      sort_order: index + 1,
+    }));
     setMonitors(nextMonitors);
 
     try {
@@ -470,13 +604,19 @@ export default function AdminWebsites() {
   };
 
   const remove = async (monitor: WebsiteMonitor) => {
-    const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
-    assertSuccess(result, '删除失败');
-    toast.success('已删除');
-    setEditOpen(false);
-    setMonitors((current) => current.filter((item) => item.id !== monitor.id));
-    setSelectedWebsites((current) => current.filter((id) => id !== monitor.id));
-    notifyWebsiteMonitorsUpdated({ remove: [monitor.id] });
+    setDeleting(true);
+    try {
+      const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
+      assertSuccess(result, '删除失败');
+      toast.success('已删除');
+      setEditOpen(false);
+      setDeleteMonitor(null);
+      setMonitors((current) => current.filter((item) => item.id !== monitor.id));
+      setSelectedWebsites((current) => current.filter((id) => id !== monitor.id));
+      notifyWebsiteMonitorsUpdated({ remove: [monitor.id] });
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const checkNow = async (monitor: WebsiteMonitor) => {
@@ -578,25 +718,10 @@ export default function AdminWebsites() {
         </Flex>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={filteredIds} strategy={rectSortingStrategy}>
-            <Table.Root>
-              <Table.Header>
-                <Table.Row>
-                  <Table.ColumnHeaderCell className="admin-website-control-cell">
-                    <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
-                  </Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-name-cell">名称</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-url-cell">网址</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-status-cell">状态</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-raw-cell">原始响应</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-interval-cell">检测</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-checked-cell">最近检测</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-visibility-cell">显示</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell className="admin-website-actions-cell">操作</Table.ColumnHeaderCell>
-                </Table.Row>
-              </Table.Header>
-              <Table.Body>
+            {isMobile ? (
+              <div className="admin-website-card-grid">
                 {filtered.map((monitor) => (
-                  <SortableWebsiteRow
+                  <SortableWebsiteCard
                     key={monitor.id}
                     monitor={monitor}
                     selected={selectedWebsites.includes(monitor.id)}
@@ -606,21 +731,81 @@ export default function AdminWebsites() {
                     onVisibility={(target, hidden) => setVisibility(target, hidden).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                     onEnabled={(target, enabled) => setEnabled(target, enabled).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                     onEdit={openEdit}
-                    onRemove={(target) => remove(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))}
+                    onRemove={setDeleteMonitor}
                   />
                 ))}
-              </Table.Body>
-            </Table.Root>
+              </div>
+            ) : (
+              <div className="admin-website-table-wrap">
+                <Table.Root>
+                  <Table.Header>
+                    <Table.Row>
+                      <Table.ColumnHeaderCell className="admin-website-control-cell">
+                        <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
+                      </Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-name-cell">名称</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-url-cell">网址</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-status-cell">状态</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-raw-cell">原始响应</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-interval-cell">检测</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-checked-cell">最近检测</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-visibility-cell">显示</Table.ColumnHeaderCell>
+                      <Table.ColumnHeaderCell className="admin-website-actions-cell">操作</Table.ColumnHeaderCell>
+                    </Table.Row>
+                  </Table.Header>
+                  <Table.Body>
+                    {filtered.map((monitor) => (
+                      <SortableWebsiteRow
+                        key={monitor.id}
+                        monitor={monitor}
+                        selected={selectedWebsites.includes(monitor.id)}
+                        dragDisabled={dragDisabled}
+                        onSelect={toggleSelect}
+                        onCheck={(target) => checkNow(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '检测失败'))}
+                        onVisibility={(target, hidden) => setVisibility(target, hidden).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
+                        onEnabled={(target, enabled) => setEnabled(target, enabled).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
+                        onEdit={openEdit}
+                        onRemove={setDeleteMonitor}
+                      />
+                    ))}
+                  </Table.Body>
+                </Table.Root>
+              </div>
+            )}
           </SortableContext>
         </DndContext>
         {filtered.length === 0 && <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{search ? '未找到匹配的网站' : '暂无网站监控'}</Text>}
       </Card>
 
+      <Dialog.Root open={Boolean(deleteMonitor)} onOpenChange={(open) => { if (!open && !deleting) setDeleteMonitor(null); }}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
+          <Dialog.Title>确认删除</Dialog.Title>
+          <Text size="2">确定要删除网站监控 <strong>{deleteMonitor?.name}</strong> 吗？此操作不可撤销。</Text>
+          <Flex gap="3" justify="end" mt="4">
+            <Button variant="soft" onClick={() => setDeleteMonitor(null)} disabled={deleting}>取消</Button>
+            <Button color="red" onClick={() => deleteMonitor && remove(deleteMonitor).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))} disabled={deleting}>
+              {deleting ? '删除中...' : '确认删除'}
+            </Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
-        <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }}>
+        <Dialog.Content
+          ref={editDialogRef}
+          tabIndex={-1}
+          aria-describedby={undefined}
+          className="admin-website-edit-dialog"
+          style={{ maxWidth: 640 }}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            requestAnimationFrame(() => editDialogRef.current?.focus({ preventScroll: true }));
+          }}
+        >
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
+          <div className="admin-website-dialog-scroll">
           <Flex direction="column" gap="3">
-            <Grid columns={{ initial: '1', sm: '2' }} gap="3">
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '2' }} gap="3">
               <label>
                 <Text size="2" weight="bold">名称</Text>
                 <TextField.Root value={form.name} onChange={(event) => update('name', event.target.value)} />
@@ -645,7 +830,7 @@ export default function AdminWebsites() {
                 onChange={(event) => update('url', event.target.value)}
               />
             </label>
-            <Grid columns={{ initial: '1', sm: '3' }} gap="3">
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
               <label><Text size="2" weight="bold">检测间隔(秒)</Text><TextField.Root type="number" value={String(form.interval_sec)} onChange={(event) => update('interval_sec', Number(event.target.value))} /></label>
               <label><Text size="2" weight="bold">超时(秒)</Text><TextField.Root type="number" value={String(form.timeout_sec)} onChange={(event) => update('timeout_sec', Number(event.target.value))} /></label>
               <label><Text size="2" weight="bold">宽限期(秒)</Text><TextField.Root type="number" value={String(form.grace_period_sec)} onChange={(event) => update('grace_period_sec', Number(event.target.value))} /></label>
@@ -660,6 +845,41 @@ export default function AdminWebsites() {
               <label className="admin-website-toggle"><Switch checked={form.enabled} onCheckedChange={(value) => update('enabled', value)} />启用检测</label>
               <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对非管理员隐藏</label>
             </Flex>
+            <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
+              <label>
+                <Text size="2" weight="bold">Agent 探测</Text>
+                <Select.Root value={form.agent_probe_mode} onValueChange={(value) => update('agent_probe_mode', value as WebsiteAgentProbeMode)}>
+                  <Select.Trigger style={{ width: '100%' }} />
+                  <Select.Content>
+                    <Select.Item value="off">关闭</Select.Item>
+                    <Select.Item value="selected">指定节点</Select.Item>
+                    <Select.Item value="country_auto">按国家自动</Select.Item>
+                  </Select.Content>
+                </Select.Root>
+              </label>
+              <label>
+                <Text size="2" weight="bold">节点上限</Text>
+                <TextField.Root type="number" min="1" max="10" value={String(form.agent_probe_limit)} onChange={(event) => update('agent_probe_limit', Number(event.target.value))} />
+              </label>
+              <label className="admin-website-toggle" style={{ alignSelf: 'end' }}>
+                <Switch checked={form.agent_probe_status_enabled} onCheckedChange={(value) => update('agent_probe_status_enabled', value)} />CF 兜底
+              </label>
+            </Grid>
+            {form.agent_probe_mode === 'selected' && (
+              <Flex gap="2" wrap="wrap">
+                {clients.length > 0 ? clients.map((client) => (
+                  <label key={client.uuid} className="admin-website-toggle">
+                    <Checkbox
+                      checked={form.agent_probe_clients.includes(client.uuid)}
+                      onCheckedChange={(checked) => toggleAgentProbeClient(client.uuid, checked)}
+                    />
+                    {client.name || client.uuid}
+                  </label>
+                )) : (
+                  <Text size="2" color="gray">暂无可选节点</Text>
+                )}
+              </Flex>
+            )}
             {editMonitor && <WebsiteHeartbeatBar checks={checks} max={60} />}
             <Flex gap="2" justify="end" wrap="wrap">
               <Flex gap="2">
@@ -668,6 +888,7 @@ export default function AdminWebsites() {
               </Flex>
             </Flex>
           </Flex>
+          </div>
         </Dialog.Content>
       </Dialog.Root>
     </Flex>

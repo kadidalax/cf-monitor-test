@@ -8,6 +8,8 @@ export interface WebsiteHeartbeatPoint {
   status_code?: number | null;
   raw_status_code?: number | null;
   latency_ms: number | null;
+  source_type?: 'worker' | 'agent';
+  source_client?: string | null;
 }
 
 function heartbeatResultText(check: WebsiteHeartbeatPoint) {

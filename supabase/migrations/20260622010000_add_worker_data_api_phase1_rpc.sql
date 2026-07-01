@@ -1448,6 +1448,23 @@ begin
 end;
 $$;
 
+alter table website_monitors add column if not exists agent_probe_mode text not null default 'off';
+alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
+alter table website_monitors add column if not exists agent_probe_limit integer not null default 3;
+alter table website_monitors add column if not exists agent_probe_status_enabled boolean not null default false;
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_mode_check;
+alter table website_monitors add constraint website_monitors_agent_probe_mode_check check (agent_probe_mode in ('off', 'selected', 'country_auto'));
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_limit_check;
+alter table website_monitors add constraint website_monitors_agent_probe_limit_check check (agent_probe_limit between 1 and 10);
+
+alter table website_checks add column if not exists source_type text not null default 'worker';
+alter table website_checks add column if not exists source_client text;
+alter table website_checks drop constraint if exists website_checks_source_type_check;
+alter table website_checks add constraint website_checks_source_type_check check (source_type in ('worker', 'agent'));
+alter table website_checks drop constraint if exists website_checks_source_client_fkey;
+alter table website_checks add constraint website_checks_source_client_fkey foreign key (source_client) references clients(uuid) on delete set null;
+create index if not exists idx_website_checks_monitor_source_time on website_checks(monitor_id, source_type, source_client, checked_at desc);
+
 create or replace function public.cfm_record_website_check(input_check jsonb)
 returns jsonb
 language plpgsql
@@ -1457,6 +1474,8 @@ declare
   monitor_row website_monitors%rowtype;
   check_ok boolean;
   checked_time timestamptz;
+  source_kind text;
+  source_client_id text;
 begin
   if input_check is null or jsonb_typeof(input_check) <> 'object' then
     return null;
@@ -1464,10 +1483,23 @@ begin
 
   check_ok := coalesce((input_check->>'ok')::boolean, false);
   checked_time := (input_check->>'checked_at')::timestamptz;
+  source_kind := coalesce(nullif(input_check->>'source_type', ''), 'worker');
+  if source_kind not in ('worker', 'agent') then
+    source_kind := 'worker';
+  end if;
+  source_client_id := nullif(input_check->>'source_client', '');
+
+  select * into monitor_row
+  from website_monitors
+  where id = (input_check->>'monitor_id')::integer
+  limit 1;
+  if not found then
+    return null;
+  end if;
 
   insert into website_checks (
     monitor_id, checked_at, ok, effective_status, effective_reason,
-    status_code, raw_status_code, latency_ms, error
+    status_code, raw_status_code, latency_ms, error, source_type, source_client
   )
   values (
     (input_check->>'monitor_id')::integer,
@@ -1478,8 +1510,14 @@ begin
     nullif(input_check->>'status_code', '')::integer,
     nullif(input_check->>'raw_status_code', '')::integer,
     nullif(input_check->>'latency_ms', '')::integer,
-    input_check->>'error'
+    input_check->>'error',
+    source_kind,
+    source_client_id
   );
+
+  if source_kind = 'agent' and monitor_row.agent_probe_status_enabled = false then
+    return to_jsonb(monitor_row);
+  end if;
 
   if check_ok then
     update website_monitors
@@ -1517,6 +1555,71 @@ begin
   end if;
   return to_jsonb(monitor_row);
 end;
+$$;
+
+create or replace function public.cfm_agent_website_probe_tasks(input_client text, input_now text, input_limit integer default 20)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with args as (
+    select
+      nullif(input_client, '') as client_id,
+      least(greatest(coalesce(input_limit, 20), 1), 50) as safe_limit
+  ),
+  selected as (
+    select wm.*
+    from website_monitors wm, args a
+    where wm.enabled = true
+      and wm.agent_probe_mode = 'selected'
+      and exists (
+        select 1
+        from jsonb_array_elements_text(wm.agent_probe_clients) client_id
+        where client_id = a.client_id
+      )
+  ),
+  country_candidates as (
+    select
+      wm.*,
+      c.uuid,
+      row_number() over (
+        partition by wm.id, coalesce(nullif(c.region, ''), c.uuid)
+        order by c.sort_order asc, c.name asc, c.uuid asc
+      ) as country_rank,
+      row_number() over (
+        partition by wm.id
+        order by c.sort_order asc, c.name asc, c.uuid asc
+      ) as monitor_rank
+    from website_monitors wm
+    join clients c on c.hidden = 0
+    where wm.enabled = true
+      and wm.agent_probe_mode = 'country_auto'
+  ),
+  country_selected as (
+    select *
+    from country_candidates, args a
+    where uuid = a.client_id
+      and country_rank = 1
+      and monitor_rank <= agent_probe_limit
+  ),
+  all_rows as (
+    select * from selected
+    union
+    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
+      timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
+      agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
+      last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
+      last_effective_reason, last_error, down_since, last_notified_at, created_at, updated_at
+    from country_selected
+  )
+  select coalesce(jsonb_agg(to_jsonb(row_data) order by sort_order asc, id asc), '[]'::jsonb)
+  from (
+    select *
+    from all_rows
+    order by sort_order asc, id asc
+    limit (select safe_limit from args)
+  ) row_data;
 $$;
 
 create or replace function public.cfm_mark_website_monitor_notified(input_id integer, input_time text)
@@ -2314,7 +2417,7 @@ as $$
     from (
       select
         wc.monitor_id, wc.checked_at, wc.ok, wc.effective_status, wc.effective_reason,
-        wc.status_code, wc.raw_status_code, wc.latency_ms,
+        wc.status_code, wc.raw_status_code, wc.latency_ms, wc.source_type, wc.source_client,
         row_number() over (
           partition by wc.monitor_id,
           floor(extract(epoch from (now() - wc.checked_at)) / greatest(60, floor((a.safe_hours * 60 * 60) / a.safe_limit)))
@@ -2323,6 +2426,7 @@ as $$
       from website_checks wc
       cross join args a
       where wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
+        and wc.source_type = 'worker'
     ) ranked
     where rn = 1
   )
@@ -2361,7 +2465,7 @@ begin
       limit 1
     ),
     check_rows as (
-      select checked_at, ok, effective_status, effective_reason, status_code, raw_status_code, latency_ms
+      select checked_at, ok, effective_status, effective_reason, status_code, raw_status_code, latency_ms, source_type, source_client
       from website_checks, args
       where monitor_id = input_id
       order by checked_at desc, id desc
@@ -2435,7 +2539,9 @@ declare
 begin
   insert into website_monitors (
     name, url, method, expected_status_min, expected_status_max,
-    interval_sec, timeout_sec, grace_period_sec, enabled, hidden, sort_order
+    interval_sec, timeout_sec, grace_period_sec, enabled, hidden,
+    agent_probe_mode, agent_probe_clients, agent_probe_limit, agent_probe_status_enabled,
+    sort_order
   ) values (
     coalesce(input_monitor->>'name', ''),
     coalesce(input_monitor->>'url', ''),
@@ -2447,6 +2553,10 @@ begin
     coalesce((input_monitor->>'grace_period_sec')::integer, 180),
     coalesce((input_monitor->>'enabled')::boolean, true),
     coalesce((input_monitor->>'hidden')::boolean, false),
+    case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else 'off' end,
+    case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else '[]'::jsonb end,
+    least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, 3), 1), 10),
+    coalesce((input_monitor->>'agent_probe_status_enabled')::boolean, false),
     (select coalesce(max(sort_order), 0) + 1 from website_monitors)
   )
   returning * into created_row;
@@ -2472,6 +2582,10 @@ as $$
     grace_period_sec = coalesce((input_monitor->>'grace_period_sec')::integer, grace_period_sec),
     enabled = case when input_monitor ? 'enabled' then coalesce((input_monitor->>'enabled')::boolean, enabled) else enabled end,
     hidden = case when input_monitor ? 'hidden' then coalesce((input_monitor->>'hidden')::boolean, hidden) else hidden end,
+    agent_probe_mode = case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else agent_probe_mode end,
+    agent_probe_clients = case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else agent_probe_clients end,
+    agent_probe_limit = case when input_monitor ? 'agent_probe_limit' then least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, agent_probe_limit), 1), 10) else agent_probe_limit end,
+    agent_probe_status_enabled = case when input_monitor ? 'agent_probe_status_enabled' then coalesce((input_monitor->>'agent_probe_status_enabled')::boolean, agent_probe_status_enabled) else agent_probe_status_enabled end,
     updated_at = now()
   where id = input_id
   returning to_jsonb(website_monitors.*);
@@ -2995,6 +3109,11 @@ revoke all on function public.cfm_record_website_check(jsonb) from public;
 revoke all on function public.cfm_record_website_check(jsonb) from anon;
 revoke all on function public.cfm_record_website_check(jsonb) from authenticated;
 grant execute on function public.cfm_record_website_check(jsonb) to service_role;
+
+revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer) from public;
+revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer) from anon;
+revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer) from authenticated;
+grant execute on function public.cfm_agent_website_probe_tasks(text, text, integer) to service_role;
 
 revoke all on function public.cfm_mark_website_monitor_notified(integer, text) from public;
 revoke all on function public.cfm_mark_website_monitor_notified(integer, text) from anon;
