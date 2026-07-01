@@ -342,6 +342,8 @@ export default function AdminWebsites() {
   const [sortDir, setSortDir] = useState<WebsiteSortDir>('asc');
   const [editOpen, setEditOpen] = useState(false);
   const [editMonitor, setEditMonitor] = useState<WebsiteMonitor | null>(null);
+  const [deleteMonitor, setDeleteMonitor] = useState<WebsiteMonitor | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [selectedWebsites, setSelectedWebsites] = useState<number[]>([]);
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
@@ -599,14 +601,19 @@ export default function AdminWebsites() {
   };
 
   const remove = async (monitor: WebsiteMonitor) => {
-    if (!window.confirm(`确定删除网站监控「${monitor.name}」吗？`)) return;
-    const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
-    assertSuccess(result, '删除失败');
-    toast.success('已删除');
-    setEditOpen(false);
-    setMonitors((current) => current.filter((item) => item.id !== monitor.id));
-    setSelectedWebsites((current) => current.filter((id) => id !== monitor.id));
-    notifyWebsiteMonitorsUpdated({ remove: [monitor.id] });
+    setDeleting(true);
+    try {
+      const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
+      assertSuccess(result, '删除失败');
+      toast.success('已删除');
+      setEditOpen(false);
+      setDeleteMonitor(null);
+      setMonitors((current) => current.filter((item) => item.id !== monitor.id));
+      setSelectedWebsites((current) => current.filter((id) => id !== monitor.id));
+      notifyWebsiteMonitorsUpdated({ remove: [monitor.id] });
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const checkNow = async (monitor: WebsiteMonitor) => {
@@ -721,7 +728,7 @@ export default function AdminWebsites() {
                     onVisibility={(target, hidden) => setVisibility(target, hidden).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                     onEnabled={(target, enabled) => setEnabled(target, enabled).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                     onEdit={openEdit}
-                    onRemove={(target) => remove(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))}
+                    onRemove={setDeleteMonitor}
                   />
                 ))}
               </div>
@@ -755,7 +762,7 @@ export default function AdminWebsites() {
                         onVisibility={(target, hidden) => setVisibility(target, hidden).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                         onEnabled={(target, enabled) => setEnabled(target, enabled).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '设置失败'))}
                         onEdit={openEdit}
-                        onRemove={(target) => remove(target).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))}
+                        onRemove={setDeleteMonitor}
                       />
                     ))}
                   </Table.Body>
@@ -766,6 +773,19 @@ export default function AdminWebsites() {
         </DndContext>
         {filtered.length === 0 && <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{search ? '未找到匹配的网站' : '暂无网站监控'}</Text>}
       </Card>
+
+      <Dialog.Root open={Boolean(deleteMonitor)} onOpenChange={(open) => { if (!open && !deleting) setDeleteMonitor(null); }}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
+          <Dialog.Title>确认删除</Dialog.Title>
+          <Text size="2">确定要删除网站监控 <strong>{deleteMonitor?.name}</strong> 吗？此操作不可撤销。</Text>
+          <Flex gap="3" justify="end" mt="4">
+            <Button variant="soft" onClick={() => setDeleteMonitor(null)} disabled={deleting}>取消</Button>
+            <Button color="red" onClick={() => deleteMonitor && remove(deleteMonitor).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '删除失败'))} disabled={deleting}>
+              {deleting ? '删除中...' : '确认删除'}
+            </Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
 
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
         <Dialog.Content

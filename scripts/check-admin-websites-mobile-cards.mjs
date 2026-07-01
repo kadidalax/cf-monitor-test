@@ -25,7 +25,8 @@ checks.push(
   [!mobileCard.includes('onVisibility(monitor'), 'mobile website card must not show the hide action'],
   [!setVisibility.includes('remove: hidden ? [monitor.id]'), 'single visibility updates must preserve admin ordering'],
   [!setSelectedVisibility.includes('remove: hidden ? targets.map'), 'bulk visibility updates must preserve admin ordering'],
-  [remove.includes('window.confirm('), 'website delete must ask for confirmation'],
+  [!page.includes('window.confirm(') && page.includes('deleteMonitor'), 'website delete must use the styled delete dialog'],
+  [css.includes('grid-template-columns: repeat(2, 30px)') && css.includes('height: 26px'), 'mobile website action buttons must be 30x26'],
   [page.includes('onOpenAutoFocus=') && page.includes('event.preventDefault()'), 'website edit dialog must not autofocus on mobile'],
   [page.includes('editDialogRef') && page.includes('tabIndex={-1}'), 'website edit dialog must move focus to dialog content'],
 );
