@@ -1,5 +1,41 @@
 set local search_path = public;
 
+alter table website_monitors add column if not exists agent_probe_mode text not null default 'country_auto';
+alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
+alter table website_monitors add column if not exists agent_probe_limit integer not null default 3;
+alter table website_monitors add column if not exists agent_probe_status_enabled boolean not null default true;
+
+update website_monitors
+set agent_probe_mode = case when agent_probe_mode in ('off', 'selected', 'country_auto') then agent_probe_mode else 'country_auto' end,
+    agent_probe_clients = case when jsonb_typeof(agent_probe_clients) = 'array' then agent_probe_clients else '[]'::jsonb end,
+    agent_probe_limit = least(greatest(coalesce(agent_probe_limit, 3), 1), 10),
+    agent_probe_status_enabled = coalesce(agent_probe_status_enabled, true);
+
+alter table website_monitors alter column agent_probe_mode set default 'country_auto';
+alter table website_monitors alter column agent_probe_clients set default '[]'::jsonb;
+alter table website_monitors alter column agent_probe_limit set default 3;
+alter table website_monitors alter column agent_probe_status_enabled set default true;
+alter table website_monitors alter column agent_probe_mode set not null;
+alter table website_monitors alter column agent_probe_clients set not null;
+alter table website_monitors alter column agent_probe_limit set not null;
+alter table website_monitors alter column agent_probe_status_enabled set not null;
+
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_mode_check;
+alter table website_monitors add constraint website_monitors_agent_probe_mode_check check (agent_probe_mode in ('off', 'selected', 'country_auto'));
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_limit_check;
+alter table website_monitors add constraint website_monitors_agent_probe_limit_check check (agent_probe_limit between 1 and 10);
+
+alter table website_checks add column if not exists source_type text not null default 'worker';
+alter table website_checks add column if not exists source_client text;
+update website_checks set source_type = 'worker' where source_type is null or source_type not in ('worker', 'agent');
+alter table website_checks alter column source_type set default 'worker';
+alter table website_checks alter column source_type set not null;
+alter table website_checks drop constraint if exists website_checks_source_type_check;
+alter table website_checks add constraint website_checks_source_type_check check (source_type in ('worker', 'agent'));
+alter table website_checks drop constraint if exists website_checks_source_client_fkey;
+alter table website_checks add constraint website_checks_source_client_fkey foreign key (source_client) references clients(uuid) on delete set null;
+create index if not exists idx_website_checks_monitor_source_time on website_checks(monitor_id, source_type, source_client, checked_at desc);
+
 create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120)
 returns jsonb
 language sql

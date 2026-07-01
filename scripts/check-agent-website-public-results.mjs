@@ -5,6 +5,12 @@ const liveData = readFileSync('worker/src/do/live-data.ts', 'utf8');
 
 const checks = [
   [
+    migration.includes('alter table website_checks add column if not exists source_type') &&
+      migration.includes('alter table website_checks add column if not exists source_client') &&
+      migration.includes('alter table website_monitors add column if not exists agent_probe_status_enabled'),
+    'latest migration must backfill agent website columns before referencing them',
+  ],
+  [
     migration.includes("wc.source_type = 'worker'") &&
       migration.includes("wc.effective_status = 'up'") &&
       migration.includes('wm.agent_probe_status_enabled = false'),
