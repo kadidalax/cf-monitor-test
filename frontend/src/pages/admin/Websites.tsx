@@ -582,7 +582,10 @@ export default function AdminWebsites() {
     if (oldIndex < 0 || newIndex < 0) return;
 
     const previousMonitors = monitors;
-    const nextMonitors = arrayMove(monitors, oldIndex, newIndex);
+    const nextMonitors = arrayMove(monitors, oldIndex, newIndex).map((monitor, index) => ({
+      ...monitor,
+      sort_order: index + 1,
+    }));
     setMonitors(nextMonitors);
 
     try {
