@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DndContext,
   type DragEndEvent,
@@ -293,10 +293,10 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
           </div>
 
           <Flex className="admin-row-actions">
-            <Tooltip content="检测"><IconButton size="2" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={14} /></IconButton></Tooltip>
-            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="2" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={14} /></IconButton></Tooltip>
-            <Tooltip content="编辑"><IconButton size="2" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={14} /></IconButton></Tooltip>
-            <Tooltip content="删除"><IconButton size="2" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={14} /></IconButton></Tooltip>
+            <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
+            <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={13} /></IconButton></Tooltip>
+            <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
+            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
           </Flex>
         </div>
 
@@ -345,6 +345,7 @@ export default function AdminWebsites() {
   const [form, setForm] = useState(emptyForm);
   const [selectedWebsites, setSelectedWebsites] = useState<number[]>([]);
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
+  const editDialogRef = useRef<HTMLDivElement | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -767,7 +768,17 @@ export default function AdminWebsites() {
       </Card>
 
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
-        <Dialog.Content aria-describedby={undefined} className="admin-website-edit-dialog" style={{ maxWidth: 640 }} onOpenAutoFocus={(event) => event.preventDefault()}>
+        <Dialog.Content
+          ref={editDialogRef}
+          tabIndex={-1}
+          aria-describedby={undefined}
+          className="admin-website-edit-dialog"
+          style={{ maxWidth: 640 }}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            requestAnimationFrame(() => editDialogRef.current?.focus({ preventScroll: true }));
+          }}
+        >
           <Dialog.Title>{editMonitor ? '编辑监控' : '添加监控'}</Dialog.Title>
           <div className="admin-website-dialog-scroll">
           <Flex direction="column" gap="3">

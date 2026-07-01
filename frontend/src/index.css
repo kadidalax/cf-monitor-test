@@ -5511,11 +5511,18 @@ html[data-monitor-theme='next'] .node-network-value strong {
   .admin-website-card-header .admin-row-actions {
     grid-column: auto;
     display: grid;
-    grid-template-columns: repeat(2, 30px);
-    gap: 4px;
+    grid-template-columns: repeat(2, 26px);
+    gap: 3px;
     justify-content: flex-end;
     align-content: start;
-    width: 64px;
+    width: 55px;
+  }
+
+  .admin-website-card-header .admin-row-actions .rt-IconButton {
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
+    min-height: 26px;
   }
 
   .admin-website-card-meta-grid {
