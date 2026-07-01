@@ -98,10 +98,10 @@ const emptyForm = {
   grace_period_sec: 180,
   enabled: true,
   hidden: false,
-  agent_probe_mode: 'off' as WebsiteAgentProbeMode,
+  agent_probe_mode: 'country_auto' as WebsiteAgentProbeMode,
   agent_probe_clients: [] as string[],
   agent_probe_limit: 3,
-  agent_probe_status_enabled: false,
+  agent_probe_status_enabled: true,
 };
 
 function statusLabel(status: WebsiteStatus) {
@@ -717,7 +717,7 @@ export default function AdminWebsites() {
                 <TextField.Root type="number" min="1" max="10" value={String(form.agent_probe_limit)} onChange={(event) => update('agent_probe_limit', Number(event.target.value))} />
               </label>
               <label className="admin-website-toggle" style={{ alignSelf: 'end' }}>
-                <Switch checked={form.agent_probe_status_enabled} onCheckedChange={(value) => update('agent_probe_status_enabled', value)} />参与主状态
+                <Switch checked={form.agent_probe_status_enabled} onCheckedChange={(value) => update('agent_probe_status_enabled', value)} />CF 兜底
               </label>
             </Grid>
             {form.agent_probe_mode === 'selected' && (

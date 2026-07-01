@@ -1,5 +1,16 @@
 set local search_path = public;
 
+alter table website_monitors alter column agent_probe_mode set default 'country_auto';
+alter table website_monitors alter column agent_probe_status_enabled set default true;
+
+update website_monitors
+set agent_probe_mode = 'country_auto',
+    agent_probe_status_enabled = true,
+    updated_at = now()
+where enabled = true
+  and agent_probe_mode = 'off'
+  and agent_probe_status_enabled = false;
+
 create or replace function public.cfm_due_website_monitors(input_now text, input_limit integer default 50)
 returns jsonb
 language plpgsql
@@ -18,15 +29,17 @@ begin
         or wm.last_checked_at <= input_now::timestamptz - (greatest(wm.interval_sec - 30, 1) * interval '1 second')
       )
       and (
-        wm.agent_probe_status_enabled = false
-        or wm.agent_probe_mode = 'off'
-        or not exists (
-          select 1
-          from website_checks recent_agent_success
-          where recent_agent_success.monitor_id = wm.id
-            and recent_agent_success.source_type = 'agent'
-            and recent_agent_success.effective_status = 'up'
-            and recent_agent_success.checked_at >= input_now::timestamptz - (greatest(wm.interval_sec + 30, wm.grace_period_sec, 180) * interval '1 second')
+        wm.agent_probe_mode = 'off'
+        or (
+          wm.agent_probe_status_enabled = true
+          and not exists (
+            select 1
+            from website_checks recent_agent_success
+            where recent_agent_success.monitor_id = wm.id
+              and recent_agent_success.source_type = 'agent'
+              and recent_agent_success.effective_status = 'up'
+              and recent_agent_success.checked_at >= input_now::timestamptz - (greatest(wm.interval_sec + 30, wm.grace_period_sec, 180) * interval '1 second')
+          )
         )
       )
     order by coalesce(wm.last_checked_at, '1970-01-01'::timestamptz) asc, wm.sort_order asc, wm.id asc
@@ -86,7 +99,7 @@ begin
     source_client_id
   );
 
-  if source_kind = 'agent' and (monitor_row.agent_probe_status_enabled = false or check_ok = false) then
+  if source_kind = 'agent' and monitor_row.agent_probe_status_enabled = true and check_ok = false then
     return to_jsonb(monitor_row);
   end if;
 

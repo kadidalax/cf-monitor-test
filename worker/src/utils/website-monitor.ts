@@ -242,7 +242,7 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
       agent_probe_mode,
       agent_probe_clients: readStringArray(input.agent_probe_clients),
       agent_probe_limit,
-      agent_probe_status_enabled: typeof input.agent_probe_status_enabled === 'boolean' ? input.agent_probe_status_enabled : false,
+      agent_probe_status_enabled: typeof input.agent_probe_status_enabled === 'boolean' ? input.agent_probe_status_enabled : true,
     },
   };
 }
