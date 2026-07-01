@@ -861,6 +861,29 @@ func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	}
 }
 
+func TestWebsiteHTTPProbeReportsStatusAndLatency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	result := executeWebsiteHTTPProbeWithClient(WebsiteProbeTask{
+		ID:                1,
+		URL:               server.URL,
+		Method:            "GET",
+		ExpectedStatusMin: 200,
+		ExpectedStatusMax: 299,
+		TimeoutSec:        5,
+	}, server.Client())
+
+	if !result.OK || result.EffectiveStatus != "up" || result.StatusCode == nil || *result.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if result.LatencyMS < 0 {
+		t.Fatalf("latency = %d, want non-negative", result.LatencyMS)
+	}
+}
+
 func TestNormalizeTCPTargetAddress(t *testing.T) {
 	address, host, port, err := normalizeTCPTargetAddress("example.com")
 	if err != nil {

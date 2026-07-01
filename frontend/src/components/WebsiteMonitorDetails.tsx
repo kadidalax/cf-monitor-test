@@ -18,6 +18,8 @@ export default function WebsiteMonitorDetails({ monitor }: { monitor: WebsiteMon
       </section>
     );
   }
+  const workerChecks = (monitor.checks || []).filter((check) => (check.source_type || 'worker') === 'worker');
+  const agentChecks = (monitor.checks || []).filter((check) => check.source_type === 'agent').slice(0, 12);
 
   return (
     <section className="kuma-monitor-details">
@@ -42,7 +44,7 @@ export default function WebsiteMonitorDetails({ monitor }: { monitor: WebsiteMon
       </Flex>
 
       <Box className="kuma-monitor-heartbeat-panel">
-        <WebsiteHeartbeatBar checks={monitor.checks || []} max={60} />
+        <WebsiteHeartbeatBar checks={workerChecks} max={60} />
       </Box>
 
       <div className="kuma-monitor-stats">
@@ -65,7 +67,7 @@ export default function WebsiteMonitorDetails({ monitor }: { monitor: WebsiteMon
           </Table.Row>
         </Table.Header>
         <Table.Body>
-          {(monitor.checks || []).slice(0, 12).map((check) => (
+          {workerChecks.slice(0, 12).map((check) => (
             <Table.Row key={check.checked_at}>
               <Table.Cell>{new Date(check.checked_at).toLocaleString()}</Table.Cell>
               <Table.Cell>
@@ -76,6 +78,31 @@ export default function WebsiteMonitorDetails({ monitor }: { monitor: WebsiteMon
           ))}
         </Table.Body>
       </Table.Root>
+
+      {agentChecks.length > 0 && (
+        <Table.Root className="kuma-monitor-events" size="2" variant="surface">
+          <Table.Header>
+            <Table.Row>
+              <Table.ColumnHeaderCell>Agent</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>延迟</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>时间</Table.ColumnHeaderCell>
+            </Table.Row>
+          </Table.Header>
+          <Table.Body>
+            {agentChecks.map((check) => (
+              <Table.Row key={`${check.source_client || 'agent'}-${check.checked_at}`}>
+                <Table.Cell>{check.source_client || '-'}</Table.Cell>
+                <Table.Cell>
+                  <Badge color={check.ok ? 'green' : 'red'} variant="soft">{check.ok ? 'UP' : 'DOWN'}</Badge>
+                </Table.Cell>
+                <Table.Cell>{check.latency_ms ?? 0}ms</Table.Cell>
+                <Table.Cell>{new Date(check.checked_at).toLocaleString()}</Table.Cell>
+              </Table.Row>
+            ))}
+          </Table.Body>
+        </Table.Root>
+      )}
     </section>
   );
 }

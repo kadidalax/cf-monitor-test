@@ -43,6 +43,7 @@ import { notifyWebsiteMonitorsUpdated, subscribeWebsiteMonitorsUpdated, type Web
 
 type WebsiteStatus = 'pending' | 'up' | 'down' | 'paused';
 type WebsiteMethod = 'GET' | 'HEAD' | 'TCP';
+type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
 type WebsiteStatusFilter = 'all' | 'up' | 'down' | 'hidden';
 type WebsiteSortKey = 'manual' | 'name' | 'status';
 type WebsiteSortDir = 'asc' | 'desc';
@@ -62,6 +63,10 @@ interface WebsiteMonitor {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  agent_probe_mode: WebsiteAgentProbeMode;
+  agent_probe_clients: string[];
+  agent_probe_limit: number;
+  agent_probe_status_enabled: boolean;
   status: WebsiteStatus;
   last_checked_at: string | null;
   last_status_code: number | null;
@@ -76,6 +81,12 @@ interface WebsiteCheck {
   latency_ms: number | null;
 }
 
+interface ClientLite {
+  uuid: string;
+  name: string;
+  region?: string;
+}
+
 const emptyForm = {
   name: '',
   url: 'https://',
@@ -87,6 +98,10 @@ const emptyForm = {
   grace_period_sec: 180,
   enabled: true,
   hidden: false,
+  agent_probe_mode: 'off' as WebsiteAgentProbeMode,
+  agent_probe_clients: [] as string[],
+  agent_probe_limit: 3,
+  agent_probe_status_enabled: false,
 };
 
 function statusLabel(status: WebsiteStatus) {
@@ -238,6 +253,8 @@ export default function AdminWebsites() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [monitors, setMonitors] = useState<WebsiteMonitor[]>([]);
+  const [clients, setClients] = useState<ClientLite[]>([]);
+  const [clientsLoaded, setClientsLoaded] = useState(false);
   const [checks, setChecks] = useState<WebsiteCheck[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<WebsiteStatusFilter>('all');
@@ -295,6 +312,15 @@ export default function AdminWebsites() {
     setChecks(Array.isArray(data) ? data as WebsiteCheck[] : []);
   };
 
+  const ensureClients = async () => {
+    if (clientsLoaded) return;
+    const data = await apiFetch('/admin/clients');
+    if (Array.isArray(data)) {
+      setClients(data as ClientLite[]);
+      setClientsLoaded(true);
+    }
+  };
+
   useEffect(() => {
     loadMonitors()
       .catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'))
@@ -314,8 +340,17 @@ export default function AdminWebsites() {
     loadChecks(editMonitor.id).catch(() => setChecks([]));
   }, [editMonitor?.id]);
 
-  const update = (key: keyof typeof emptyForm, value: string | number | boolean) => {
+  const update = (key: keyof typeof emptyForm, value: string | number | boolean | string[]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const toggleAgentProbeClient = (uuid: string, checked: boolean | 'indeterminate') => {
+    setForm((prev) => {
+      const current = new Set(prev.agent_probe_clients);
+      if (checked === true) current.add(uuid);
+      else current.delete(uuid);
+      return { ...prev, agent_probe_clients: Array.from(current) };
+    });
   };
 
   const updateMethod = (method: WebsiteMethod) => {
@@ -327,6 +362,7 @@ export default function AdminWebsites() {
   };
 
   const openEdit = (monitor: WebsiteMonitor | null) => {
+    ensureClients().catch((error: unknown) => toast.error(error instanceof Error ? error.message : '服务列表加载失败'));
     setEditMonitor(monitor);
     setForm(monitor ? {
       name: monitor.name,
@@ -339,6 +375,10 @@ export default function AdminWebsites() {
       grace_period_sec: monitor.grace_period_sec,
       enabled: monitor.enabled,
       hidden: monitor.hidden,
+      agent_probe_mode: monitor.agent_probe_mode || 'off',
+      agent_probe_clients: Array.isArray(monitor.agent_probe_clients) ? monitor.agent_probe_clients : [],
+      agent_probe_limit: monitor.agent_probe_limit || 3,
+      agent_probe_status_enabled: Boolean(monitor.agent_probe_status_enabled),
     } : emptyForm);
     if (!monitor) setChecks([]);
     setEditOpen(true);
@@ -660,6 +700,41 @@ export default function AdminWebsites() {
               <label className="admin-website-toggle"><Switch checked={form.enabled} onCheckedChange={(value) => update('enabled', value)} />启用检测</label>
               <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对非管理员隐藏</label>
             </Flex>
+            <Grid columns={{ initial: '1', sm: '3' }} gap="3">
+              <label>
+                <Text size="2" weight="bold">Agent 探测</Text>
+                <Select.Root value={form.agent_probe_mode} onValueChange={(value) => update('agent_probe_mode', value as WebsiteAgentProbeMode)}>
+                  <Select.Trigger style={{ width: '100%' }} />
+                  <Select.Content>
+                    <Select.Item value="off">关闭</Select.Item>
+                    <Select.Item value="selected">指定节点</Select.Item>
+                    <Select.Item value="country_auto">按国家自动</Select.Item>
+                  </Select.Content>
+                </Select.Root>
+              </label>
+              <label>
+                <Text size="2" weight="bold">节点上限</Text>
+                <TextField.Root type="number" min="1" max="10" value={String(form.agent_probe_limit)} onChange={(event) => update('agent_probe_limit', Number(event.target.value))} />
+              </label>
+              <label className="admin-website-toggle" style={{ alignSelf: 'end' }}>
+                <Switch checked={form.agent_probe_status_enabled} onCheckedChange={(value) => update('agent_probe_status_enabled', value)} />参与主状态
+              </label>
+            </Grid>
+            {form.agent_probe_mode === 'selected' && (
+              <Flex gap="2" wrap="wrap">
+                {clients.length > 0 ? clients.map((client) => (
+                  <label key={client.uuid} className="admin-website-toggle">
+                    <Checkbox
+                      checked={form.agent_probe_clients.includes(client.uuid)}
+                      onCheckedChange={(checked) => toggleAgentProbeClient(client.uuid, checked)}
+                    />
+                    {client.name || client.uuid}
+                  </label>
+                )) : (
+                  <Text size="2" color="gray">暂无可选节点</Text>
+                )}
+              </Flex>
+            )}
             {editMonitor && <WebsiteHeartbeatBar checks={checks} max={60} />}
             <Flex gap="2" justify="end" wrap="wrap">
               <Flex gap="2">

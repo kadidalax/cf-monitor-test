@@ -125,6 +125,7 @@ interface AgentPolicyMessage {
   ping_interval_sec: number;
   ping_policy_version: string;
   ping_tasks: db.PingTask[];
+  website_probe_tasks: db.WebsiteMonitor[];
   policy_ttl_sec: number;
   idle_policy_ttl_sec: number;
   timestamp: number;
@@ -828,6 +829,12 @@ export class LiveDataDO {
     this.pingTasksCache = null;
   }
 
+  private async getWebsiteProbeTasks(now: number, clientId?: string): Promise<db.WebsiteMonitor[]> {
+    const database = this.getQueryDatabase();
+    if (!database || !clientId) return [];
+    return db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20);
+  }
+
   private activeViewerCount(now: number): number {
     void now;
     let count = 0;
@@ -851,6 +858,7 @@ export class LiveDataDO {
     const viewerCount = this.activeViewerCount(now);
     const mode: AgentPolicyMode = viewerCount > 0 ? 'active' : 'idle';
     const pingTasks = this.pingTasksForClient(await this.getPingTasks(now), clientId);
+    const websiteProbeTasks = await this.getWebsiteProbeTasks(now, clientId);
     return {
       type: 'policy',
       mode,
@@ -862,6 +870,7 @@ export class LiveDataDO {
       ping_interval_sec: settings.pingIntervalSec,
       ping_policy_version: await this.pingPolicyVersion(pingTasks, settings.pingIntervalSec),
       ping_tasks: pingTasks,
+      website_probe_tasks: websiteProbeTasks,
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
       timestamp: now,
@@ -1324,9 +1333,11 @@ export class LiveDataDO {
         );
         reportsToPersist.push({ report, reportTime });
         this.runBackground('ping_persistence', this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime));
+        this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime));
       } else {
         reportsToPersist.push({ report: rawReport, reportTime });
         this.runBackground('ping_persistence', this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime));
+        this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime));
       }
     }
 
@@ -1423,6 +1434,67 @@ export class LiveDataDO {
     const results = this.pingResultsFromReport(report);
     if (results.length === 0) return;
     await this.persistPingResult(clientId, { results }, nowMs);
+  }
+
+  private websiteProbeResultsFromReport(report: JsonObject): JsonObject[] {
+    const results = report.website_probe_results;
+    return Array.isArray(results) ? results.slice(0, 50).filter(isObjectPayload) : [];
+  }
+
+  private async persistWebsiteProbeResultsFromReport(clientId: string, report: JsonObject, nowMs: number): Promise<void> {
+    const results = this.websiteProbeResultsFromReport(report);
+    if (results.length === 0) return;
+    const database = this.getQueryDatabase();
+    if (!database) return;
+
+    try {
+      if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
+      if (!(await this.canPersistWithinCapacity(nowMs))) return;
+
+      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId)).map(task => task.id));
+      if (assigned.size === 0) return;
+      const checkedAt = new Date(nowMs).toISOString();
+      for (const item of results) {
+        const monitorId = Number(item.monitor_id);
+        const latencyMs = Math.round(Number(item.latency_ms));
+        const statusCode = item.status_code === null || item.status_code === undefined ? null : Number(item.status_code);
+        const rawStatusCode = item.raw_status_code === null || item.raw_status_code === undefined ? statusCode : Number(item.raw_status_code);
+        const effectiveStatus = item.effective_status === 'up' ? 'up' : item.effective_status === 'down' ? 'down' : null;
+        if (
+          !Number.isInteger(monitorId) ||
+          !assigned.has(monitorId) ||
+          !Number.isFinite(latencyMs) ||
+          latencyMs < 0 ||
+          latencyMs > 60_000 ||
+          !effectiveStatus ||
+          (statusCode !== null && (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599)) ||
+          (rawStatusCode !== null && (!Number.isInteger(rawStatusCode) || rawStatusCode < 100 || rawStatusCode > 599))
+        ) {
+          continue;
+        }
+        await db.recordWebsiteCheck(database, {
+          monitor_id: monitorId,
+          checked_at: checkedAt,
+          ok: Boolean(item.ok) && effectiveStatus === 'up',
+          effective_status: effectiveStatus,
+          effective_reason: typeof item.effective_reason === 'string' ? item.effective_reason.slice(0, 80) : effectiveStatus,
+          status_code: statusCode,
+          raw_status_code: rawStatusCode,
+          latency_ms: latencyMs,
+          error: typeof item.error === 'string' && item.error ? item.error.slice(0, 120) : null,
+          source_type: 'agent',
+          source_client: clientId,
+        });
+      }
+    } catch (error) {
+      await bestEffortRecordHealthEvent(
+        database,
+        'website_probe_persistence',
+        'error',
+        `website probe persist failed for ${clientId}: ${errorDetail(error)}`,
+        { auditAction: 'website_probe_persistence_error' },
+      );
+    }
   }
 
   // HTTP 请求处理（用于 Agent 上报数据）
@@ -1583,9 +1655,11 @@ export class LiveDataDO {
           const report = this.updateClientReport(clientId, clientName, hidden, rawReport, reportTime, undefined, ws);
           reportsToPersist.push({ report, reportTime });
           this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
+          this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
           this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
+          this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
         }
       }
 
@@ -1606,7 +1680,8 @@ export class LiveDataDO {
     }
 
       const report = this.updateClientReport(clientId, clientName, hidden, data, now, undefined, ws);
-    this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, report, now));
+    this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, data, now));
+    this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, data, now));
     this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(clientId, clientName, hidden, report));
 
     if (ws.readyState === WebSocket.READY_STATE_OPEN) {

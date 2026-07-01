@@ -235,6 +235,8 @@ export interface PingTaskHistoryRequest {
 
 export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
 export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
+export type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
+export type WebsiteCheckSourceType = 'worker' | 'agent';
 
 export interface WebsiteMonitor {
   id: number;
@@ -248,6 +250,10 @@ export interface WebsiteMonitor {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  agent_probe_mode: WebsiteAgentProbeMode;
+  agent_probe_clients: string[];
+  agent_probe_limit: number;
+  agent_probe_status_enabled: boolean;
   sort_order: number;
   status: WebsiteMonitorStatus;
   last_checked_at: string | null;
@@ -294,9 +300,13 @@ export interface WebsiteCheck {
   raw_status_code: number | null;
   latency_ms: number | null;
   error: string | null;
+  source_type: WebsiteCheckSourceType;
+  source_client: string | null;
 }
 
-export type WebsiteCheckInput = Omit<WebsiteCheck, 'id'>;
+export type WebsiteCheckInput =
+  Omit<WebsiteCheck, 'id' | 'source_type' | 'source_client'> &
+  Partial<Pick<WebsiteCheck, 'source_type' | 'source_client'>>;
 
 export interface PublicWebsiteMonitor {
   id: number;
@@ -309,7 +319,7 @@ export interface PublicWebsiteMonitor {
   last_raw_status_code: number | null;
   last_latency_ms: number | null;
   last_effective_reason: string | null;
-  checks: Array<Pick<WebsiteCheck, 'checked_at' | 'ok' | 'effective_status' | 'effective_reason' | 'status_code' | 'raw_status_code' | 'latency_ms'>>;
+  checks: Array<Pick<WebsiteCheck, 'checked_at' | 'ok' | 'effective_status' | 'effective_reason' | 'status_code' | 'raw_status_code' | 'latency_ms' | 'source_type' | 'source_client'>>;
 }
 
 export interface OfflineNotificationUpdate {

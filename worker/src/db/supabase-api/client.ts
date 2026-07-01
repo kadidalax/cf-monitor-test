@@ -100,6 +100,18 @@ function normalizePingTaskList<T extends { clients?: unknown; all_clients?: unkn
   return tasks.map(normalizePingTask);
 }
 
+function normalizeWebsiteMonitor<T extends { agent_probe_clients?: unknown; agent_probe_status_enabled?: unknown }>(monitor: T): T {
+  return {
+    ...monitor,
+    agent_probe_clients: readRpcStringArray((monitor as Record<string, unknown>).agent_probe_clients),
+    agent_probe_status_enabled: readRpcBoolean((monitor as Record<string, unknown>).agent_probe_status_enabled),
+  } as T;
+}
+
+function normalizeWebsiteMonitorList<T extends { agent_probe_clients?: unknown; agent_probe_status_enabled?: unknown }>(monitors: T[]): T[] {
+  return monitors.map(normalizeWebsiteMonitor);
+}
+
 export function getSupabasePublicSettings(env: SupabaseApiEnv): Promise<Record<string, string>> {
   return callSupabaseRpc<Record<string, string>>(env, 'cfm_public_settings');
 }
@@ -416,11 +428,25 @@ export function listSupabaseDueWebsiteMonitors(env: SupabaseApiEnv, now: string,
   return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_due_website_monitors', {
     input_now: now,
     input_limit: limit,
-  });
+  }).then(normalizeWebsiteMonitorList);
 }
 
 export function recordSupabaseWebsiteCheck(env: SupabaseApiEnv, check: WebsiteCheckInput): Promise<WebsiteMonitor | null> {
-  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_record_website_check', { input_check: check });
+  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_record_website_check', { input_check: check })
+    .then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
+}
+
+export function listSupabaseAgentWebsiteProbeTasks(
+  env: SupabaseApiEnv,
+  client: string,
+  now: string,
+  limit: number,
+): Promise<WebsiteMonitor[]> {
+  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_agent_website_probe_tasks', {
+    input_client: client,
+    input_now: now,
+    input_limit: limit,
+  }).then(normalizeWebsiteMonitorList);
 }
 
 export function markSupabaseWebsiteMonitorNotified(env: SupabaseApiEnv, id: number, time: string | null): Promise<boolean> {
@@ -761,11 +787,12 @@ export function getSupabasePublicWebsiteMonitorById(
 }
 
 export function listSupabaseWebsiteMonitors(env: SupabaseApiEnv): Promise<WebsiteMonitor[]> {
-  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_website_monitors');
+  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_website_monitors').then(normalizeWebsiteMonitorList);
 }
 
 export function getSupabaseWebsiteMonitor(env: SupabaseApiEnv, id: number): Promise<WebsiteMonitor | null> {
-  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_website_monitor', { input_id: id });
+  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_website_monitor', { input_id: id })
+    .then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
 }
 
 export function listSupabaseWebsiteChecks(env: SupabaseApiEnv, monitorId: number, limit: number): Promise<WebsiteCheck[]> {
@@ -776,7 +803,7 @@ export function listSupabaseWebsiteChecks(env: SupabaseApiEnv, monitorId: number
 }
 
 export function createSupabaseWebsiteMonitor(env: SupabaseApiEnv, monitor: WebsiteMonitorInput): Promise<WebsiteMonitor> {
-  return callSupabaseRpc<WebsiteMonitor>(env, 'cfm_create_website_monitor', { input_monitor: monitor });
+  return callSupabaseRpc<WebsiteMonitor>(env, 'cfm_create_website_monitor', { input_monitor: monitor }).then(normalizeWebsiteMonitor);
 }
 
 export function updateSupabaseWebsiteMonitorAndReturn(
@@ -787,7 +814,7 @@ export function updateSupabaseWebsiteMonitorAndReturn(
   return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_update_website_monitor', {
     input_id: id,
     input_monitor: monitor,
-  });
+  }).then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
 }
 
 export function deleteSupabaseWebsiteMonitor(env: SupabaseApiEnv, id: number): Promise<void> {

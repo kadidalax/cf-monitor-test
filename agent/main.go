@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -132,33 +133,34 @@ type BasicInfo struct {
 }
 
 type Report struct {
-	CPU            float64      `json:"cpu"`
-	GPU            float64      `json:"gpu"`
-	RAM            int64        `json:"ram"`
-	RAMTotal       int64        `json:"ram_total"`
-	Swap           int64        `json:"swap"`
-	SwapTotal      int64        `json:"swap_total"`
-	Load           float64      `json:"load"`
-	Temp           float64      `json:"temp"`
-	Disk           int64        `json:"disk"`
-	DiskTotal      int64        `json:"disk_total"`
-	NetIn          int64        `json:"net_in"`
-	NetOut         int64        `json:"net_out"`
-	NetTotalUp     int64        `json:"net_total_up"`
-	NetTotalDown   int64        `json:"net_total_down"`
-	ProcessCount   int          `json:"process_count"`
-	Connections    int          `json:"connections"`
-	ConnectionsUdp int          `json:"connections_udp"`
-	Uptime         int64        `json:"uptime"`
-	Version        string       `json:"version"`
-	Name           string       `json:"name,omitempty"`
-	ReportInterval int          `json:"report_interval,omitempty"`
-	Timestamp      int64        `json:"timestamp,omitempty"`
-	IPv4           string       `json:"ipv4,omitempty"`
-	IPv6           string       `json:"ipv6,omitempty"`
-	GPUs           []GPUInfo    `json:"gpus,omitempty"`
-	BasicInfo      *BasicInfo   `json:"basic_info,omitempty"`
-	PingResults    []PingResult `json:"ping_results,omitempty"`
+	CPU                 float64              `json:"cpu"`
+	GPU                 float64              `json:"gpu"`
+	RAM                 int64                `json:"ram"`
+	RAMTotal            int64                `json:"ram_total"`
+	Swap                int64                `json:"swap"`
+	SwapTotal           int64                `json:"swap_total"`
+	Load                float64              `json:"load"`
+	Temp                float64              `json:"temp"`
+	Disk                int64                `json:"disk"`
+	DiskTotal           int64                `json:"disk_total"`
+	NetIn               int64                `json:"net_in"`
+	NetOut              int64                `json:"net_out"`
+	NetTotalUp          int64                `json:"net_total_up"`
+	NetTotalDown        int64                `json:"net_total_down"`
+	ProcessCount        int                  `json:"process_count"`
+	Connections         int                  `json:"connections"`
+	ConnectionsUdp      int                  `json:"connections_udp"`
+	Uptime              int64                `json:"uptime"`
+	Version             string               `json:"version"`
+	Name                string               `json:"name,omitempty"`
+	ReportInterval      int                  `json:"report_interval,omitempty"`
+	Timestamp           int64                `json:"timestamp,omitempty"`
+	IPv4                string               `json:"ipv4,omitempty"`
+	IPv6                string               `json:"ipv6,omitempty"`
+	GPUs                []GPUInfo            `json:"gpus,omitempty"`
+	BasicInfo           *BasicInfo           `json:"basic_info,omitempty"`
+	PingResults         []PingResult         `json:"ping_results,omitempty"`
+	WebsiteProbeResults []WebsiteProbeResult `json:"website_probe_results,omitempty"`
 
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
@@ -198,6 +200,28 @@ type PingResult struct {
 	Value  float64 `json:"value"`
 }
 
+type WebsiteProbeTask struct {
+	ID                int    `json:"id"`
+	Name              string `json:"name"`
+	URL               string `json:"url"`
+	Method            string `json:"method"`
+	ExpectedStatusMin int    `json:"expected_status_min"`
+	ExpectedStatusMax int    `json:"expected_status_max"`
+	TimeoutSec        int    `json:"timeout_sec"`
+	IntervalSec       int    `json:"interval_sec"`
+}
+
+type WebsiteProbeResult struct {
+	MonitorID       int     `json:"monitor_id"`
+	OK              bool    `json:"ok"`
+	EffectiveStatus string  `json:"effective_status"`
+	EffectiveReason string  `json:"effective_reason"`
+	StatusCode      *int    `json:"status_code"`
+	RawStatusCode   *int    `json:"raw_status_code"`
+	LatencyMS       int64   `json:"latency_ms"`
+	Error           *string `json:"error"`
+}
+
 type jsonBool bool
 
 func (b *jsonBool) UnmarshalJSON(data []byte) error {
@@ -223,6 +247,10 @@ type pingTaskScheduler struct {
 	lastRunByTaskID map[int]time.Time
 }
 
+type websiteProbeScheduler struct {
+	lastRunByTaskID map[int]time.Time
+}
+
 func newPingTaskScheduler() *pingTaskScheduler {
 	return &pingTaskScheduler{lastRunByTaskID: make(map[int]time.Time)}
 }
@@ -232,6 +260,14 @@ func pingTaskInterval(task PingTask) time.Duration {
 	if interval < 1 {
 		interval = pingInterval
 	}
+	if interval < 1 {
+		interval = defaultPingIntervalSec
+	}
+	return time.Duration(interval) * time.Second
+}
+
+func websiteProbeInterval(task WebsiteProbeTask) time.Duration {
+	interval := task.IntervalSec
 	if interval < 1 {
 		interval = defaultPingIntervalSec
 	}
@@ -268,6 +304,32 @@ func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time) []PingTask
 	return due
 }
 
+func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time) []WebsiteProbeTask {
+	if s.lastRunByTaskID == nil {
+		s.lastRunByTaskID = make(map[int]time.Time)
+	}
+	seen := make(map[int]struct{}, len(tasks))
+	due := make([]WebsiteProbeTask, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ID <= 0 {
+			continue
+		}
+		seen[task.ID] = struct{}{}
+		lastRun, ok := s.lastRunByTaskID[task.ID]
+		if ok && now.Sub(lastRun) < websiteProbeInterval(task) {
+			continue
+		}
+		s.lastRunByTaskID[task.ID] = now
+		due = append(due, task)
+	}
+	for taskID := range s.lastRunByTaskID {
+		if _, ok := seen[taskID]; !ok {
+			delete(s.lastRunByTaskID, taskID)
+		}
+	}
+	return due
+}
+
 type reportEnvelope struct {
 	Type string `json:"type"`
 	Data Report `json:"data"`
@@ -279,19 +341,20 @@ type reportsEnvelope struct {
 }
 
 type serverMessage struct {
-	Type              string     `json:"type"`
-	Timestamp         int64      `json:"timestamp,omitempty"`
-	Mode              string     `json:"mode,omitempty"`
-	SampleIntervalSec int        `json:"sample_interval_sec,omitempty"`
-	ReportIntervalSec int        `json:"report_interval_sec,omitempty"`
-	PingIntervalSec   int        `json:"ping_interval_sec,omitempty"`
-	PingPolicyVersion string     `json:"ping_policy_version,omitempty"`
-	PingTasks         []PingTask `json:"ping_tasks,omitempty"`
-	ReportNow         bool       `json:"report_now,omitempty"`
-	ViewerCount       int        `json:"viewer_count,omitempty"`
-	ViewerTTLSec      int        `json:"viewer_ttl_sec,omitempty"`
-	PolicyTTL         int        `json:"policy_ttl_sec,omitempty"`
-	IdlePolicyTTL     int        `json:"idle_policy_ttl_sec,omitempty"`
+	Type              string             `json:"type"`
+	Timestamp         int64              `json:"timestamp,omitempty"`
+	Mode              string             `json:"mode,omitempty"`
+	SampleIntervalSec int                `json:"sample_interval_sec,omitempty"`
+	ReportIntervalSec int                `json:"report_interval_sec,omitempty"`
+	PingIntervalSec   int                `json:"ping_interval_sec,omitempty"`
+	PingPolicyVersion string             `json:"ping_policy_version,omitempty"`
+	PingTasks         []PingTask         `json:"ping_tasks,omitempty"`
+	WebsiteProbeTasks []WebsiteProbeTask `json:"website_probe_tasks,omitempty"`
+	ReportNow         bool               `json:"report_now,omitempty"`
+	ViewerCount       int                `json:"viewer_count,omitempty"`
+	ViewerTTLSec      int                `json:"viewer_ttl_sec,omitempty"`
+	PolicyTTL         int                `json:"policy_ttl_sec,omitempty"`
+	IdlePolicyTTL     int                `json:"idle_policy_ttl_sec,omitempty"`
 }
 
 type agentPolicy = serverMessage
@@ -306,10 +369,12 @@ type reportPreparer struct {
 }
 
 type pingReportState struct {
-	scheduler     *pingTaskScheduler
-	tasks         []PingTask
-	policyVersion string
-	intervalSec   int
+	scheduler        *pingTaskScheduler
+	websiteScheduler *websiteProbeScheduler
+	tasks            []PingTask
+	websiteTasks     []WebsiteProbeTask
+	policyVersion    string
+	intervalSec      int
 }
 
 type safeWebSocketConn struct {
@@ -642,8 +707,9 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 
 func newPingReportState() *pingReportState {
 	return &pingReportState{
-		scheduler:   newPingTaskScheduler(),
-		intervalSec: defaultPingIntervalSec,
+		scheduler:        newPingTaskScheduler(),
+		websiteScheduler: &websiteProbeScheduler{lastRunByTaskID: make(map[int]time.Time)},
+		intervalSec:      defaultPingIntervalSec,
 	}
 }
 
@@ -657,9 +723,6 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 	if s.intervalSec < 1 {
 		s.intervalSec = defaultPingIntervalSec
 	}
-	if policy.PingPolicyVersion != "" && policy.PingPolicyVersion == s.policyVersion {
-		return
-	}
 	tasks := make([]PingTask, 0, len(policy.PingTasks))
 	for _, task := range policy.PingTasks {
 		if task.IntervalSec < 1 {
@@ -668,23 +731,43 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		tasks = append(tasks, task)
 	}
 	s.tasks = tasks
+	websiteTasks := make([]WebsiteProbeTask, 0, len(policy.WebsiteProbeTasks))
+	for _, task := range policy.WebsiteProbeTasks {
+		if task.IntervalSec < 1 {
+			task.IntervalSec = s.intervalSec
+		}
+		websiteTasks = append(websiteTasks, task)
+	}
+	s.websiteTasks = websiteTasks
 	s.policyVersion = policy.PingPolicyVersion
-	if len(tasks) > 0 {
-		log.Printf("ping policy updated: %d task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
+	if len(tasks) > 0 || len(websiteTasks) > 0 {
+		log.Printf("policy updated: %d ping task(s), %d website probe(s), interval=%ds, version=%s", len(tasks), len(websiteTasks), s.intervalSec, s.policyVersion)
 	}
 }
 
 func (s *pingReportState) appendDueResults(report *Report, now time.Time) {
-	if s == nil || report == nil || len(s.tasks) == 0 {
+	if s == nil || report == nil {
 		return
 	}
-	dueTasks := s.scheduler.dueTasks(s.tasks, now)
-	if len(dueTasks) == 0 {
+	if len(s.tasks) > 0 {
+		dueTasks := s.scheduler.dueTasks(s.tasks, now)
+		if len(dueTasks) > 0 {
+			results := runPingTasks(dueTasks)
+			if len(results) > 0 {
+				report.PingResults = append(report.PingResults, results...)
+			}
+		}
+	}
+	if len(s.websiteTasks) == 0 {
 		return
 	}
-	results := runPingTasks(dueTasks)
-	if len(results) > 0 {
-		report.PingResults = append(report.PingResults, results...)
+	dueWebsiteTasks := s.websiteScheduler.dueTasks(s.websiteTasks, now)
+	if len(dueWebsiteTasks) == 0 {
+		return
+	}
+	websiteResults := runWebsiteProbeTasks(dueWebsiteTasks)
+	if len(websiteResults) > 0 {
+		report.WebsiteProbeResults = append(report.WebsiteProbeResults, websiteResults...)
 	}
 }
 
@@ -707,6 +790,19 @@ func runPingTasks(tasks []PingTask) []PingResult {
 			TaskID: task.ID,
 			Value:  value,
 		})
+	}
+	return results
+}
+
+func runWebsiteProbeTasks(tasks []WebsiteProbeTask) []WebsiteProbeResult {
+	log.Printf("executing %d website probe task(s)", len(tasks))
+	results := make([]WebsiteProbeResult, 0, len(tasks))
+	for _, task := range tasks {
+		if strings.EqualFold(task.Method, "TCP") {
+			results = append(results, executeWebsiteTCPProbe(task))
+		} else {
+			results = append(results, executeWebsiteHTTPProbe(task))
+		}
 	}
 	return results
 }
@@ -909,6 +1005,140 @@ func executeHTTPPing(target string) float64 {
 		return -1
 	}
 	return float64(elapsed)
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func normalizeWebsiteProbeHTTPResult(task WebsiteProbeTask, status int, latency int64) WebsiteProbeResult {
+	minStatus := task.ExpectedStatusMin
+	if minStatus < 100 {
+		minStatus = 200
+	}
+	maxStatus := task.ExpectedStatusMax
+	if maxStatus < minStatus || maxStatus > 599 {
+		maxStatus = 399
+	}
+	inRange := status >= minStatus && status <= maxStatus
+	challengeReachable := minStatus == 200 && maxStatus == 399 && (status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusMethodNotAllowed || status == http.StatusPreconditionFailed || status == http.StatusTooManyRequests)
+	ok := inRange || challengeReachable
+	reason := "http_status_mismatch"
+	if inRange {
+		reason = "status_in_expected_range"
+	} else if challengeReachable {
+		reason = "reachable_challenge"
+	}
+	result := WebsiteProbeResult{
+		MonitorID:       task.ID,
+		OK:              ok,
+		EffectiveStatus: "down",
+		EffectiveReason: reason,
+		StatusCode:      intPtr(status),
+		RawStatusCode:   intPtr(status),
+		LatencyMS:       latency,
+	}
+	if ok {
+		result.EffectiveStatus = "up"
+		return result
+	}
+	result.Error = stringPtr(fmt.Sprintf("http_%d", status))
+	return result
+}
+
+func websiteProbeError(task WebsiteProbeTask, latency int64, reason string) WebsiteProbeResult {
+	return WebsiteProbeResult{
+		MonitorID:       task.ID,
+		OK:              false,
+		EffectiveStatus: "down",
+		EffectiveReason: reason,
+		LatencyMS:       latency,
+		Error:           stringPtr(reason),
+	}
+}
+
+func executeWebsiteHTTPProbe(task WebsiteProbeTask) WebsiteProbeResult {
+	timeout := time.Duration(task.TimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	client := &http.Client{Timeout: timeout, Transport: publicHTTPTransport(timeout)}
+	defer client.CloseIdleConnections()
+	return executeWebsiteHTTPProbeWithClient(task, client)
+}
+
+func executeWebsiteHTTPProbeWithClient(task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
+	target := task.URL
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		target = "https://" + target
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return websiteProbeError(task, 0, "invalid_url")
+	}
+	method := strings.ToUpper(task.Method)
+	if method != http.MethodHead {
+		method = http.MethodGet
+	}
+	start := time.Now()
+	req, err := http.NewRequest(method, parsed.String(), nil)
+	if err != nil {
+		return websiteProbeError(task, 0, "invalid_url")
+	}
+	req.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
+	resp, err := client.Do(req)
+	elapsed := time.Since(start).Milliseconds()
+	if err != nil {
+		reason := "network_error"
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			reason = "timeout"
+		}
+		return websiteProbeError(task, elapsed, reason)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+	return normalizeWebsiteProbeHTTPResult(task, resp.StatusCode, elapsed)
+}
+
+func publicHTTPTransport(timeout time.Duration) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		return dialPublicTCP(ctx, network, host, port, timeout)
+	}
+	return transport
+}
+
+func executeWebsiteTCPProbe(task WebsiteProbeTask) WebsiteProbeResult {
+	target := task.URL
+	if strings.HasPrefix(strings.ToLower(target), "tcp://") {
+		parsed, err := url.Parse(target)
+		if err != nil || parsed.Hostname() == "" || parsed.Port() == "" {
+			return websiteProbeError(task, 0, "invalid_url")
+		}
+		target = net.JoinHostPort(parsed.Hostname(), parsed.Port())
+	}
+	start := time.Now()
+	value := executeTCPPing(target)
+	elapsed := time.Since(start).Milliseconds()
+	if value < 0 {
+		return websiteProbeError(task, elapsed, "network_error")
+	}
+	return WebsiteProbeResult{
+		MonitorID:       task.ID,
+		OK:              true,
+		EffectiveStatus: "up",
+		EffectiveReason: "tcp_connect",
+		LatencyMS:       int64(value),
+	}
 }
 
 // ==================== Original Functions (Enhanced) ====================

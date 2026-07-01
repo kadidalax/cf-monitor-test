@@ -324,6 +324,15 @@ export async function recordWebsiteCheck(database: QueryDatabase, check: t.Websi
   return sba.recordSupabaseWebsiteCheck(database.env, check);
 }
 
+export async function listAgentWebsiteProbeTasks(
+  database: QueryDatabase,
+  client: string,
+  now: string,
+  limit: number = 20,
+): Promise<t.WebsiteMonitor[]> {
+  return sba.listSupabaseAgentWebsiteProbeTasks(database.env, client, now, limit);
+}
+
 export async function listWebsiteChecks(database: QueryDatabase, monitorId: number, limit: number = 60): Promise<t.WebsiteCheck[]> {
   return sba.listSupabaseWebsiteChecks(database.env, monitorId, limit);
 }

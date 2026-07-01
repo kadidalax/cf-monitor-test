@@ -5,6 +5,7 @@ import {
 
 export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
 export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
+export type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
 
 export interface WebsiteMonitorInput {
   name: string;
@@ -17,6 +18,10 @@ export interface WebsiteMonitorInput {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  agent_probe_mode: WebsiteAgentProbeMode;
+  agent_probe_clients: string[];
+  agent_probe_limit: number;
+  agent_probe_status_enabled: boolean;
 }
 
 export type WebsiteMonitorValidationResult =
@@ -167,6 +172,21 @@ function validateTcpUrl(parsed: URL): string | null {
   return null;
 }
 
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const text = item.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+    if (result.length >= 100) break;
+  }
+  return result;
+}
+
 export function validateWebsiteMonitorInput(input: Record<string, unknown>): WebsiteMonitorValidationResult {
   const name = String(input.name || '').trim();
   if (!name || name.length > 120) return { ok: false, error: 'invalid_name' };
@@ -189,6 +209,9 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
   const interval_sec = integerInRange(input.interval_sec ?? 120, 60, 86400);
   const timeout_sec = integerInRange(input.timeout_sec ?? 10, 1, 30);
   const grace_period_sec = integerInRange(input.grace_period_sec ?? 180, 30, 86400);
+  const agent_probe_mode: WebsiteAgentProbeMode =
+    input.agent_probe_mode === 'selected' || input.agent_probe_mode === 'country_auto' ? input.agent_probe_mode : 'off';
+  const agent_probe_limit = integerInRange(input.agent_probe_limit ?? 3, 1, 10);
 
   if (
     expected_status_min === null ||
@@ -197,7 +220,8 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
     interval_sec === null ||
     timeout_sec === null ||
     timeout_sec > interval_sec ||
-    grace_period_sec === null
+    grace_period_sec === null ||
+    agent_probe_limit === null
   ) {
     return { ok: false, error: 'invalid_bounds' };
   }
@@ -215,6 +239,10 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
       grace_period_sec,
       enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
       hidden: typeof input.hidden === 'boolean' ? input.hidden : false,
+      agent_probe_mode,
+      agent_probe_clients: readStringArray(input.agent_probe_clients),
+      agent_probe_limit,
+      agent_probe_status_enabled: typeof input.agent_probe_status_enabled === 'boolean' ? input.agent_probe_status_enabled : false,
     },
   };
 }
