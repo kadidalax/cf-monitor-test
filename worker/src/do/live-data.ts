@@ -18,6 +18,7 @@ import {
 } from '../settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
+import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
 
 // 客户端状态
 interface ClientState {
@@ -1454,6 +1455,8 @@ export class LiveDataDO {
       const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId)).map(task => task.id));
       if (assigned.size === 0) return;
       const checkedAt = new Date(nowMs).toISOString();
+      let changed = false;
+      const fallbackChecked = new Set<number>();
       for (const item of results) {
         const monitorId = Number(item.monitor_id);
         const latencyMs = Math.round(Number(item.latency_ms));
@@ -1472,7 +1475,7 @@ export class LiveDataDO {
         ) {
           continue;
         }
-        await db.recordWebsiteCheck(database, {
+        const updated = await db.recordWebsiteCheck(database, {
           monitor_id: monitorId,
           checked_at: checkedAt,
           ok: Boolean(item.ok) && effectiveStatus === 'up',
@@ -1485,7 +1488,17 @@ export class LiveDataDO {
           source_type: 'agent',
           source_client: clientId,
         });
+        if (!updated) continue;
+        changed = true;
+
+        if (effectiveStatus === 'down' && updated.agent_probe_status_enabled && !fallbackChecked.has(monitorId)) {
+          fallbackChecked.add(monitorId);
+          const fallbackCheck = await checkWebsiteMonitorHttp(updated);
+          const fallbackUpdated = await db.recordWebsiteCheck(database, fallbackCheck);
+          changed = Boolean(fallbackUpdated) || changed;
+        }
       }
+      if (changed) this.broadcastMetadataChanged({ websites: true });
     } catch (error) {
       await bestEffortRecordHealthEvent(
         database,

@@ -5466,6 +5466,22 @@ html[data-monitor-theme='next'] .node-network-value strong {
     gap: 4px;
   }
 
+  .admin-websites-page,
+  .admin-websites-page .rt-Card,
+  .admin-websites-page .rt-CardInner {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .admin-websites-page .admin-filter-primary-row {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .admin-websites-page .admin-filter-spacer {
+    display: none;
+  }
+
   .admin-website-table-card {
     margin-inline: -4px;
     overflow-x: hidden;
@@ -5498,8 +5514,11 @@ html[data-monitor-theme='next'] .node-network-value strong {
   }
 
   .admin-website-edit-dialog {
-    width: calc(100vw - 20px);
+    left: 50% !important;
+    width: calc(100vw - 20px) !important;
+    max-width: calc(100vw - 20px) !important;
     max-height: calc(100vh - 24px);
+    transform: translateX(-50%) !important;
   }
 
   .admin-website-dialog-scroll {

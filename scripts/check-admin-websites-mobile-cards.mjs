@@ -12,6 +12,8 @@ const checks = [
   [css.includes('.admin-website-card-grid'), 'missing mobile card CSS'],
   [css.includes('.admin-website-dialog-scroll'), 'missing mobile dialog CSS'],
   [css.includes('@media (max-width: 760px)') && css.includes('.admin-website-table-wrap'), 'missing mobile table/card media switch'],
+  [css.includes('.admin-websites-page') && css.includes('min-width: 0'), 'mobile website page must be allowed to shrink'],
+  [css.includes('left: 50% !important') && css.includes('transform: translateX(-50%) !important'), 'mobile website dialog must be viewport-centered'],
 ];
 
 const failures = checks.filter(([ok]) => !ok).map(([, message]) => message);
