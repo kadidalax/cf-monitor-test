@@ -846,7 +846,7 @@ async function syncBasicInfoFromReportBatch(
 async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
   const reportIntervalSec = Math.min(Math.max(Number(settings.live_poll_idle_interval_sec || 120), 60), 3600);
-  const viewerTtlSec = Math.min(Math.max(Number(settings.live_poll_active_max_duration_sec || 600), 60), 3600);
+  const viewerTtlSec = Math.min(Math.max(Number(settings.live_poll_active_max_duration_sec || 120), 60), 3600);
   const pingIntervalSec = Math.min(Math.max(Number(settings.ping_record_persist_interval_sec || 120), 60), 3600);
   const pingTasks = uuid
     ? agentPingTasksForClient(await listAgentPingTasks(database), uuid, Math.floor(pingIntervalSec))
@@ -1142,7 +1142,7 @@ clientRoutes.get('/policy', clientIdentityAuth, async (c) => {
         website_probe_tasks: [],
         report_now: false,
         viewer_count: 0,
-        viewer_ttl_sec: 600,
+        viewer_ttl_sec: 120,
         policy_ttl_sec: 120,
         idle_policy_ttl_sec: 120,
         timestamp: Date.now(),

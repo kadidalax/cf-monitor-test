@@ -31,7 +31,7 @@ const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
   ping_record_persist_interval_sec: '120',
   live_poll_active_interval_sec: '3',
   live_poll_idle_interval_sec: '120',
-  live_poll_active_max_duration_sec: '600',
+  live_poll_active_max_duration_sec: '120',
   active_theme: 'monitor',
   theme_settings: {
     backgroundImageUrlDesktop: '',
@@ -84,7 +84,7 @@ export function normalizePublicSettings(payload: unknown): PublicSettings | null
     ping_record_persist_interval_sec: secondsSetting(record.ping_record_persist_interval_sec, '120', 60, 3600),
     live_poll_active_interval_sec: secondsSetting(record.live_poll_active_interval_sec, '3', 3, 300),
     live_poll_idle_interval_sec: secondsSetting(record.live_poll_idle_interval_sec, '120', 60, 3600),
-    live_poll_active_max_duration_sec: secondsSetting(record.live_poll_active_max_duration_sec, '600', 60, 3600),
+    live_poll_active_max_duration_sec: secondsSetting(record.live_poll_active_max_duration_sec, '120', 60, 3600),
     active_theme: activeThemeSetting(record.active_theme, DEFAULT_PUBLIC_SETTINGS.active_theme),
     theme_settings: {
       backgroundImageUrlDesktop: stringSetting(

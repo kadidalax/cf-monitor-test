@@ -71,7 +71,7 @@ const AGENT_WS_MAX_MESSAGE_BYTES = 512 * 1024;
 const AGENT_REPORT_MAX_BATCH = 300;
 const VIEWER_MIN_TTL_MS = 60_000;
 const VIEWER_MAX_TTL_MS = 60 * 60 * 1000;
-const VIEWER_DEFAULT_TTL_MS = 10 * 60 * 1000;
+const VIEWER_DEFAULT_TTL_MS = 120 * 1000;
 const VIEWER_MAX_TOTAL_SESSIONS = 128;
 const VIEWER_MAX_SESSIONS_PER_IP = 8;
 const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
@@ -377,7 +377,7 @@ export class LiveDataDO {
   private policySettings: AgentPolicySettings = {
     activeIntervalSec: 3,
     idleIntervalSec: 120,
-    viewerTtlSec: 600,
+    viewerTtlSec: 120,
     pingIntervalSec: 120,
   };
   private policySettingsCheckedAt: number = 0;
@@ -462,7 +462,11 @@ export class LiveDataDO {
     ws.serializeAttachment(attachment);
     this.sessions.set(attachment.clientId, ws);
     this.sessionRoles.set(attachment.clientId, attachment.role);
-    this.viewerExpiresAt.delete(attachment.clientId);
+    if (attachment.role === 'viewer' && attachment.viewerExpiresAt) {
+      this.viewerExpiresAt.set(attachment.clientId, attachment.viewerExpiresAt);
+    } else {
+      this.viewerExpiresAt.delete(attachment.clientId);
+    }
   }
 
   private hydrateSessionsFromAcceptedWebSockets(): void {
@@ -470,9 +474,17 @@ export class LiveDataDO {
     for (const ws of this.state.getWebSockets()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment) continue;
+      if (attachment.role === 'viewer' && attachment.viewerExpiresAt && attachment.viewerExpiresAt <= now) {
+        this.expireViewer(attachment.clientId, ws, now);
+        continue;
+      }
       this.sessions.set(attachment.clientId, ws);
       this.sessionRoles.set(attachment.clientId, attachment.role);
-      this.viewerExpiresAt.delete(attachment.clientId);
+      if (attachment.role === 'viewer' && attachment.viewerExpiresAt) {
+        this.viewerExpiresAt.set(attachment.clientId, attachment.viewerExpiresAt);
+      } else {
+        this.viewerExpiresAt.delete(attachment.clientId);
+      }
       if (
         attachment.role === 'agent' &&
         attachment.lastReport &&
@@ -767,7 +779,7 @@ export class LiveDataDO {
       this.policySettings = {
         activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 3, 300),
         idleIntervalSec: this.boundIntegerSetting(settings.live_poll_idle_interval_sec, 120, 60, 3600),
-        viewerTtlSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 600, 60, 3600),
+        viewerTtlSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 120, 60, 3600),
         pingIntervalSec: this.boundIntegerSetting(settings.ping_record_persist_interval_sec, 120, 60, 3600),
       };
     } catch (error) {
@@ -837,11 +849,12 @@ export class LiveDataDO {
   }
 
   private activeViewerCount(now: number): number {
-    void now;
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
       if (role !== 'viewer') continue;
       const session = this.sessions.get(id);
+      const expiresAt = this.viewerExpiresAt.get(id);
+      if (expiresAt && expiresAt <= now) continue;
       if (session?.readyState === WebSocket.READY_STATE_OPEN) {
         count += 1;
       }
@@ -935,6 +948,11 @@ export class LiveDataDO {
           expiries.push(expiresAt);
         }
       }
+      for (const expiresAt of this.viewerExpiresAt.values()) {
+        if (Number.isFinite(expiresAt) && expiresAt > now) {
+          expiries.push(expiresAt);
+        }
+      }
       const nextExpiry = expiries.sort((a, b) => a - b)[0];
 
       if (nextExpiry === undefined) {
@@ -974,9 +992,13 @@ export class LiveDataDO {
   private countViewers(viewerIp?: string): { total: number; sameIp: number } {
     let total = 0;
     let sameIp = 0;
+    const now = Date.now();
     for (const ws of this.sessions.values()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment || attachment.role !== 'viewer') continue;
+      if (ws.readyState !== WebSocket.READY_STATE_OPEN) continue;
+      const expiresAt = this.viewerExpiresAt.get(attachment.clientId) ?? attachment.viewerExpiresAt;
+      if (expiresAt && expiresAt <= now) continue;
       total += 1;
       if (viewerIp && attachment.viewerIp === viewerIp) {
         sameIp += 1;
@@ -1616,6 +1638,7 @@ export class LiveDataDO {
         clientName,
         hidden,
         ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
+        ...(role === 'viewer' ? { viewerExpiresAt: now + normalizeViewerTtlMs(url.searchParams.get('viewer_ttl_ms')) } : {}),
         ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
         ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
       };
@@ -1624,6 +1647,7 @@ export class LiveDataDO {
 
       if (role === 'viewer') {
         this.sendSnapshot(server);
+        this.runBackground('do_viewer_expiry', this.scheduleExpiryAlarm(now));
         if (activeViewersBefore === 0) {
           this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
         }

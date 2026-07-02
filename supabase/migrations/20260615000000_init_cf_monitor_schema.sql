@@ -337,7 +337,7 @@ insert into settings (key, value) values
   ('audit_log_preserve_time', '2160'),
   ('live_poll_active_interval_sec', '3'),
   ('live_poll_idle_interval_sec', '120'),
-  ('live_poll_active_max_duration_sec', '600'),
+  ('live_poll_active_max_duration_sec', '120'),
   ('notification_method', 'telegram'),
   ('telegram_bot_token', ''),
   ('telegram_chat_id', ''),

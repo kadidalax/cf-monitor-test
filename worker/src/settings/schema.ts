@@ -127,7 +127,7 @@ export const SETTING_SCHEMA = {
   },
   live_poll_active_max_duration_sec: {
     type: 'integer',
-    defaultValue: '600',
+    defaultValue: '120',
     public: true,
     min: 60,
     max: 3600,
