@@ -6,6 +6,8 @@ const checks = [
   ['worker/src/routes/client.ts', 'website_probe_tasks'],
   ['worker/src/do/live-data.ts', 'website_probe_results'],
   ['worker/src/do/live-data.ts', "source_type: 'agent'"],
+  ['worker/src/do/live-data.ts', 'agent_policy_website_probe_tasks'],
+  ['worker/src/do/live-data.ts', 'policy sent without website probes'],
   ['worker/src/db/queries.ts', 'listAgentWebsiteProbeTasks'],
   ['agent/main.go', 'WebsiteProbeResults'],
   ['frontend/src/pages/admin/Websites.tsx', 'agent_probe_mode'],

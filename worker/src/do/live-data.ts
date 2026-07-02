@@ -48,6 +48,7 @@ const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
 const HOT_PATH_HEALTH_OK_THROTTLE_MS = 60 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 30_000;
 const PING_TASK_CACHE_MS = 120_000;
+const AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS = 5 * 60 * 1000;
 const RECORD_CAPACITY_SNAPSHOT_KEY = 'record:capacity:snapshot';
 const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_active_interval_sec',
@@ -382,6 +383,7 @@ export class LiveDataDO {
   };
   private policySettingsCheckedAt: number = 0;
   private pingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
+  private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
@@ -845,7 +847,23 @@ export class LiveDataDO {
   private async getWebsiteProbeTasks(now: number, clientId?: string): Promise<db.WebsiteMonitor[]> {
     const database = this.getQueryDatabase();
     if (!database || !clientId) return [];
-    return db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20);
+    try {
+      return await db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20);
+    } catch (error) {
+      const component = 'agent_policy_website_probe_tasks';
+      const previous = this.policyOptionalErrorLastWriteAt.get(component) || 0;
+      if (now - previous >= AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS) {
+        this.policyOptionalErrorLastWriteAt.set(component, now);
+        await bestEffortRecordHealthEvent(
+          database,
+          component,
+          'error',
+          `website probe tasks lookup failed; policy sent without website probes: ${errorDetail(error)}`,
+          { auditAction: 'agent_policy_website_probe_tasks_error' },
+        );
+      }
+      return [];
+    }
   }
 
   private activeViewerCount(now: number): number {
