@@ -91,7 +91,7 @@ const MAX_RETENTION_HOURS = 72;
 const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
-const DEFAULT_VIEWER_TTL_SEC = 600;
+const DEFAULT_VIEWER_TTL_SEC = 120;
 const DEFAULT_RECORD_PERSIST_SEC = 120;
 const DEFAULT_PING_RECORD_PERSIST_SEC = 120;
 const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 450_000;
@@ -713,7 +713,7 @@ export default function SettingsGeneral() {
                 value={getSettingValue(settings, 'live_poll_active_max_duration_sec', String(DEFAULT_VIEWER_TTL_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_max_duration_sec', value)}
                 type="number"
-                placeholder="600"
+                placeholder="120"
                 width="100%"
               />
             </div>
