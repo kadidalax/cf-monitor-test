@@ -5,6 +5,7 @@ import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucid
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useDisplayTheme } from "../../contexts/DisplayThemeContext";
+import { normalizeDisplayTheme } from "../../utils/displayTheme";
 import { CF_MONITOR_GITHUB_URL } from "../../utils/projectLinks";
 import { formatAppVersion } from "../../utils/version";
 import {
@@ -77,7 +78,8 @@ export default function AdminLayout() {
   if (!isAuthenticated) return null;
 
   const handleLogout = () => {
-    setDisplayTheme(displayTheme);
+    const currentDisplayTheme = normalizeDisplayTheme(document.documentElement.getAttribute("data-monitor-theme") || displayTheme);
+    setDisplayTheme(currentDisplayTheme);
     logout();
     navigate("/");
   };
