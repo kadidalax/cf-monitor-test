@@ -94,21 +94,23 @@ export default function Login() {
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!recoveryKey || !recoveryUsername || !recoveryPassword) {
-      toast.error('请填写 service_role key、用户名和新密码');
+    const needsServiceRoleKey = recoveryStatus?.admin_present === true;
+    if ((needsServiceRoleKey && !recoveryKey) || !recoveryUsername || !recoveryPassword) {
+      toast.error(needsServiceRoleKey ? '请填写 service_role key、用户名和新密码' : '请填写用户名和密码');
       return;
     }
 
     setRecoveryLoading(true);
     try {
+      const payload: Record<string, string> = {
+        username: recoveryUsername,
+        password: recoveryPassword,
+      };
+      if (needsServiceRoleKey) payload.supabase_service_role_key = recoveryKey;
       const response = await fetch('/api/admin/recovery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          supabase_service_role_key: recoveryKey,
-          username: recoveryUsername,
-          password: recoveryPassword,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -130,6 +132,7 @@ export default function Login() {
   };
 
   const recoveryTitle = recoveryStatus?.admin_present ? '重置管理员' : '创建管理员';
+  const needsServiceRoleKey = recoveryStatus?.admin_present === true;
 
   return (
     <div className="login-page">
@@ -219,7 +222,7 @@ export default function Login() {
         {recoveryMode && (
           <form onSubmit={handleRecoverySubmit}>
             <Flex direction="column" gap="4">
-              <label htmlFor="recovery-service-role-key">
+              {needsServiceRoleKey && <label htmlFor="recovery-service-role-key">
                 <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
                   Supabase service_role key
                 </Text>
@@ -234,7 +237,7 @@ export default function Login() {
                   autoFocus
                   style={{ width: '100%' }}
                 />
-              </label>
+              </label>}
 
               <label htmlFor="recovery-username">
                 <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
@@ -247,6 +250,7 @@ export default function Login() {
                   value={recoveryUsername}
                   onChange={(e) => setRecoveryUsername(e.target.value)}
                   autoComplete="username"
+                  autoFocus={!needsServiceRoleKey}
                   style={{ width: '100%' }}
                 />
               </label>

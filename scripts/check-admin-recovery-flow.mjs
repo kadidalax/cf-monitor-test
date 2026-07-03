@@ -46,6 +46,9 @@ const requiredNeedles = [
   ['frontend/src/pages/Login.tsx', files.loginPage, '创建管理员'],
   ['frontend/src/pages/Login.tsx', files.loginPage, '忘记密码'],
   ['frontend/src/pages/Login.tsx', files.loginPage, 'service_role'],
+  ['frontend/src/pages/Login.tsx', files.loginPage, 'const needsServiceRoleKey = recoveryStatus?.admin_present === true'],
+  ['frontend/src/pages/Login.tsx', files.loginPage, 'if (needsServiceRoleKey) payload.supabase_service_role_key = recoveryKey'],
+  ['worker/src/routes/public.ts', files.publicRoutes, 'if (userCount === 1)'],
   ['README.md', files.readme, '首次部署后访问 `/admin/login`'],
   ['README.md', files.readme, '忘记账号或密码'],
 ];
@@ -55,6 +58,13 @@ for (const [name, text, needle] of requiredNeedles) {
     console.error(`${name} is missing ${needle}`);
     failed = true;
   }
+}
+
+const userCountCheckIndex = files.publicRoutes.indexOf('const userCount = await db.countUsers(database);');
+const serviceRoleCheckIndex = files.publicRoutes.indexOf('timingSafeEqualString(serviceRoleKey');
+if (userCountCheckIndex < 0 || serviceRoleCheckIndex < userCountCheckIndex) {
+  console.error('admin recovery must only require service_role key after counting existing admins');
+  failed = true;
 }
 
 const migration = readFileSync('worker/src/generated/supabase-migrations.ts', 'utf8');

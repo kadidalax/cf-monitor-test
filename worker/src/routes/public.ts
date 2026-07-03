@@ -932,13 +932,6 @@ publicRoutes.post('/admin/recovery', async (c) => {
   const username = readRecoveryUsername(parsed.body);
   const password = readRecoveryPassword(parsed.body);
 
-  if (!serviceRoleKey || serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH) {
-    return c.json({ error: 'Supabase service_role key 无效' }, 400);
-  }
-  if (!await timingSafeEqualString(serviceRoleKey, c.env.SUPABASE_SERVICE_ROLE_KEY?.trim())) {
-    return c.json({ error: 'Supabase service_role key 无效' }, 403);
-  }
-
   const usernameError = validateRecoveryUsername(username);
   if (usernameError) return c.json({ error: usernameError }, 400);
   const passwordError = validateAdminPasswordStrength(password, username);
@@ -948,6 +941,14 @@ publicRoutes.post('/admin/recovery', async (c) => {
   const userCount = await db.countUsers(database);
   if (userCount > 1) {
     return c.json({ error: '当前存在多个管理员账号，请登录后在账户管理中修改密码' }, 409);
+  }
+  if (userCount === 1) {
+    if (!serviceRoleKey || serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH) {
+      return c.json({ error: 'Supabase service_role key 无效' }, 400);
+    }
+    if (!await timingSafeEqualString(serviceRoleKey, c.env.SUPABASE_SERVICE_ROLE_KEY?.trim())) {
+      return c.json({ error: 'Supabase service_role key 无效' }, 403);
+    }
   }
 
   const user = await db.recoverSingleAdmin(database, {
