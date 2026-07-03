@@ -126,6 +126,13 @@ export async function deleteUserIfMatches(
   return sba.deleteSupabaseUserIfMatches(database.env, user);
 }
 
+export async function recoverSingleAdmin(
+  database: QueryDatabase,
+  user: { uuid: string; username: string; hashedPassword: string },
+): Promise<t.User> {
+  return sba.recoverSupabaseSingleAdmin(database.env, user);
+}
+
 export async function getUserByUsername(database: QueryDatabase, username: string): Promise<t.User | null> {
   return sba.getSupabaseLoginUser(database.env, username);
 }

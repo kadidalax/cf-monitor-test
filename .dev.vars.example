@@ -5,5 +5,3 @@ SUPABASE_URL=https://PROJECT_REF.supabase.co
 # 以下值必须保存为 Worker Secret，不要保存为普通变量。
 SUPABASE_SERVICE_ROLE_KEY=
 JWT_SECRET=
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=

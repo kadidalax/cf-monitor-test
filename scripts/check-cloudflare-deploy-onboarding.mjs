@@ -4,8 +4,6 @@ const requiredTemplateKeys = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
   'JWT_SECRET',
-  'ADMIN_USERNAME',
-  'ADMIN_PASSWORD',
 ];
 
 const checks = [
@@ -17,6 +15,8 @@ const checks = [
     'Settings -> Variables & Secrets',
     '`SUPABASE_URL` | Variable',
     '`SUPABASE_SERVICE_ROLE_KEY` | Secret',
+    '首次访问登录页创建管理员',
+    '忘记密码',
   ]],
 ];
 

@@ -869,6 +869,17 @@ export function deleteSupabaseUserIfMatches(
   });
 }
 
+export function recoverSupabaseSingleAdmin(
+  env: SupabaseApiEnv,
+  user: { uuid: string; username: string; hashedPassword: string },
+): Promise<User> {
+  return callSupabaseRpc<User>(env, 'cfm_recover_single_admin', {
+    input_uuid: user.uuid,
+    input_username: user.username,
+    input_passwd: user.hashedPassword,
+  });
+}
+
 export function getSupabaseUserByUuid(env: SupabaseApiEnv, uuid: string): Promise<User | null> {
   return callSupabaseRpc<User | null>(env, 'cfm_user_by_uuid', { input_uuid: uuid });
 }

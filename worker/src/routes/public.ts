@@ -8,9 +8,8 @@ import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
 import { invalidateAdminSessionCache, validateAdminSession } from '../auth/admin-session';
-import { AdminBootstrapError, ensureInitialAdmin } from '../auth/admin-bootstrap';
 import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth/jwt';
-import { hashPassword, needsPasswordRehash, verifyPassword } from '../auth/password';
+import { hashPassword, needsPasswordRehash, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import {
   clearAdminSessionCookie,
   ensureAdminCsrfCookie,
@@ -46,6 +45,7 @@ const PUBLIC_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PUBLIC_METADATA_RATE_LIMIT_MAX = 120;
 const PUBLIC_HISTORY_RATE_LIMIT_MAX = 60;
 const PUBLIC_LIVE_RATE_LIMIT_MAX = 180;
+const PUBLIC_ADMIN_RECOVERY_RATE_LIMIT_MAX = 5;
 const PUBLIC_METADATA_CACHE_SECONDS = 30;
 const PUBLIC_HISTORY_CACHE_SECONDS = 10;
 const PUBLIC_LIVE_CACHE_SECONDS = 2;
@@ -58,6 +58,8 @@ const PUBLIC_METADATA_CACHE_MAX_ENTRIES = PUBLIC_HISTORY_CACHE_MAX_ENTRIES;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
 const LOGOUT_CLEAR_SITE_DATA_HEADER = '"cache", "storage"';
 const DUMMY_ADMIN_PASSWORD_HASH = 'pbkdf2_sha256$10000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const MAX_ADMIN_RECOVERY_KEY_LENGTH = 8192;
+const MAX_ADMIN_RECOVERY_USERNAME_BYTES = 64;
 
 type PublicRateLimitBucket = {
   count: number;
@@ -587,13 +589,6 @@ function toPublicPingTask(task: db.PingTask, publicClientIds: Set<string>): db.P
   };
 }
 
-function getAdminBootstrapMessage(error: AdminBootstrapError): string {
-  if (error.code === 'weak_password') {
-    return 'ADMIN_PASSWORD 不符合强度要求';
-  }
-  return '首次登录前请在 Worker 环境变量设置 ADMIN_USERNAME 和 ADMIN_PASSWORD';
-}
-
 function getClientIp(c: PublicContext): string {
   return getCloudflareClientIp(c);
 }
@@ -689,6 +684,10 @@ function guardPublicLive(c: PublicContext): Promise<Response | null> {
   return publicApiRateLimit(c, 'live', PUBLIC_LIVE_RATE_LIMIT_MAX);
 }
 
+function guardAdminRecovery(c: PublicContext): Promise<Response | null> {
+  return publicApiRateLimit(c, 'admin-recovery', PUBLIC_ADMIN_RECOVERY_RATE_LIMIT_MAX);
+}
+
 async function preparePublicHistoryRequest(
   c: PublicContext,
   database: db.QueryDatabase,
@@ -720,6 +719,42 @@ async function preparePublicHistoryRequest(
 
 function normalizeLoginUsername(username: string): string {
   return username.trim().toLowerCase().slice(0, MAX_LOGIN_USERNAME_LENGTH);
+}
+
+async function sha256Bytes(value: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+}
+
+async function timingSafeEqualString(actual: string | undefined, expected: string | undefined): Promise<boolean> {
+  if (!actual || !expected) return false;
+  const [actualHash, expectedHash] = await Promise.all([sha256Bytes(actual), sha256Bytes(expected)]);
+  let diff = actual.length === expected.length ? 0 : 1;
+  for (let index = 0; index < expectedHash.length; index += 1) {
+    diff |= actualHash[index] ^ expectedHash[index];
+  }
+  return diff === 0;
+}
+
+function readRecoveryServiceRoleKey(body: Record<string, unknown>): string {
+  const value = body.supabase_service_role_key ?? body.service_role_key;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readRecoveryUsername(body: Record<string, unknown>): string {
+  return typeof body.username === 'string' ? body.username.trim() : '';
+}
+
+function readRecoveryPassword(body: Record<string, unknown>): string {
+  return typeof body.password === 'string' ? body.password : '';
+}
+
+function validateRecoveryUsername(username: string): string | null {
+  if (!username) return '用户名不能为空';
+  if (new TextEncoder().encode(username).byteLength > MAX_ADMIN_RECOVERY_USERNAME_BYTES) {
+    return `用户名不能超过 ${MAX_ADMIN_RECOVERY_USERNAME_BYTES} 字节`;
+  }
+  if (/[\u0000-\u001F\u007F]/.test(username)) return '用户名包含无效字符';
+  return null;
 }
 
 function loginRateLimitBuckets(ip: string, username: string): string[] {
@@ -876,6 +911,72 @@ export async function auditLoginFailure(
   );
 }
 
+publicRoutes.get('/admin/recovery/status', async (c) => {
+  const limited = await guardAdminRecovery(c);
+  if (limited) return limited;
+  const userCount = await db.countUsers(getDatabase(c.env));
+  return c.json({
+    admin_present: userCount > 0,
+    recoverable: userCount <= 1,
+  });
+});
+
+publicRoutes.post('/admin/recovery', async (c) => {
+  const limited = await guardAdminRecovery(c);
+  if (limited) return limited;
+
+  const parsed = await readPublicJsonObject(c);
+  if ('response' in parsed) return parsed.response;
+
+  const serviceRoleKey = readRecoveryServiceRoleKey(parsed.body);
+  const username = readRecoveryUsername(parsed.body);
+  const password = readRecoveryPassword(parsed.body);
+
+  if (!serviceRoleKey || serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH) {
+    return c.json({ error: 'Supabase service_role key 无效' }, 400);
+  }
+  if (!await timingSafeEqualString(serviceRoleKey, c.env.SUPABASE_SERVICE_ROLE_KEY?.trim())) {
+    return c.json({ error: 'Supabase service_role key 无效' }, 403);
+  }
+
+  const usernameError = validateRecoveryUsername(username);
+  if (usernameError) return c.json({ error: usernameError }, 400);
+  const passwordError = validateAdminPasswordStrength(password, username);
+  if (passwordError) return c.json({ error: passwordError }, 400);
+
+  const database = getDatabase(c.env);
+  const userCount = await db.countUsers(database);
+  if (userCount > 1) {
+    return c.json({ error: '当前存在多个管理员账号，请登录后在账户管理中修改密码' }, 409);
+  }
+
+  const user = await db.recoverSingleAdmin(database, {
+    uuid: crypto.randomUUID(),
+    username,
+    hashedPassword: await hashPassword(password),
+  });
+  invalidateAdminSessionCache(user.uuid);
+  if (user.session_version > 1) {
+    await deleteAdminSessionEdgeCache(c, user.uuid, user.session_version - 1);
+  }
+  runLoginBackground(
+    c,
+    db.insertAuditLog(
+      database,
+      username,
+      'admin_recovery',
+      userCount === 0 ? '首次创建管理员账号' : '通过 Supabase service_role key 重置管理员账号',
+      'warning',
+    ),
+  );
+
+  return c.json({
+    success: true,
+    mode: userCount === 0 ? 'created' : 'reset',
+    user: { uuid: user.uuid, username: user.username },
+  });
+});
+
 // 登录
 publicRoutes.post('/login', async (c) => {
   const metrics: TimingMetric[] = [];
@@ -911,23 +1012,17 @@ publicRoutes.post('/login', async (c) => {
     return c.json({ error: `登录尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
   }
 
-  try {
-    await timed(metrics, 'ensure_admin', () => ensureInitialAdmin(c.env));
-  } catch (error) {
-    if (error instanceof AdminBootstrapError) {
-      return c.json({ error: getAdminBootstrapMessage(error) }, 503);
-    }
-    console.error('[auth] initial admin bootstrap failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '初始化管理员失败' }, 500);
-  }
-
   const user = await timed(metrics, 'db_user', () => db.getUserByUsername(database, username));
   if (!user) {
+    const userCount = await timed(metrics, 'db_user_count', () => db.countUsers(database));
     await timed(metrics, 'verify_password', () => verifyPassword(password, DUMMY_ADMIN_PASSWORD_HASH));
     const failedAt = Date.now();
     await timed(metrics, 'db_record_failure', () => recordLoginFailure(database, rateLimitBuckets, failedAt, rateLimitStates));
     await timed(metrics, 'audit_failure', () => auditLoginFailure(database, username, clientIp, 'unknown_user', failedAt));
     setServerTiming(c, metrics);
+    if (userCount === 0) {
+      return c.json({ error: '请先在登录页创建管理员账号' }, 409);
+    }
     return c.json({ error: '用户名或密码错误' }, 401);
   }
 

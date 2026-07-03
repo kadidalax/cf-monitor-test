@@ -87,24 +87,22 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 | `SUPABASE_URL` | Variable | Supabase Project URL，例如 `https://xxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | Supabase secret/service role key |
 | `JWT_SECRET` | Secret | 后台会话签名密钥，建议使用 32 位以上随机字符串 |
-| `ADMIN_USERNAME` | Secret | 初始后台用户名 |
-| `ADMIN_PASSWORD` | Secret | 初始后台密码 |
 
 可选：
 
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
-| `DEMO_RESET_ENABLED` | Variable | 公开演示站使用。设为 `true` 后，Worker 会每 30 分钟恢复一次已保存的演示快照，并把管理员账号密码重置为 `ADMIN_USERNAME` / `ADMIN_PASSWORD`。默认关闭。 |
+| `DEMO_RESET_ENABLED` | Variable | 公开演示站使用。设为 `true` 后，Worker 会每 30 分钟恢复一次已保存的演示快照。默认关闭。 |
 
 如果你不是点击上面的 **Deploy to Cloudflare** 按钮，而是在 Cloudflare Worker 页面里选择 **Dashboard 连接 GitHub 仓库部署**，Cloudflare 可能不会在选择仓库时自动弹出这些运行时变量输入框。请在第一次部署前或部署失败后，进入该 Worker 的 **Settings -> Variables & Secrets** 手动添加：
 
 - Variable: `SUPABASE_URL`
 - Secret: `SUPABASE_SERVICE_ROLE_KEY`
 - Secret: `JWT_SECRET`
-- Secret: `ADMIN_USERNAME`
-- Secret: `ADMIN_PASSWORD`
 
 注意不要把 Secret 填到 Build variables。Cloudflare 文档说明 Build variables 只在构建命令中可用，不会作为 Worker 运行时变量传给项目。
+
+后台账号不再作为 Cloudflare 变量配置。首次访问登录页创建管理员；忘记密码时，在登录页点击 **忘记密码**，输入 Supabase `service_role` key、新用户名和新密码即可重置唯一管理员账号。
 
 ### 5. 一键初始化数据库
 
@@ -118,7 +116,7 @@ Access Token 只会在本次初始化请求中使用，不会写入 Worker 变�
 
 ### 公开演示站自动回档
 
-如果你公开了后台管理员账号密码，可以在 Cloudflare Worker 变量里设置 `DEMO_RESET_ENABLED=true`。先把站点调整成希望展示的状态，然后打开 `/db-init`，粘贴 1 小时有效期的 Supabase Access Token，点击 **保存当前演示快照**。之后 Worker 定时任务会每 30 分钟恢复这份快照，并把管理员账号密码恢复为 Worker Secret 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
+如果你公开了演示站，可以在 Cloudflare Worker 变量里设置 `DEMO_RESET_ENABLED=true`。先把站点调整成希望展示的状态，然后打开 `/db-init`，粘贴 1 小时有效期的 Supabase Access Token，点击 **保存当前演示快照**。之后 Worker 定时任务会每 30 分钟恢复这份快照。管理员账号不再依赖 Worker 账号密码变量；忘记密码时，在登录页用 Supabase `service_role` key 重置。
 
 这个 Access Token 只用于当次保存快照，不会保存到 Worker、Supabase 或浏览器。普通后台管理员无法覆盖演示快照。
 
@@ -127,7 +125,7 @@ Access Token 只会在本次初始化请求中使用，不会写入 Worker 变�
 1. 打开 Worker 地址，例如 `https://你的项目名.你的账号.workers.dev`。
 2. 第一次部署后先进入 `/db-init` 初始化数据库。
 3. 进入 `/admin/login`。
-4. 使用部署时设置的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
+4. 首次访问登录页创建管理员，然后使用新账号密码登录。
 5. 进入后台“服务器”，添加节点。
 6. 打开节点的安装命令窗口，选择 Linux 或 Windows。
 7. 复制命令到 VPS 执行，等待 Agent 上线。
@@ -172,8 +170,6 @@ npm run dev:worker
 ```bash
 npx wrangler login
 npx wrangler secret put JWT_SECRET
-npx wrangler secret put ADMIN_USERNAME
-npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npm run deploy
 ```

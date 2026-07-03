@@ -840,13 +840,6 @@ function runSecretProbe(env: Bindings, checkedAt: string): HealthEvent {
   if (new TextEncoder().encode(env.JWT_SECRET?.trim() || '').length < MIN_JWT_SECRET_BYTES) {
     missing.push('JWT_SECRET must be at least 32 bytes');
   }
-  if (!env.ADMIN_USERNAME?.trim()) {
-    missing.push('ADMIN_USERNAME is empty');
-  }
-  const adminPasswordError = validateAdminPasswordStrength(env.ADMIN_PASSWORD || '', env.ADMIN_USERNAME || '');
-  if (adminPasswordError) {
-    missing.push(`ADMIN_PASSWORD is weak: ${adminPasswordError}`);
-  }
   const setupDiagnosticsTokenError = validateSetupDiagnosticsToken(env.SETUP_DIAGNOSTICS_TOKEN);
   if (setupDiagnosticsTokenError) {
     missing.push(setupDiagnosticsTokenError);
@@ -854,7 +847,7 @@ function runSecretProbe(env: Bindings, checkedAt: string): HealthEvent {
   if (missing.length > 0) {
     return healthEvent('secret_probe', 'error', missing.join('; '), checkedAt);
   }
-  return healthEvent('secret_probe', 'ok', 'Required admin secrets are configured', checkedAt);
+  return healthEvent('secret_probe', 'ok', 'Required runtime secrets are configured', checkedAt);
 }
 
 async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: HealthCheckBody['cache']): Promise<{ body: HealthCheckBody; status: 200 | 503 }> {

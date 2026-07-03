@@ -7,7 +7,6 @@ import {
   type AppDatabase,
 } from '../db/provider';
 import * as db from '../db/queries';
-import { validateAdminPasswordStrength } from '../auth/password';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { validateSetupDiagnosticsToken } from '../utils/setup-diagnostics-token';
@@ -181,20 +180,13 @@ function secretsCheck(env: Bindings): SetupCheck {
   if (new TextEncoder().encode(env.JWT_SECRET?.trim() || '').byteLength < 32) {
     missing.push('JWT_SECRET must be at least 32 bytes');
   }
-  if (!env.ADMIN_USERNAME?.trim()) {
-    missing.push('ADMIN_USERNAME is empty');
-  }
-  const adminPasswordError = validateAdminPasswordStrength(env.ADMIN_PASSWORD || '', env.ADMIN_USERNAME || '');
-  if (adminPasswordError) {
-    missing.push(`ADMIN_PASSWORD is weak: ${adminPasswordError}`);
-  }
   const setupDiagnosticsTokenError = validateSetupDiagnosticsToken(env.SETUP_DIAGNOSTICS_TOKEN);
   if (setupDiagnosticsTokenError) {
     missing.push(setupDiagnosticsTokenError);
   }
   return missing.length > 0
     ? setupCheck('secrets', 'error', missing.join('; '))
-    : setupCheck('secrets', 'ok', 'Required admin secrets are configured');
+    : setupCheck('secrets', 'ok', 'Required runtime secrets are configured');
 }
 
 async function durableObjectsCheck(env: Bindings): Promise<SetupCheck> {
@@ -451,7 +443,7 @@ setupRoutes.get('/status', async (c) => {
         adminStatus === 'present'
           ? 'Initial admin account exists'
           : adminStatus === 'absent'
-            ? 'Initial admin account will be created on first login'
+            ? 'Create the initial admin account on the login page'
             : 'Admin account check could not be completed',
       ));
     } else {
