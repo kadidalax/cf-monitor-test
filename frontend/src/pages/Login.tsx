@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Flex, Card, Text, TextField, Button, Heading, Box, Separator } from '@radix-ui/themes';
-import { Monitor, LogIn, Eye, EyeOff, KeyRound, UserPlus } from 'lucide-react';
+import { LogIn, Eye, EyeOff, KeyRound, UserPlus } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useDisplayTheme } from '../contexts/DisplayThemeContext';
 import { toast } from 'sonner';
 import Loading from '../components/Loading';
+import { refreshActiveThemeStylesheet } from '../utils/activeThemeStylesheet';
+import { normalizeDisplayTheme } from '../utils/displayTheme';
+import { fetchPublicSettings } from '../utils/publicSettings';
 import { formatAppVersion } from '../utils/version';
 
 type RecoveryStatus = {
@@ -14,6 +18,7 @@ type RecoveryStatus = {
 
 export default function Login() {
   const { login, isAuthenticated, authLoading } = useAuth();
+  const { setDisplayThemeFromSettings } = useDisplayTheme();
   const navigate = useNavigate();
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from;
@@ -43,6 +48,15 @@ export default function Login() {
       })
       .catch(() => {});
   }, []);
+
+  React.useEffect(() => {
+    refreshActiveThemeStylesheet();
+    fetchPublicSettings({ force: true })
+      .then((data) => {
+        setDisplayThemeFromSettings(normalizeDisplayTheme(data.active_theme));
+      })
+      .catch(() => {});
+  }, [setDisplayThemeFromSettings]);
 
   React.useEffect(() => {
     fetch('/api/admin/recovery/status')
@@ -120,7 +134,7 @@ export default function Login() {
       <Card className="login-card" style={{ padding: '36px 32px' }}>
         <Flex direction="column" align="center" gap="2" mb="5">
           <Box className="login-logo">
-            <Monitor size={32} color="white" />
+            <img src="/app-icon.png" alt="" />
           </Box>
           <Heading size="6" style={{ fontSize: '1.5rem', letterSpacing: '-0.02em', fontWeight: 700 }}>
             CF VPS Monitor

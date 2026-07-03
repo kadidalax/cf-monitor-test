@@ -10,6 +10,7 @@ import { CF_MONITOR_GITHUB_URL } from "../utils/projectLinks";
 import { fetchPublicSettings } from "../utils/publicSettings";
 import { subscribePublicDataUpdated } from "../utils/publicDataEvents";
 import { subscribeThemeUpdated } from "../utils/themeEvents";
+import { refreshActiveThemeStylesheet } from "../utils/activeThemeStylesheet";
 
 function safeBackgroundUrl(value: unknown) {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -23,21 +24,6 @@ function safeBackgroundUrl(value: unknown) {
     return "";
   }
   return "";
-}
-
-function ensureActiveThemeStylesheet() {
-  const existing = document.getElementById("cf-monitor-active-theme-css") as HTMLLinkElement | null;
-  if (existing) return existing;
-  const link = document.createElement("link");
-  link.id = "cf-monitor-active-theme-css";
-  link.rel = "stylesheet";
-  link.href = "/api/theme/active.css";
-  document.head.appendChild(link);
-  return link;
-}
-
-function refreshActiveThemeStylesheet() {
-  ensureActiveThemeStylesheet().href = `/api/theme/active.css?v=${Date.now()}`;
 }
 
 export default function Layout() {

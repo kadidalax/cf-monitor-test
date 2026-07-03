@@ -3748,6 +3748,13 @@ html[data-monitor-theme='next'] .node-network-value strong {
   box-shadow: 0 4px 16px rgba(0,0,0,0.12);
 }
 
+.login-logo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
 .db-init-card {
   max-width: 520px;
 }
