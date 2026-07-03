@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Flex, Card, Text, TextField, Button, Heading, Box, Separator } from '@radix-ui/themes';
 import { LogIn, Eye, EyeOff, KeyRound, UserPlus } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { useDisplayTheme } from '../contexts/DisplayThemeContext';
+import { hasLocalDisplayThemePreference, useDisplayTheme } from '../contexts/DisplayThemeContext';
 import { toast } from 'sonner';
 import Loading from '../components/Loading';
 import { refreshActiveThemeStylesheet } from '../utils/activeThemeStylesheet';
@@ -53,7 +53,9 @@ export default function Login() {
     refreshActiveThemeStylesheet();
     fetchPublicSettings({ force: true })
       .then((data) => {
-        setDisplayThemeFromSettings(normalizeDisplayTheme(data.active_theme));
+        if (!hasLocalDisplayThemePreference()) {
+          setDisplayThemeFromSettings(normalizeDisplayTheme(data.active_theme));
+        }
       })
       .catch(() => {});
   }, [setDisplayThemeFromSettings]);

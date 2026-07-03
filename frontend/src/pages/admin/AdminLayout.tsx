@@ -5,7 +5,6 @@ import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucid
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useDisplayTheme } from "../../contexts/DisplayThemeContext";
-import { defaultDisplayTheme } from "../../utils/displayTheme";
 import { CF_MONITOR_GITHUB_URL } from "../../utils/projectLinks";
 import { formatAppVersion } from "../../utils/version";
 import {
@@ -16,7 +15,7 @@ import {
 export default function AdminLayout() {
   const { isAuthenticated, authLoading, logout } = useAuth();
   const { theme, setTheme } = useTheme();
-  const { displayTheme, setDisplayThemeFromSettings, toggleDisplayTheme } = useDisplayTheme();
+  const { displayTheme, setDisplayTheme, toggleDisplayTheme } = useDisplayTheme();
   const navigate = useNavigate();
   const location = useLocation();
   const githubUrl = CF_MONITOR_GITHUB_URL;
@@ -78,7 +77,7 @@ export default function AdminLayout() {
   if (!isAuthenticated) return null;
 
   const handleLogout = () => {
-    setDisplayThemeFromSettings(defaultDisplayTheme);
+    setDisplayTheme(displayTheme);
     logout();
     navigate("/");
   };
