@@ -1,5 +1,4 @@
-begin;
-
+-- Source: 20260615000000_init_cf_monitor_schema.sql
 set local search_path = public;
 
 create table if not exists clients (
@@ -415,4 +414,150 @@ insert into settings (key, value)
 values ('schema_bootstrap_version', 'postgres-2026-06-15-v2')
 on conflict (key) do update set value = excluded.value;
 
-commit;
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260615002000_add_history_client_foreign_keys.sql
+set local search_path = public;
+
+delete from records target where not exists (select 1 from clients where clients.uuid = target.client);
+delete from gpu_records target where not exists (select 1 from clients where clients.uuid = target.client);
+delete from gpu_snapshots target where not exists (select 1 from clients where clients.uuid = target.client);
+delete from ping_records target where not exists (select 1 from clients where clients.uuid = target.client);
+delete from ping_snapshots target where not exists (select 1 from clients where clients.uuid = target.client);
+
+alter table records drop constraint if exists records_client_fkey;
+alter table records
+  add constraint records_client_fkey
+  foreign key (client) references clients(uuid)
+  deferrable initially deferred;
+
+alter table gpu_records drop constraint if exists gpu_records_client_fkey;
+alter table gpu_records
+  add constraint gpu_records_client_fkey
+  foreign key (client) references clients(uuid)
+  deferrable initially deferred;
+
+alter table gpu_snapshots drop constraint if exists gpu_snapshots_client_fkey;
+alter table gpu_snapshots
+  add constraint gpu_snapshots_client_fkey
+  foreign key (client) references clients(uuid)
+  deferrable initially deferred;
+
+alter table ping_records drop constraint if exists ping_records_client_fkey;
+alter table ping_records
+  add constraint ping_records_client_fkey
+  foreign key (client) references clients(uuid)
+  deferrable initially deferred;
+
+alter table ping_snapshots drop constraint if exists ping_snapshots_client_fkey;
+alter table ping_snapshots
+  add constraint ping_snapshots_client_fkey
+  foreign key (client) references clients(uuid)
+  deferrable initially deferred;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v4')
+on conflict (key) do update set value = excluded.value;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260615184133_add_ping_records_task_foreign_key.sql
+set local search_path = public;
+
+delete from ping_records target
+where not exists (
+  select 1
+  from ping_tasks
+  where ping_tasks.id = target.task_id
+);
+
+alter table ping_records drop constraint if exists ping_records_task_fkey;
+alter table ping_records
+  add constraint ping_records_task_fkey
+  foreign key (task_id) references ping_tasks(id)
+  on delete cascade
+  deferrable initially deferred;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v5')
+on conflict (key) do update set value = excluded.value;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260615195019_add_ping_snapshots_values_json_index.sql
+set local search_path = public;
+
+create index if not exists idx_ping_snapshots_values_json
+on public.ping_snapshots using gin (values_json);
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v6')
+on conflict (key) do update set value = excluded.value;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260616205126_add_agent_token_hash.sql
+set local search_path = public;
+
+alter table public.clients
+  add column if not exists token_hash text;
+
+update public.clients
+set token_hash = 'sha256:' || encode(sha256(convert_to(token, 'UTF8')), 'hex')
+where coalesce(token_hash, '') = ''
+  and coalesce(token, '') <> '';
+
+alter table public.clients
+  alter column token drop not null;
+
+update public.clients
+set token = null
+where coalesce(token_hash, '') <> ''
+  and coalesce(token, '') <> '';
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'clients_token_hash_key'
+      and conrelid = 'public.clients'::regclass
+  ) then
+    alter table public.clients
+      add constraint clients_token_hash_key unique (token_hash);
+  end if;
+end $$;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v11')
+on conflict (key) do update set value = excluded.value;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260616211107_add_agent_token_audit_columns.sql
+set local search_path = public;
+
+alter table public.clients
+  add column if not exists token_last_used_at timestamptz,
+  add column if not exists token_rotated_at timestamptz;
+
+update public.clients
+set token_rotated_at = coalesce(updated_at, created_at, now())
+where token_rotated_at is null
+  and coalesce(token_hash, token, '') <> '';
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v12')
+on conflict (key) do update set value = excluded.value;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260617003210_add_agent_token_last_used_ip.sql
+set local search_path = public;
+
+alter table public.clients
+  add column if not exists token_last_used_ip text;
+
+insert into public.settings ("key", value)
+values ('schema_bootstrap_version', 'postgres-2026-06-15-v14')
+on conflict ("key") do update set value = excluded.value;

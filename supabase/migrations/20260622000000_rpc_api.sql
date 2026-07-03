@@ -1,5 +1,4 @@
-begin;
-
+-- Source: 20260622010000_add_worker_data_api_phase1_rpc.sql
 set local search_path = public;
 
 -- Phase 1 Worker Data API RPC. These functions are called only by the Worker
@@ -3336,4 +3335,1261 @@ on conflict (key) do update set value = excluded.value;
 
 notify pgrst, 'reload schema';
 
-commit;
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260625000000_supabase_only_rpc.sql
+set local search_path = public;
+
+create or replace function public.cfm_create_user(input_uuid text, input_username text, input_passwd text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  if nullif(trim(coalesce(input_uuid, '')), '') is null
+    or nullif(trim(coalesce(input_username, '')), '') is null
+    or coalesce(input_passwd, '') = ''
+  then
+    raise exception 'user uuid, username, and password hash are required';
+  end if;
+
+  insert into users (uuid, username, passwd, password_changed_at)
+  values (input_uuid, input_username, input_passwd, now());
+  return true;
+end;
+$$;
+
+create or replace function public.cfm_delete_user_if_matches(input_uuid text, input_username text, input_passwd text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  deleted_count integer;
+begin
+  delete from users
+  where uuid = input_uuid
+    and username = input_username
+    and passwd = input_passwd;
+  get diagnostics deleted_count = row_count;
+  return deleted_count > 0;
+end;
+$$;
+
+create or replace function public.cfm_login_rate_limit(input_bucket text)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select to_jsonb(row_data)
+  from (
+    select bucket, failures, first_failed_at, last_failed_at, locked_until
+    from login_rate_limits
+    where bucket = input_bucket
+    limit 1
+  ) row_data;
+$$;
+
+create or replace function public.cfm_login_rate_limits(input_buckets jsonb)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with buckets as (
+    select distinct value as bucket
+    from jsonb_array_elements_text(case when jsonb_typeof(input_buckets) = 'array' then input_buckets else '[]'::jsonb end)
+    where trim(value) <> ''
+  )
+  select coalesce(jsonb_agg(to_jsonb(l) order by l.bucket), '[]'::jsonb)
+  from login_rate_limits l
+  join buckets b on b.bucket = l.bucket;
+$$;
+
+create or replace function public.cfm_set_login_rate_limit(input_state jsonb)
+returns void
+language plpgsql
+set search_path = public
+as $$
+begin
+  if input_state is null or jsonb_typeof(input_state) <> 'object' or nullif(input_state->>'bucket', '') is null then
+    raise exception 'login rate limit state must include bucket';
+  end if;
+
+  insert into login_rate_limits (bucket, failures, first_failed_at, last_failed_at, locked_until)
+  values (
+    input_state->>'bucket',
+    coalesce((input_state->>'failures')::integer, 0),
+    coalesce((input_state->>'first_failed_at')::timestamptz, now()),
+    coalesce((input_state->>'last_failed_at')::timestamptz, now()),
+    nullif(input_state->>'locked_until', '')::timestamptz
+  )
+  on conflict (bucket) do update set
+    failures = excluded.failures,
+    first_failed_at = excluded.first_failed_at,
+    last_failed_at = excluded.last_failed_at,
+    locked_until = excluded.locked_until;
+end;
+$$;
+
+create or replace function public.cfm_set_login_rate_limits(input_states jsonb)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  item jsonb;
+begin
+  if input_states is null or jsonb_typeof(input_states) <> 'array' then
+    return;
+  end if;
+
+  for item in select value from jsonb_array_elements(input_states)
+  loop
+    perform public.cfm_set_login_rate_limit(item);
+  end loop;
+end;
+$$;
+
+create or replace function public.cfm_clear_login_rate_limits(input_buckets jsonb)
+returns void
+language sql
+set search_path = public
+as $$
+  delete from login_rate_limits
+  where bucket in (
+    select value
+    from jsonb_array_elements_text(case when jsonb_typeof(input_buckets) = 'array' then input_buckets else '[]'::jsonb end)
+    where trim(value) <> ''
+  );
+$$;
+
+create or replace function public.cfm_delete_login_rate_limits_before(input_before_time text)
+returns void
+language sql
+set search_path = public
+as $$
+  delete from login_rate_limits
+  where last_failed_at < input_before_time::timestamptz
+    and (locked_until is null or locked_until < now());
+$$;
+
+create or replace function public.cfm_clear_all_records()
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  deleted_records integer := 0;
+  deleted_gpu_records integer := 0;
+  deleted_gpu_snapshots integer := 0;
+  deleted_ping_records integer := 0;
+  deleted_ping_snapshots integer := 0;
+begin
+  with deleted as (delete from records returning 1)
+  select count(*)::integer into deleted_records from deleted;
+
+  with deleted as (delete from gpu_records returning 1)
+  select count(*)::integer into deleted_gpu_records from deleted;
+
+  with deleted as (delete from gpu_snapshots returning 1)
+  select count(*)::integer into deleted_gpu_snapshots from deleted;
+
+  with deleted as (delete from ping_records returning 1)
+  select count(*)::integer into deleted_ping_records from deleted;
+
+  with deleted as (delete from ping_snapshots returning 1)
+  select count(*)::integer into deleted_ping_snapshots from deleted;
+
+  return jsonb_build_object(
+    'deleted', jsonb_build_object(
+      'records', deleted_records,
+      'gpu_records', deleted_gpu_records,
+      'gpu_snapshots', deleted_gpu_snapshots,
+      'ping_records', deleted_ping_records,
+      'ping_snapshots', deleted_ping_snapshots
+    ),
+    'remaining', jsonb_build_object(
+      'records', 0,
+      'gpu_records', 0,
+      'gpu_snapshots', 0,
+      'ping_records', 0,
+      'ping_snapshots', 0
+    ),
+    'has_more', false
+  );
+end;
+$$;
+
+create or replace function public.cfm_clear_client_records(input_client text)
+returns void
+language sql
+set search_path = public
+as $$
+  delete from records where client = input_client;
+  delete from gpu_records where client = input_client;
+  delete from gpu_snapshots where client = input_client;
+  delete from ping_records where client = input_client;
+  delete from ping_snapshots where client = input_client;
+$$;
+
+create or replace function public.cfm_restore_backup_data(input_backup jsonb)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  item jsonb;
+  client_ids text[];
+  task_ids bigint[];
+begin
+  if input_backup is null or jsonb_typeof(input_backup) <> 'object' then
+    raise exception 'backup must be a JSON object';
+  end if;
+
+  if input_backup ? 'settings' and jsonb_typeof(input_backup->'settings') = 'object' then
+    insert into settings (key, value)
+    select key, value
+    from jsonb_each_text(input_backup->'settings')
+    where trim(key) <> ''
+    on conflict (key) do update set value = excluded.value;
+  end if;
+
+  if input_backup ? 'clients' and jsonb_typeof(input_backup->'clients') = 'array' then
+    select coalesce(array_agg(uuid), array[]::text[]) into client_ids
+    from (
+      select nullif(trim(value->>'uuid'), '') as uuid
+      from jsonb_array_elements(input_backup->'clients')
+    ) rows
+    where uuid is not null;
+
+    delete from records where not (client = any(client_ids));
+    delete from gpu_records where not (client = any(client_ids));
+    delete from gpu_snapshots where not (client = any(client_ids));
+    delete from ping_records where not (client = any(client_ids));
+    delete from ping_snapshots where not (client = any(client_ids));
+    delete from offline_notifications where not (client = any(client_ids));
+    delete from expiry_notifications where not (client = any(client_ids));
+    delete from clients where not (uuid = any(client_ids));
+
+    for item in select value from jsonb_array_elements(input_backup->'clients')
+    loop
+      if nullif(trim(item->>'uuid'), '') is null then
+        continue;
+      end if;
+
+      insert into clients (
+        uuid, token, token_hash, token_last_used_at, token_last_used_ip, token_rotated_at,
+        name, cpu_name, virtualization, arch, cpu_cores, os, kernel_version, gpu_name,
+        ipv4, ipv6, region, remark, public_remark, mem_total, swap_total, disk_total,
+        version, price, billing_cycle, auto_renewal, currency, expired_at, "group", tags,
+        hidden, traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
+      )
+      values (
+        item->>'uuid',
+        nullif(item->>'token', ''),
+        nullif(item->>'token_hash', ''),
+        nullif(item->>'token_last_used_at', '')::timestamptz,
+        coalesce(item->>'token_last_used_ip', ''),
+        nullif(item->>'token_rotated_at', '')::timestamptz,
+        coalesce(item->>'name', ''),
+        coalesce(item->>'cpu_name', ''),
+        coalesce(item->>'virtualization', ''),
+        coalesce(item->>'arch', ''),
+        coalesce((item->>'cpu_cores')::integer, 0),
+        coalesce(item->>'os', ''),
+        coalesce(item->>'kernel_version', ''),
+        coalesce(item->>'gpu_name', ''),
+        coalesce(item->>'ipv4', ''),
+        coalesce(item->>'ipv6', ''),
+        coalesce(item->>'region', ''),
+        coalesce(item->>'remark', ''),
+        coalesce(item->>'public_remark', ''),
+        coalesce((item->>'mem_total')::bigint, 0),
+        coalesce((item->>'swap_total')::bigint, 0),
+        coalesce((item->>'disk_total')::bigint, 0),
+        coalesce(item->>'version', ''),
+        coalesce((item->>'price')::double precision, 0),
+        coalesce((item->>'billing_cycle')::smallint, 0),
+        case when coalesce((item->>'auto_renewal')::boolean, false) then 1 else 0 end,
+        coalesce(item->>'currency', '$'),
+        nullif(item->>'expired_at', '')::timestamptz,
+        coalesce(item->>'group', ''),
+        coalesce(item->>'tags', ''),
+        case when coalesce((item->>'hidden')::boolean, false) then 1 else 0 end,
+        coalesce((item->>'traffic_limit')::bigint, 0),
+        coalesce(item->>'traffic_limit_type', 'max'),
+        coalesce((item->>'sort_order')::integer, 0),
+        coalesce(nullif(item->>'created_at', '')::timestamptz, now()),
+        coalesce(nullif(item->>'updated_at', '')::timestamptz, now())
+      )
+      on conflict (uuid) do update set
+        token = excluded.token,
+        token_hash = excluded.token_hash,
+        token_last_used_at = excluded.token_last_used_at,
+        token_last_used_ip = excluded.token_last_used_ip,
+        token_rotated_at = excluded.token_rotated_at,
+        name = excluded.name,
+        cpu_name = excluded.cpu_name,
+        virtualization = excluded.virtualization,
+        arch = excluded.arch,
+        cpu_cores = excluded.cpu_cores,
+        os = excluded.os,
+        kernel_version = excluded.kernel_version,
+        gpu_name = excluded.gpu_name,
+        ipv4 = excluded.ipv4,
+        ipv6 = excluded.ipv6,
+        region = excluded.region,
+        remark = excluded.remark,
+        public_remark = excluded.public_remark,
+        mem_total = excluded.mem_total,
+        swap_total = excluded.swap_total,
+        disk_total = excluded.disk_total,
+        version = excluded.version,
+        price = excluded.price,
+        billing_cycle = excluded.billing_cycle,
+        auto_renewal = excluded.auto_renewal,
+        currency = excluded.currency,
+        expired_at = excluded.expired_at,
+        "group" = excluded."group",
+        tags = excluded.tags,
+        hidden = excluded.hidden,
+        traffic_limit = excluded.traffic_limit,
+        traffic_limit_type = excluded.traffic_limit_type,
+        sort_order = excluded.sort_order,
+        updated_at = now();
+    end loop;
+  end if;
+
+  if input_backup ? 'ping_tasks' and jsonb_typeof(input_backup->'ping_tasks') = 'array' then
+    select coalesce(array_agg(id), array[]::bigint[]) into task_ids
+    from (
+      select (value->>'id')::bigint as id
+      from jsonb_array_elements(input_backup->'ping_tasks')
+      where coalesce(value->>'id', '') ~ '^[0-9]+$'
+        and (value->>'id')::bigint > 0
+    ) rows;
+
+    if coalesce(array_length(task_ids, 1), 0) > 0 then
+      delete from ping_tasks where not (id = any(task_ids));
+    else
+      delete from ping_tasks;
+    end if;
+
+    for item in select value from jsonb_array_elements(input_backup->'ping_tasks')
+    loop
+      if coalesce(item->>'id', '') ~ '^[0-9]+$' and (item->>'id')::bigint > 0 then
+        insert into ping_tasks (id, name, clients, all_clients, type, target, interval_sec, sort_order)
+        values (
+          (item->>'id')::bigint,
+          coalesce(item->>'name', ''),
+          case when jsonb_typeof(item->'clients') = 'array' then item->'clients' else '[]'::jsonb end,
+          case when coalesce((item->>'all_clients')::boolean, false) then 1 else 0 end,
+          coalesce(item->>'type', 'icmp'),
+          coalesce(item->>'target', ''),
+          coalesce((item->>'interval_sec')::integer, 120),
+          coalesce((item->>'sort_order')::integer, (item->>'id')::integer)
+        )
+        on conflict (id) do update set
+          name = excluded.name,
+          clients = excluded.clients,
+          all_clients = excluded.all_clients,
+          type = excluded.type,
+          target = excluded.target,
+          interval_sec = excluded.interval_sec,
+          sort_order = excluded.sort_order;
+      else
+        insert into ping_tasks (name, clients, all_clients, type, target, interval_sec, sort_order)
+        values (
+          coalesce(item->>'name', ''),
+          case when jsonb_typeof(item->'clients') = 'array' then item->'clients' else '[]'::jsonb end,
+          case when coalesce((item->>'all_clients')::boolean, false) then 1 else 0 end,
+          coalesce(item->>'type', 'icmp'),
+          coalesce(item->>'target', ''),
+          coalesce((item->>'interval_sec')::integer, 120),
+          coalesce((item->>'sort_order')::integer, 0)
+        );
+      end if;
+    end loop;
+
+    perform setval(pg_get_serial_sequence('ping_tasks', 'id'), coalesce((select max(id) from ping_tasks), 0) + 1, false);
+  end if;
+
+  if input_backup ? 'offline_notifications' and jsonb_typeof(input_backup->'offline_notifications') = 'array' then
+    delete from offline_notifications;
+    insert into offline_notifications (client, enable, grace_period, last_notified)
+    select
+      value->>'client',
+      case when coalesce((value->>'enable')::boolean, false) then 1 else 0 end,
+      coalesce((value->>'grace_period')::integer, 180),
+      nullif(value->>'last_notified', '')::timestamptz
+    from jsonb_array_elements(input_backup->'offline_notifications')
+    where nullif(value->>'client', '') is not null;
+  end if;
+
+  if input_backup ? 'expiry_notifications' and jsonb_typeof(input_backup->'expiry_notifications') = 'array' then
+    delete from expiry_notifications;
+    insert into expiry_notifications (client, enable, advance_days, last_notified)
+    select
+      value->>'client',
+      case when coalesce((value->>'enable')::boolean, false) then 1 else 0 end,
+      coalesce((value->>'advance_days')::integer, 7),
+      nullif(value->>'last_notified', '')::timestamptz
+    from jsonb_array_elements(input_backup->'expiry_notifications')
+    where nullif(value->>'client', '') is not null;
+  end if;
+
+  if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then
+    delete from load_notifications;
+    for item in select value from jsonb_array_elements(input_backup->'load_notifications')
+    loop
+      if coalesce(item->>'id', '') ~ '^[0-9]+$' and (item->>'id')::bigint > 0 then
+        insert into load_notifications (id, name, clients, metric, threshold, ratio, interval_min, last_notified)
+        values (
+          (item->>'id')::bigint,
+          coalesce(item->>'name', ''),
+          case when jsonb_typeof(item->'clients') = 'array' then item->'clients' else '[]'::jsonb end,
+          coalesce(item->>'metric', 'cpu'),
+          coalesce((item->>'threshold')::double precision, 80),
+          coalesce((item->>'ratio')::double precision, 0.8),
+          coalesce((item->>'interval_min')::integer, 15),
+          nullif(item->>'last_notified', '')::timestamptz
+        );
+      else
+        insert into load_notifications (name, clients, metric, threshold, ratio, interval_min, last_notified)
+        values (
+          coalesce(item->>'name', ''),
+          case when jsonb_typeof(item->'clients') = 'array' then item->'clients' else '[]'::jsonb end,
+          coalesce(item->>'metric', 'cpu'),
+          coalesce((item->>'threshold')::double precision, 80),
+          coalesce((item->>'ratio')::double precision, 0.8),
+          coalesce((item->>'interval_min')::integer, 15),
+          nullif(item->>'last_notified', '')::timestamptz
+        );
+      end if;
+    end loop;
+
+    perform setval(pg_get_serial_sequence('load_notifications', 'id'), coalesce((select max(id) from load_notifications), 0) + 1, false);
+  end if;
+end;
+$$;
+
+create or replace function public.cfm_insert_audit_log(
+  input_user text,
+  input_action text,
+  input_detail text,
+  input_level text default 'info'
+)
+returns void
+language sql
+set search_path = public
+as $$
+  insert into audit_logs ("user", action, detail, level)
+  values (
+    coalesce(input_user, ''),
+    coalesce(input_action, ''),
+    coalesce(input_detail, ''),
+    coalesce(nullif(input_level, ''), 'info')
+  );
+$$;
+
+revoke all on function public.cfm_create_user(text, text, text) from public;
+revoke all on function public.cfm_create_user(text, text, text) from anon;
+revoke all on function public.cfm_create_user(text, text, text) from authenticated;
+grant execute on function public.cfm_create_user(text, text, text) to service_role;
+
+revoke all on function public.cfm_delete_user_if_matches(text, text, text) from public;
+revoke all on function public.cfm_delete_user_if_matches(text, text, text) from anon;
+revoke all on function public.cfm_delete_user_if_matches(text, text, text) from authenticated;
+grant execute on function public.cfm_delete_user_if_matches(text, text, text) to service_role;
+
+revoke all on function public.cfm_login_rate_limit(text) from public;
+revoke all on function public.cfm_login_rate_limit(text) from anon;
+revoke all on function public.cfm_login_rate_limit(text) from authenticated;
+grant execute on function public.cfm_login_rate_limit(text) to service_role;
+
+revoke all on function public.cfm_login_rate_limits(jsonb) from public;
+revoke all on function public.cfm_login_rate_limits(jsonb) from anon;
+revoke all on function public.cfm_login_rate_limits(jsonb) from authenticated;
+grant execute on function public.cfm_login_rate_limits(jsonb) to service_role;
+
+revoke all on function public.cfm_set_login_rate_limit(jsonb) from public;
+revoke all on function public.cfm_set_login_rate_limit(jsonb) from anon;
+revoke all on function public.cfm_set_login_rate_limit(jsonb) from authenticated;
+grant execute on function public.cfm_set_login_rate_limit(jsonb) to service_role;
+
+revoke all on function public.cfm_set_login_rate_limits(jsonb) from public;
+revoke all on function public.cfm_set_login_rate_limits(jsonb) from anon;
+revoke all on function public.cfm_set_login_rate_limits(jsonb) from authenticated;
+grant execute on function public.cfm_set_login_rate_limits(jsonb) to service_role;
+
+revoke all on function public.cfm_clear_login_rate_limits(jsonb) from public;
+revoke all on function public.cfm_clear_login_rate_limits(jsonb) from anon;
+revoke all on function public.cfm_clear_login_rate_limits(jsonb) from authenticated;
+grant execute on function public.cfm_clear_login_rate_limits(jsonb) to service_role;
+
+revoke all on function public.cfm_delete_login_rate_limits_before(text) from public;
+revoke all on function public.cfm_delete_login_rate_limits_before(text) from anon;
+revoke all on function public.cfm_delete_login_rate_limits_before(text) from authenticated;
+grant execute on function public.cfm_delete_login_rate_limits_before(text) to service_role;
+
+revoke all on function public.cfm_clear_all_records() from public;
+revoke all on function public.cfm_clear_all_records() from anon;
+revoke all on function public.cfm_clear_all_records() from authenticated;
+grant execute on function public.cfm_clear_all_records() to service_role;
+
+revoke all on function public.cfm_clear_client_records(text) from public;
+revoke all on function public.cfm_clear_client_records(text) from anon;
+revoke all on function public.cfm_clear_client_records(text) from authenticated;
+grant execute on function public.cfm_clear_client_records(text) to service_role;
+
+revoke all on function public.cfm_restore_backup_data(jsonb) from public;
+revoke all on function public.cfm_restore_backup_data(jsonb) from anon;
+revoke all on function public.cfm_restore_backup_data(jsonb) from authenticated;
+grant execute on function public.cfm_restore_backup_data(jsonb) to service_role;
+
+revoke all on function public.cfm_insert_audit_log(text, text, text, text) from public;
+revoke all on function public.cfm_insert_audit_log(text, text, text, text) from anon;
+revoke all on function public.cfm_insert_audit_log(text, text, text, text) from authenticated;
+grant execute on function public.cfm_insert_audit_log(text, text, text, text) to service_role;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260625061202_rotate_admin_sessions.sql
+create or replace function public.cfm_rotate_user_session(input_uuid text)
+returns jsonb
+language sql
+set search_path = public
+as $$
+  update users
+  set session_version = session_version + 1,
+      updated_at = now()
+  where uuid = input_uuid
+  returning to_jsonb(users);
+$$;
+
+create or replace function public.cfm_update_user_username_rotate_session(input_uuid text, input_username text)
+returns jsonb
+language sql
+set search_path = public
+as $$
+  update users
+  set username = input_username,
+      session_version = session_version + 1,
+      updated_at = now()
+  where uuid = input_uuid
+  returning to_jsonb(users);
+$$;
+
+revoke all on function public.cfm_rotate_user_session(text) from public;
+revoke all on function public.cfm_rotate_user_session(text) from anon;
+revoke all on function public.cfm_rotate_user_session(text) from authenticated;
+grant execute on function public.cfm_rotate_user_session(text) to service_role;
+
+revoke all on function public.cfm_update_user_username_rotate_session(text, text) from public;
+revoke all on function public.cfm_update_user_username_rotate_session(text, text) from anon;
+revoke all on function public.cfm_update_user_username_rotate_session(text, text) from authenticated;
+grant execute on function public.cfm_update_user_username_rotate_session(text, text) to service_role;
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260701010000_agent_website_primary_fallback.sql
+set local search_path = public;
+
+alter table website_monitors alter column agent_probe_mode set default 'country_auto';
+alter table website_monitors alter column agent_probe_status_enabled set default true;
+
+update website_monitors
+set agent_probe_mode = 'country_auto',
+    agent_probe_status_enabled = true,
+    updated_at = now()
+where enabled = true
+  and agent_probe_mode = 'off'
+  and agent_probe_status_enabled = false;
+
+create or replace function public.cfm_due_website_monitors(input_now text, input_limit integer default 50)
+returns jsonb
+language plpgsql
+stable
+set search_path = public
+as $$
+begin
+  return (
+  select coalesce(jsonb_agg(to_jsonb(row_data)), '[]'::jsonb)
+  from (
+    select wm.*
+    from website_monitors wm
+    where wm.enabled = true
+      and (
+        wm.last_checked_at is null
+        or wm.last_checked_at <= input_now::timestamptz - (greatest(wm.interval_sec - 30, 1) * interval '1 second')
+      )
+      and (
+        wm.agent_probe_mode = 'off'
+        or (
+          wm.agent_probe_status_enabled = true
+          and not exists (
+            select 1
+            from website_checks recent_agent_success
+            where recent_agent_success.monitor_id = wm.id
+              and recent_agent_success.source_type = 'agent'
+              and recent_agent_success.effective_status = 'up'
+              and recent_agent_success.checked_at >= input_now::timestamptz - (greatest(wm.interval_sec + 30, wm.grace_period_sec, 180) * interval '1 second')
+          )
+        )
+      )
+    order by coalesce(wm.last_checked_at, '1970-01-01'::timestamptz) asc, wm.sort_order asc, wm.id asc
+    limit least(greatest(coalesce(input_limit, 50), 1), 200)
+  ) row_data
+  );
+end;
+$$;
+
+create or replace function public.cfm_record_website_check(input_check jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  monitor_row website_monitors%rowtype;
+  check_ok boolean;
+  checked_time timestamptz;
+  source_kind text;
+  source_client_id text;
+begin
+  if input_check is null or jsonb_typeof(input_check) <> 'object' then
+    return null;
+  end if;
+
+  check_ok := coalesce((input_check->>'ok')::boolean, false);
+  checked_time := (input_check->>'checked_at')::timestamptz;
+  source_kind := coalesce(nullif(input_check->>'source_type', ''), 'worker');
+  if source_kind not in ('worker', 'agent') then
+    source_kind := 'worker';
+  end if;
+  source_client_id := nullif(input_check->>'source_client', '');
+
+  select * into monitor_row
+  from website_monitors
+  where id = (input_check->>'monitor_id')::integer
+  limit 1;
+  if not found then
+    return null;
+  end if;
+
+  insert into website_checks (
+    monitor_id, checked_at, ok, effective_status, effective_reason,
+    status_code, raw_status_code, latency_ms, error, source_type, source_client
+  )
+  values (
+    (input_check->>'monitor_id')::integer,
+    checked_time,
+    check_ok,
+    case when input_check->>'effective_status' = 'up' then 'up' else 'down' end,
+    input_check->>'effective_reason',
+    nullif(input_check->>'status_code', '')::integer,
+    nullif(input_check->>'raw_status_code', '')::integer,
+    nullif(input_check->>'latency_ms', '')::integer,
+    input_check->>'error',
+    source_kind,
+    source_client_id
+  );
+
+  if source_kind = 'agent' and monitor_row.agent_probe_status_enabled = true and check_ok = false then
+    return to_jsonb(monitor_row);
+  end if;
+
+  if check_ok then
+    update website_monitors
+    set status = 'up',
+        last_checked_at = checked_time,
+        last_success_at = checked_time,
+        last_status_code = nullif(input_check->>'status_code', '')::integer,
+        last_raw_status_code = nullif(input_check->>'raw_status_code', '')::integer,
+        last_latency_ms = nullif(input_check->>'latency_ms', '')::integer,
+        last_effective_reason = input_check->>'effective_reason',
+        last_error = null,
+        down_since = null,
+        updated_at = now()
+    where id = (input_check->>'monitor_id')::integer
+    returning * into monitor_row;
+  else
+    update website_monitors
+    set status = 'down',
+        last_checked_at = checked_time,
+        last_failure_at = checked_time,
+        last_status_code = nullif(input_check->>'status_code', '')::integer,
+        last_raw_status_code = nullif(input_check->>'raw_status_code', '')::integer,
+        last_latency_ms = nullif(input_check->>'latency_ms', '')::integer,
+        last_effective_reason = input_check->>'effective_reason',
+        last_error = input_check->>'error',
+        down_since = coalesce(down_since, checked_time),
+        last_notified_at = case when status = 'down' then last_notified_at else null end,
+        updated_at = now()
+    where id = (input_check->>'monitor_id')::integer
+    returning * into monitor_row;
+  end if;
+
+  if not found then
+    return null;
+  end if;
+  return to_jsonb(monitor_row);
+end;
+$$;
+
+revoke all on function public.cfm_due_website_monitors(text, integer) from public;
+revoke all on function public.cfm_due_website_monitors(text, integer) from anon;
+revoke all on function public.cfm_due_website_monitors(text, integer) from authenticated;
+grant execute on function public.cfm_due_website_monitors(text, integer) to service_role;
+
+revoke all on function public.cfm_record_website_check(jsonb) from public;
+revoke all on function public.cfm_record_website_check(jsonb) from anon;
+revoke all on function public.cfm_record_website_check(jsonb) from authenticated;
+grant execute on function public.cfm_record_website_check(jsonb) to service_role;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-07-01-agent-website-primary-fallback')
+on conflict (key) do update set value = excluded.value;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260701020000_agent_website_public_results.sql
+set local search_path = public;
+
+alter table website_monitors add column if not exists agent_probe_mode text not null default 'country_auto';
+alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
+alter table website_monitors add column if not exists agent_probe_limit integer not null default 3;
+alter table website_monitors add column if not exists agent_probe_status_enabled boolean not null default true;
+
+update website_monitors
+set agent_probe_mode = case when agent_probe_mode in ('off', 'selected', 'country_auto') then agent_probe_mode else 'country_auto' end,
+    agent_probe_clients = case when jsonb_typeof(agent_probe_clients) = 'array' then agent_probe_clients else '[]'::jsonb end,
+    agent_probe_limit = least(greatest(coalesce(agent_probe_limit, 3), 1), 10),
+    agent_probe_status_enabled = coalesce(agent_probe_status_enabled, true);
+
+alter table website_monitors alter column agent_probe_mode set default 'country_auto';
+alter table website_monitors alter column agent_probe_clients set default '[]'::jsonb;
+alter table website_monitors alter column agent_probe_limit set default 3;
+alter table website_monitors alter column agent_probe_status_enabled set default true;
+alter table website_monitors alter column agent_probe_mode set not null;
+alter table website_monitors alter column agent_probe_clients set not null;
+alter table website_monitors alter column agent_probe_limit set not null;
+alter table website_monitors alter column agent_probe_status_enabled set not null;
+
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_mode_check;
+alter table website_monitors add constraint website_monitors_agent_probe_mode_check check (agent_probe_mode in ('off', 'selected', 'country_auto'));
+alter table website_monitors drop constraint if exists website_monitors_agent_probe_limit_check;
+alter table website_monitors add constraint website_monitors_agent_probe_limit_check check (agent_probe_limit between 1 and 10);
+
+alter table website_checks add column if not exists source_type text not null default 'worker';
+alter table website_checks add column if not exists source_client text;
+update website_checks set source_type = 'worker' where source_type is null or source_type not in ('worker', 'agent');
+alter table website_checks alter column source_type set default 'worker';
+alter table website_checks alter column source_type set not null;
+alter table website_checks drop constraint if exists website_checks_source_type_check;
+alter table website_checks add constraint website_checks_source_type_check check (source_type in ('worker', 'agent'));
+alter table website_checks drop constraint if exists website_checks_source_client_fkey;
+alter table website_checks add constraint website_checks_source_client_fkey foreign key (source_client) references clients(uuid) on delete set null;
+create index if not exists idx_website_checks_monitor_source_time on website_checks(monitor_id, source_type, source_client, checked_at desc);
+
+create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with args as (
+    select
+      least(greatest(coalesce(period_hours, 24), 1), 72) as safe_hours,
+      least(greatest(coalesce(check_limit, 120), 1), 120) as safe_limit
+  ),
+  monitor_rows as (
+    select
+      id, name, url, interval_sec, status, last_checked_at,
+      last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
+    from website_monitors
+    where hidden = false
+    order by sort_order asc, id asc
+  ),
+  check_rows as (
+    select *
+    from (
+      select
+        wc.monitor_id, wc.checked_at, wc.ok, wc.effective_status, wc.effective_reason,
+        wc.status_code, wc.raw_status_code, wc.latency_ms, wc.source_type, wc.source_client,
+        row_number() over (
+          partition by wc.monitor_id,
+          floor(extract(epoch from (now() - wc.checked_at)) / greatest(60, floor((a.safe_hours * 60 * 60) / a.safe_limit)))
+          order by wc.checked_at desc, wc.id desc
+        ) as rn
+      from website_checks wc
+      join website_monitors wm on wm.id = wc.monitor_id
+      cross join args a
+      where wm.hidden = false
+        and wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
+        and (
+          wc.source_type = 'worker'
+          or wc.effective_status = 'up'
+          or wm.agent_probe_status_enabled = false
+        )
+    ) ranked
+    where rn = 1
+  )
+  select coalesce(jsonb_agg(
+    to_jsonb(m) || jsonb_build_object(
+      'checks',
+      coalesce((
+        select jsonb_agg(to_jsonb(c) - 'monitor_id' - 'rn' order by c.checked_at desc)
+        from check_rows c
+        where c.monitor_id = m.id
+      ), '[]'::jsonb)
+    )
+  ), '[]'::jsonb)
+  from monitor_rows m;
+$$;
+
+create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120)
+returns jsonb
+language plpgsql
+stable
+set search_path = public
+as $$
+begin
+  return (
+  with
+    args as (
+      select least(greatest(coalesce(input_check_limit, 120), 1), 500) as safe_limit
+    ),
+    monitor_row as (
+      select
+        id, name, url, interval_sec, status, last_checked_at,
+        last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
+      from website_monitors
+      where id = input_id
+        and hidden = false
+      limit 1
+    ),
+    check_rows as (
+      select wc.checked_at, wc.ok, wc.effective_status, wc.effective_reason,
+        wc.status_code, wc.raw_status_code, wc.latency_ms, wc.source_type, wc.source_client
+      from website_checks wc
+      join website_monitors wm on wm.id = wc.monitor_id
+      cross join args
+      where wc.monitor_id = input_id
+        and (
+          wc.source_type = 'worker'
+          or wc.effective_status = 'up'
+          or wm.agent_probe_status_enabled = false
+        )
+      order by wc.checked_at desc, wc.id desc
+      limit args.safe_limit
+    )
+  select to_jsonb(m) || jsonb_build_object(
+    'checks',
+    coalesce((select jsonb_agg(to_jsonb(c) order by c.checked_at desc) from check_rows c), '[]'::jsonb)
+  )
+  from monitor_row m
+  );
+end;
+$$;
+
+create or replace function public.cfm_record_website_check(input_check jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  monitor_row website_monitors%rowtype;
+  check_ok boolean;
+  checked_time timestamptz;
+  source_kind text;
+  source_client_id text;
+begin
+  if input_check is null or jsonb_typeof(input_check) <> 'object' then
+    return null;
+  end if;
+
+  check_ok := coalesce((input_check->>'ok')::boolean, false);
+  checked_time := coalesce((input_check->>'checked_at')::timestamptz, now());
+  source_kind := coalesce(nullif(input_check->>'source_type', ''), 'worker');
+  if source_kind not in ('worker', 'agent') then
+    source_kind := 'worker';
+  end if;
+  source_client_id := nullif(input_check->>'source_client', '');
+
+  select * into monitor_row
+  from website_monitors
+  where id = (input_check->>'monitor_id')::integer
+  limit 1;
+  if not found then
+    return null;
+  end if;
+
+  insert into website_checks (
+    monitor_id, checked_at, ok, effective_status, effective_reason,
+    status_code, raw_status_code, latency_ms, error, source_type, source_client
+  )
+  values (
+    (input_check->>'monitor_id')::integer,
+    checked_time,
+    check_ok,
+    case when input_check->>'effective_status' = 'up' then 'up' else 'down' end,
+    input_check->>'effective_reason',
+    nullif(input_check->>'status_code', '')::integer,
+    nullif(input_check->>'raw_status_code', '')::integer,
+    nullif(input_check->>'latency_ms', '')::integer,
+    input_check->>'error',
+    source_kind,
+    source_client_id
+  );
+
+  if source_kind = 'agent' and monitor_row.agent_probe_status_enabled = true and check_ok = false then
+    if exists (
+      select 1
+      from website_checks recent_agent_success
+      where recent_agent_success.monitor_id = monitor_row.id
+        and recent_agent_success.source_type = 'agent'
+        and recent_agent_success.effective_status = 'up'
+        and recent_agent_success.checked_at >= checked_time - (greatest(monitor_row.interval_sec + 30, monitor_row.grace_period_sec, 180) * interval '1 second')
+      limit 1
+    ) then
+      return null;
+    end if;
+    return to_jsonb(monitor_row);
+  end if;
+
+  if check_ok then
+    update website_monitors
+    set status = 'up',
+        last_checked_at = checked_time,
+        last_success_at = checked_time,
+        last_status_code = nullif(input_check->>'status_code', '')::integer,
+        last_raw_status_code = nullif(input_check->>'raw_status_code', '')::integer,
+        last_latency_ms = nullif(input_check->>'latency_ms', '')::integer,
+        last_effective_reason = input_check->>'effective_reason',
+        last_error = null,
+        down_since = null,
+        updated_at = now()
+    where id = (input_check->>'monitor_id')::integer
+    returning * into monitor_row;
+  else
+    update website_monitors
+    set status = 'down',
+        last_checked_at = checked_time,
+        last_failure_at = checked_time,
+        last_status_code = nullif(input_check->>'status_code', '')::integer,
+        last_raw_status_code = nullif(input_check->>'raw_status_code', '')::integer,
+        last_latency_ms = nullif(input_check->>'latency_ms', '')::integer,
+        last_effective_reason = input_check->>'effective_reason',
+        last_error = input_check->>'error',
+        down_since = coalesce(down_since, checked_time),
+        last_notified_at = case when status = 'down' then last_notified_at else null end,
+        updated_at = now()
+    where id = (input_check->>'monitor_id')::integer
+    returning * into monitor_row;
+  end if;
+
+  if not found then
+    return null;
+  end if;
+  return to_jsonb(monitor_row);
+end;
+$$;
+
+create or replace function public.cfm_create_website_monitor(input_monitor jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  created_row website_monitors%rowtype;
+begin
+  insert into website_monitors (
+    name, url, method, expected_status_min, expected_status_max,
+    interval_sec, timeout_sec, grace_period_sec, enabled, hidden,
+    agent_probe_mode, agent_probe_clients, agent_probe_limit, agent_probe_status_enabled,
+    sort_order
+  ) values (
+    coalesce(input_monitor->>'name', ''),
+    coalesce(input_monitor->>'url', ''),
+    coalesce(input_monitor->>'method', 'GET'),
+    coalesce((input_monitor->>'expected_status_min')::integer, 200),
+    coalesce((input_monitor->>'expected_status_max')::integer, 399),
+    coalesce((input_monitor->>'interval_sec')::integer, 120),
+    coalesce((input_monitor->>'timeout_sec')::integer, 10),
+    coalesce((input_monitor->>'grace_period_sec')::integer, 180),
+    coalesce((input_monitor->>'enabled')::boolean, true),
+    coalesce((input_monitor->>'hidden')::boolean, false),
+    case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else 'country_auto' end,
+    case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else '[]'::jsonb end,
+    least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, 3), 1), 10),
+    coalesce((input_monitor->>'agent_probe_status_enabled')::boolean, true),
+    (select coalesce(max(sort_order), 0) + 1 from website_monitors)
+  )
+  returning * into created_row;
+
+  return to_jsonb(created_row);
+end;
+$$;
+
+create or replace function public.cfm_update_website_monitor(input_id integer, input_monitor jsonb)
+returns jsonb
+language sql
+set search_path = public
+as $$
+  update website_monitors
+  set
+    name = coalesce(input_monitor->>'name', name),
+    url = coalesce(input_monitor->>'url', url),
+    method = coalesce(input_monitor->>'method', method),
+    expected_status_min = coalesce((input_monitor->>'expected_status_min')::integer, expected_status_min),
+    expected_status_max = coalesce((input_monitor->>'expected_status_max')::integer, expected_status_max),
+    interval_sec = coalesce((input_monitor->>'interval_sec')::integer, interval_sec),
+    timeout_sec = coalesce((input_monitor->>'timeout_sec')::integer, timeout_sec),
+    grace_period_sec = coalesce((input_monitor->>'grace_period_sec')::integer, grace_period_sec),
+    enabled = case when input_monitor ? 'enabled' then coalesce((input_monitor->>'enabled')::boolean, enabled) else enabled end,
+    hidden = case when input_monitor ? 'hidden' then coalesce((input_monitor->>'hidden')::boolean, hidden) else hidden end,
+    agent_probe_mode = case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else agent_probe_mode end,
+    agent_probe_clients = case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else agent_probe_clients end,
+    agent_probe_limit = case when input_monitor ? 'agent_probe_limit' then least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, agent_probe_limit), 1), 10) else agent_probe_limit end,
+    agent_probe_status_enabled = case when input_monitor ? 'agent_probe_status_enabled' then coalesce((input_monitor->>'agent_probe_status_enabled')::boolean, agent_probe_status_enabled) else agent_probe_status_enabled end,
+    updated_at = now()
+  where id = input_id
+  returning to_jsonb(website_monitors.*);
+$$;
+
+revoke all on function public.cfm_public_websites(integer, integer) from public;
+revoke all on function public.cfm_public_websites(integer, integer) from anon;
+revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
+grant execute on function public.cfm_public_websites(integer, integer) to service_role;
+
+revoke all on function public.cfm_public_website_monitor(integer, integer) from public;
+revoke all on function public.cfm_public_website_monitor(integer, integer) from anon;
+revoke all on function public.cfm_public_website_monitor(integer, integer) from authenticated;
+grant execute on function public.cfm_public_website_monitor(integer, integer) to service_role;
+
+revoke all on function public.cfm_record_website_check(jsonb) from public;
+revoke all on function public.cfm_record_website_check(jsonb) from anon;
+revoke all on function public.cfm_record_website_check(jsonb) from authenticated;
+grant execute on function public.cfm_record_website_check(jsonb) to service_role;
+
+revoke all on function public.cfm_create_website_monitor(jsonb) from public;
+revoke all on function public.cfm_create_website_monitor(jsonb) from anon;
+revoke all on function public.cfm_create_website_monitor(jsonb) from authenticated;
+grant execute on function public.cfm_create_website_monitor(jsonb) to service_role;
+
+revoke all on function public.cfm_update_website_monitor(integer, jsonb) from public;
+revoke all on function public.cfm_update_website_monitor(integer, jsonb) from anon;
+revoke all on function public.cfm_update_website_monitor(integer, jsonb) from authenticated;
+grant execute on function public.cfm_update_website_monitor(integer, jsonb) to service_role;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-07-01-agent-website-public-results')
+on conflict (key) do update set value = excluded.value;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260701174548_fix_website_reorder_order.sql
+create or replace function public.cfm_reorder_website_monitors(input_ids jsonb)
+returns integer
+language plpgsql
+set search_path = public
+as $$
+declare
+  input_count integer;
+  existing_count integer;
+  updated_count integer;
+begin
+  with input_order as (
+    select value::integer as id, min(ord)::integer as ord
+    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
+    where value ~ '^[0-9]+$' and value::integer > 0
+    group by value::integer
+  )
+  select count(*) into input_count from input_order;
+  if input_count = 0 then
+    return 0;
+  end if;
+
+  with input_order as (
+    select value::integer as id, min(ord)::integer as ord
+    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
+    where value ~ '^[0-9]+$' and value::integer > 0
+    group by value::integer
+  )
+  select count(*) into existing_count
+  from website_monitors w
+  join input_order i on i.id = w.id;
+  if existing_count <> input_count then
+    raise exception 'Website monitor id does not exist';
+  end if;
+
+  with input_order as (
+    select value::integer as id, min(ord)::integer as ord
+    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
+    where value ~ '^[0-9]+$' and value::integer > 0
+    group by value::integer
+  ),
+  final_order as (
+    select id, (row_number() over (order by i.ord asc))::integer as sort_order
+    from input_order i
+    union all
+    select w.id, (input_count + (row_number() over (order by w.sort_order asc, w.id asc))::integer)::integer
+    from website_monitors w
+    where not exists (select 1 from input_order i where i.id = w.id)
+  ),
+  updated as (
+    update website_monitors w
+    set sort_order = f.sort_order,
+        updated_at = now()
+    from final_order f
+    where w.id = f.id
+      and w.sort_order is distinct from f.sort_order
+    returning w.id
+  )
+  select count(*) into updated_count from updated;
+
+  return updated_count;
+end;
+$$;
+
+revoke all on function public.cfm_reorder_website_monitors(jsonb) from public;
+revoke all on function public.cfm_reorder_website_monitors(jsonb) from anon;
+revoke all on function public.cfm_reorder_website_monitors(jsonb) from authenticated;
+grant execute on function public.cfm_reorder_website_monitors(jsonb) to service_role;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260702010000_public_website_order.sql
+set local search_path = public;
+
+create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with args as (
+    select
+      least(greatest(coalesce(period_hours, 24), 1), 72) as safe_hours,
+      least(greatest(coalesce(check_limit, 120), 1), 120) as safe_limit
+  ),
+  monitor_rows as (
+    select
+      id, name, url, interval_sec, status, last_checked_at,
+      last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason,
+      sort_order
+    from website_monitors
+    where hidden = false
+    order by sort_order asc, id asc
+  ),
+  check_rows as (
+    select *
+    from (
+      select
+        wc.monitor_id, wc.checked_at, wc.ok, wc.effective_status, wc.effective_reason,
+        wc.status_code, wc.raw_status_code, wc.latency_ms, wc.source_type, wc.source_client,
+        row_number() over (
+          partition by wc.monitor_id,
+          floor(extract(epoch from (now() - wc.checked_at)) / greatest(60, floor((a.safe_hours * 60 * 60) / a.safe_limit)))
+          order by wc.checked_at desc, wc.id desc
+        ) as rn
+      from website_checks wc
+      join website_monitors wm on wm.id = wc.monitor_id
+      cross join args a
+      where wm.hidden = false
+        and wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
+        and (
+          wc.source_type = 'worker'
+          or wc.effective_status = 'up'
+          or wm.agent_probe_status_enabled = false
+        )
+    ) ranked
+    where rn = 1
+  )
+  select coalesce(jsonb_agg(
+    (to_jsonb(m) - 'sort_order') || jsonb_build_object(
+      'checks',
+      coalesce((
+        select jsonb_agg(to_jsonb(c) - 'monitor_id' - 'rn' order by c.checked_at desc)
+        from check_rows c
+        where c.monitor_id = m.id
+      ), '[]'::jsonb)
+    )
+    order by m.sort_order asc, m.id asc
+  ), '[]'::jsonb)
+  from monitor_rows m;
+$$;
+
+revoke all on function public.cfm_public_websites(integer, integer) from public;
+revoke all on function public.cfm_public_websites(integer, integer) from anon;
+revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
+grant execute on function public.cfm_public_websites(integer, integer) to service_role;
+
+insert into settings (key, value)
+values ('schema_bootstrap_version', 'postgres-2026-07-02-public-website-order')
+on conflict (key) do update set value = excluded.value;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260703020000_admin_recovery.sql
+set local search_path = public;
+
+create or replace function public.cfm_recover_single_admin(input_uuid text, input_username text, input_passwd text)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  user_count integer;
+  target_uuid text;
+  recovered users%rowtype;
+begin
+  if nullif(trim(coalesce(input_uuid, '')), '') is null
+    or nullif(trim(coalesce(input_username, '')), '') is null
+    or coalesce(input_passwd, '') = ''
+  then
+    raise exception 'user uuid, username, and password hash are required';
+  end if;
+
+  select count(*)::integer into user_count from users;
+
+  if user_count = 0 then
+    insert into users (uuid, username, passwd, password_changed_at)
+    values (input_uuid, input_username, input_passwd, now())
+    returning * into recovered;
+  elsif user_count = 1 then
+    select uuid into target_uuid from users limit 1;
+    update users
+    set username = input_username,
+        passwd = input_passwd,
+        session_version = session_version + 1,
+        password_changed_at = now(),
+        updated_at = now()
+    where uuid = target_uuid
+    returning * into recovered;
+  else
+    raise exception 'admin recovery supports exactly one admin user';
+  end if;
+
+  return to_jsonb(recovered);
+end;
+$$;
+
+revoke all on function public.cfm_recover_single_admin(text, text, text) from public;
+revoke all on function public.cfm_recover_single_admin(text, text, text) from anon;
+revoke all on function public.cfm_recover_single_admin(text, text, text) from authenticated;
+grant execute on function public.cfm_recover_single_admin(text, text, text) to service_role;
+
+notify pgrst, 'reload schema';

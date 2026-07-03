@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-const migration = readFileSync('supabase/migrations/20260701010000_agent_website_primary_fallback.sql', 'utf8');
+const migration = readFileSync('supabase/migrations/20260622000000_rpc_api.sql', 'utf8');
 const websiteAdmin = readFileSync('frontend/src/pages/admin/Websites.tsx', 'utf8');
 
 const checks = [

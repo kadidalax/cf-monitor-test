@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 
 const checks = [
-  ['supabase/migrations/20260615000000_init_cf_monitor_schema.sql', 'agent_probe_mode'],
-  ['supabase/migrations/20260615000000_init_cf_monitor_schema.sql', 'source_client'],
+  ['supabase/migrations/20260615000000_core_schema.sql', 'agent_probe_mode'],
+  ['supabase/migrations/20260615000000_core_schema.sql', 'source_client'],
   ['worker/src/routes/client.ts', 'website_probe_tasks'],
   ['worker/src/do/live-data.ts', 'website_probe_results'],
   ['worker/src/do/live-data.ts', "source_type: 'agent'"],
