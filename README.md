@@ -90,6 +90,16 @@ CF VPS Monitor 是一个基于 Cloudflare Workers、Durable Objects、Workers St
 | `ADMIN_USERNAME` | Secret | 初始后台用户名 |
 | `ADMIN_PASSWORD` | Secret | 初始后台密码 |
 
+如果你不是点击上面的 **Deploy to Cloudflare** 按钮，而是在 Cloudflare Worker 页面里选择 **Dashboard 连接 GitHub 仓库部署**，Cloudflare 可能不会在选择仓库时自动弹出这些运行时变量输入框。请在第一次部署前或部署失败后，进入该 Worker 的 **Settings -> Variables & Secrets** 手动添加：
+
+- Variable: `SUPABASE_URL`
+- Secret: `SUPABASE_SERVICE_ROLE_KEY`
+- Secret: `JWT_SECRET`
+- Secret: `ADMIN_USERNAME`
+- Secret: `ADMIN_PASSWORD`
+
+注意不要把 Secret 填到 Build variables。Cloudflare 文档说明 Build variables 只在构建命令中可用，不会作为 Worker 运行时变量传给项目。
+
 ### 5. 一键初始化数据库
 
 1. 打开 [Supabase Access Tokens](https://supabase.com/dashboard/account/tokens)。

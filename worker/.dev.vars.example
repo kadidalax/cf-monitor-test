@@ -1,4 +1,8 @@
+# Cloudflare 部署按钮 / Wrangler 本地开发模板。
+# SUPABASE_URL 是普通 Worker Variable；放在这里是为了让部署按钮提示填写。
 SUPABASE_URL=https://PROJECT_REF.supabase.co
+
+# 以下值必须保存为 Worker Secret，不要保存为普通变量。
 SUPABASE_SERVICE_ROLE_KEY=replace-with-service-role-key
 JWT_SECRET=replace-with-a-long-random-local-dev-secret-at-least-32-bytes
 ADMIN_USERNAME=admin
