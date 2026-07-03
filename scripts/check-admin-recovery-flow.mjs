@@ -46,8 +46,8 @@ const requiredNeedles = [
   ['frontend/src/pages/Login.tsx', files.loginPage, '创建管理员'],
   ['frontend/src/pages/Login.tsx', files.loginPage, '忘记密码'],
   ['frontend/src/pages/Login.tsx', files.loginPage, 'service_role'],
-  ['README.md', files.readme, '首次访问登录页创建管理员'],
-  ['README.md', files.readme, '忘记密码'],
+  ['README.md', files.readme, '首次部署后访问 `/admin/login`'],
+  ['README.md', files.readme, '忘记账号或密码'],
 ];
 
 for (const [name, text, needle] of requiredNeedles) {

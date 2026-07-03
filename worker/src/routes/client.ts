@@ -16,7 +16,6 @@ import { normalizeRecipients, sendSmtpEmail, type SmtpConfig } from '../utils/em
 import { buildIpChangeNotification } from '../utils/notification-templates';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
-import { getAgentTokenMaxAgeMs, isAgentTokenExpired } from '../utils/agent-token-policy';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
 import { invalidatePublicMetadataCache } from './public';
@@ -292,24 +291,15 @@ export async function getAgentClientByToken(
   onAuthSource?: (source: AgentAuthLookupSource) => void,
 ): Promise<db.Client | null> {
   const now = Date.now();
-  const tokenMaxAgeMs = getAgentTokenMaxAgeMs(env);
   const cacheKey = await agentTokenLookupHash(token);
   const cached = agentAuthCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
-    if (cached.value && isAgentTokenExpired(cached.value, tokenMaxAgeMs, now)) {
-      agentAuthCache.delete(cacheKey);
-      return null;
-    }
     onAuthSource?.('memory');
     return cached.value;
   }
 
   const liveAuthClient = await readLiveAgentAuthClient(env, cacheKey);
   if (liveAuthClient) {
-    if (isAgentTokenExpired(liveAuthClient, tokenMaxAgeMs, now)) {
-      setAgentAuthCache(agentAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
-      return null;
-    }
     const cachedClient = stripCachedAgentToken(liveAuthClient);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('do');
@@ -326,10 +316,6 @@ export async function getAgentClientByToken(
 
   const client = await db.getClientByToken(database, token, true);
   if (client) {
-    if (isAgentTokenExpired(client, tokenMaxAgeMs, now)) {
-      setAgentAuthCache(agentAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
-      return null;
-    }
     const pendingInstallToken = isPendingInstallTokenMatch(client, token);
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
@@ -360,24 +346,15 @@ export async function getAgentClientIdentityByToken(
   onAuthSource?: (source: AgentAuthLookupSource) => void,
 ): Promise<db.ClientIdentity | null> {
   const now = Date.now();
-  const tokenMaxAgeMs = getAgentTokenMaxAgeMs(env);
   const cacheKey = await agentTokenLookupHash(token);
   const cached = agentIdentityAuthCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
-    if (cached.value && isAgentTokenExpired(cached.value, tokenMaxAgeMs, now)) {
-      agentIdentityAuthCache.delete(cacheKey);
-      return null;
-    }
     onAuthSource?.('memory');
     return cached.value;
   }
 
   const liveAuthClient = await readLiveAgentAuthClient(env, cacheKey);
   if (liveAuthClient) {
-    if (isAgentTokenExpired(liveAuthClient, tokenMaxAgeMs, now)) {
-      setAgentAuthCache(agentIdentityAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
-      return null;
-    }
     const cachedClient = stripCachedAgentToken(liveAuthClient);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('do');
@@ -394,10 +371,6 @@ export async function getAgentClientIdentityByToken(
 
   const client = await db.getClientIdentityByToken(database, token, true);
   if (client) {
-    if (isAgentTokenExpired(client, tokenMaxAgeMs, now)) {
-      setAgentAuthCache(agentIdentityAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
-      return null;
-    }
     const pendingInstallToken = isPendingInstallTokenMatch(client, token);
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);

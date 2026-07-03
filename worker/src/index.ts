@@ -52,8 +52,6 @@ type RuntimeBindings = {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
-  SETUP_DIAGNOSTICS_TOKEN?: string;
-  AGENT_TOKEN_MAX_AGE_DAYS?: string;
   DEMO_RESET_ENABLED?: string;
 };
 

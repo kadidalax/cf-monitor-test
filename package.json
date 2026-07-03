@@ -2,6 +2,7 @@
   "name": "cf-vps-monitor-monorepo",
   "private": true,
   "version": "2.0.0",
+  "license": "MIT",
   "type": "module",
   "workspaces": [
     "frontend",
@@ -21,10 +22,10 @@
   "cloudflare": {
     "bindings": {
       "SUPABASE_URL": {
-        "description": "Supabase 项目的 Project URL，例如 `https://PROJECT_REF.supabase.co`。在 Supabase **Project Settings** -> **API** 里复制。"
+        "description": "Supabase 项目的 Project URL，例如 `https://PROJECT_REF.supabase.co`。在 Supabase Project Settings -> API 里复制。"
       },
       "SUPABASE_SERVICE_ROLE_KEY": {
-        "description": "Supabase 的 secret/service_role key。必须作为 Worker Secret 保存，不要填 anon key，也不要暴露到前端。"
+        "description": "Supabase 的 secret/service_role key，不要填 anon key。"
       },
       "JWT_SECRET": {
         "description": "后台登录会话签名密钥。建议使用至少 32 个字符的随机字符串。"

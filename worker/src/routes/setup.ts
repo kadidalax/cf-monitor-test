@@ -9,7 +9,6 @@ import {
 import * as db from '../db/queries';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
-import { validateSetupDiagnosticsToken } from '../utils/setup-diagnostics-token';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
 import { buildBackupSnapshot } from '../utils/backup-snapshot';
@@ -50,28 +49,8 @@ function envFlag(value: string | undefined): boolean | null {
   return null;
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
-  const aBytes = new TextEncoder().encode(a);
-  const bBytes = new TextEncoder().encode(b);
-  const maxLength = Math.max(aBytes.length, bBytes.length);
-  let diff = aBytes.length ^ bBytes.length;
-  for (let i = 0; i < maxLength; i += 1) {
-    diff |= (aBytes[i] || 0) ^ (bBytes[i] || 0);
-  }
-  return diff === 0;
-}
-
-function hasSetupDiagnosticsToken(c: SetupContext): boolean {
-  const expected = c.env.SETUP_DIAGNOSTICS_TOKEN?.trim();
-  if (!expected) return false;
-  if (validateSetupDiagnosticsToken(expected)) return false;
-  const provided = c.req.header('X-Setup-Diagnostics-Token') || '';
-  return Boolean(provided) && constantTimeEqual(provided, expected);
-}
-
-function shouldReturnFullDiagnostics(c: SetupContext, adminStatus: 'present' | 'absent' | 'unknown'): boolean {
-  if (hasSetupDiagnosticsToken(c)) return true;
-  const flag = envFlag(c.env.SETUP_DIAGNOSTICS_ENABLED);
+function shouldReturnFullDiagnostics(env: Bindings, adminStatus: 'present' | 'absent' | 'unknown'): boolean {
+  const flag = envFlag(env.SETUP_DIAGNOSTICS_ENABLED);
   if (flag === false) return false;
   return flag === true && adminStatus !== 'present';
 }
@@ -179,10 +158,6 @@ function secretsCheck(env: Bindings): SetupCheck {
   const missing: string[] = [];
   if (new TextEncoder().encode(env.JWT_SECRET?.trim() || '').byteLength < 32) {
     missing.push('JWT_SECRET must be at least 32 bytes');
-  }
-  const setupDiagnosticsTokenError = validateSetupDiagnosticsToken(env.SETUP_DIAGNOSTICS_TOKEN);
-  if (setupDiagnosticsTokenError) {
-    missing.push(setupDiagnosticsTokenError);
   }
   return missing.length > 0
     ? setupCheck('secrets', 'error', missing.join('; '))
@@ -416,7 +391,7 @@ setupRoutes.get('/status', async (c) => {
   }
 
   const adminStatus = database ? await adminAccountStatus(database) : 'unknown';
-  const fullDiagnostics = shouldReturnFullDiagnostics(c, adminStatus);
+  const fullDiagnostics = shouldReturnFullDiagnostics(c.env, adminStatus);
   if (database && !fullDiagnostics) {
     if (adminStatus === 'present') {
       return limitedSetupResponse(c, true, true, provider);

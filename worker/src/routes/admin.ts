@@ -28,8 +28,6 @@ import { generateAgentToken, validateClientCreateInput, validateClientUpdateInpu
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
 import { TELEGRAM_MESSAGE_MAX_CHARS, formatTelegramHtmlText, sendTelegramMessage } from '../utils/telegram';
 import { EMAIL_MESSAGE_MAX_CHARS, normalizeRecipients, sendSmtpEmail, type SmtpConfig } from '../utils/email';
-import { getAgentTokenMaxAgeMs, isAgentTokenExpired, isAgentTokenMaxAgeConfigInvalid } from '../utils/agent-token-policy';
-import { validateSetupDiagnosticsToken } from '../utils/setup-diagnostics-token';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
@@ -709,15 +707,12 @@ function parseTimeMs(value: string | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: string, env: Bindings): Promise<HealthEvent> {
+async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: string): Promise<HealthEvent> {
   const now = Date.parse(checkedAt);
-  const tokenMaxAgeMs = getAgentTokenMaxAgeMs(env);
-  const invalidMaxAgeConfig = isAgentTokenMaxAgeConfigInvalid(env);
   const clients = await db.listClients(database);
   let oldRotations = 0;
   let neverUsed = 0;
   let staleUse = 0;
-  let expired = 0;
   let missingSourceIp = 0;
   const sourceIpClientCounts = new Map<string, number>();
 
@@ -736,9 +731,6 @@ async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: strin
     if (lastUsedAt > 0 && now - lastUsedAt > AGENT_TOKEN_STALE_USE_WARNING_MS) {
       staleUse += 1;
     }
-    if (isAgentTokenExpired(client, tokenMaxAgeMs, now)) {
-      expired += 1;
-    }
     if (lastUsedAt > 0) {
       if (!sourceIp) {
         missingSourceIp += 1;
@@ -756,11 +748,11 @@ async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: strin
     sharedSourceIpClients += count;
   }
 
-  if (oldRotations || neverUsed || staleUse || expired || missingSourceIp || sharedSourceIpGroups || invalidMaxAgeConfig) {
+  if (oldRotations || neverUsed || staleUse || missingSourceIp || sharedSourceIpGroups) {
     return healthEvent(
       'agent_token_hygiene_probe',
       'warning',
-      `Agent token hygiene warnings: old_rotations=${oldRotations}, never_used=${neverUsed}, stale_use=${staleUse}, expired=${expired}, missing_source_ip=${missingSourceIp}, shared_source_ip_groups=${sharedSourceIpGroups}, shared_source_ip_clients=${sharedSourceIpClients}, invalid_max_age_config=${invalidMaxAgeConfig}`,
+      `Agent token hygiene warnings: old_rotations=${oldRotations}, never_used=${neverUsed}, stale_use=${staleUse}, missing_source_ip=${missingSourceIp}, shared_source_ip_groups=${sharedSourceIpGroups}, shared_source_ip_clients=${sharedSourceIpClients}`,
       checkedAt,
     );
   }
@@ -840,10 +832,6 @@ function runSecretProbe(env: Bindings, checkedAt: string): HealthEvent {
   if (new TextEncoder().encode(env.JWT_SECRET?.trim() || '').length < MIN_JWT_SECRET_BYTES) {
     missing.push('JWT_SECRET must be at least 32 bytes');
   }
-  const setupDiagnosticsTokenError = validateSetupDiagnosticsToken(env.SETUP_DIAGNOSTICS_TOKEN);
-  if (setupDiagnosticsTokenError) {
-    missing.push(setupDiagnosticsTokenError);
-  }
   if (missing.length > 0) {
     return healthEvent('secret_probe', 'error', missing.join('; '), checkedAt);
   }
@@ -863,7 +851,7 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
 
   if (databaseProbe.status !== 'error') {
     components.database_role_probe = healthEvent('database_role_probe', 'disabled', 'Direct database role probe is not used in Supabase HTTP API mode', checkedAt);
-    components.agent_token_hygiene_probe = await runAgentTokenHygieneProbe(database, checkedAt, c.env);
+    components.agent_token_hygiene_probe = await runAgentTokenHygieneProbe(database, checkedAt);
     components.schema_probe = healthEvent('schema_probe', 'disabled', 'Schema probe is handled by Supabase migrations, not Worker runtime bootstrap', checkedAt);
   }
 
