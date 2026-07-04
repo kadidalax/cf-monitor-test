@@ -64,10 +64,11 @@ Cloudflare deploy 后请在 `Settings -> Variables & Secrets` 确认三项运行
 
 适合本地开发或维护者。
 
-```bash
+```powershell
 npm ci
 npm run build
 npx wrangler login
+$env:SUPABASE_URL="https://xxxx.supabase.co"
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put JWT_SECRET
 npm run deploy
