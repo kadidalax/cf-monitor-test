@@ -86,6 +86,13 @@ function LegacySettingsNotificationRedirect() {
   return <Navigate to={`/admin/notifications/${targetTab}`} replace />;
 }
 
+function LegacyAdminNotificationRedirect() {
+  const { tab } = useParams<{ tab?: string }>();
+  const allowedTabs = new Set(['settings', 'offline', 'expiry', 'load']);
+  const targetTab = tab && allowedTabs.has(tab) ? tab : 'settings';
+  return <Navigate to={`/admin/notifications/${targetTab}`} replace />;
+}
+
 export default function App() {
   React.useEffect(() => {
     let preloaded = false;
@@ -139,8 +146,8 @@ export default function App() {
                   <Route path="ping" element={<AdminPingTasks />} />
                   <Route path="notifications" element={<AdminNotifications />} />
                   <Route path="notifications/:tab" element={<AdminNotifications />} />
-                  <Route path="notification" element={<AdminNotifications />} />
-                  <Route path="notification/:tab" element={<AdminNotifications />} />
+                  <Route path="notification" element={<Navigate to="/admin/notifications/settings" replace />} />
+                  <Route path="notification/:tab" element={<LegacyAdminNotificationRedirect />} />
                   <Route path="themes" element={<AdminThemes />} />
                   <Route path="logs" element={<AdminLogs />} />
                   <Route path="account" element={<AdminAccount />} />

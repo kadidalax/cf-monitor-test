@@ -2683,14 +2683,21 @@ func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
 }
 
 func logReport(prefix string, report Report) {
-	log.Printf("%s: CPU %.1f%%, RAM %.1fGB/%dGB, Net in=%dB/s out=%dB/s",
+	log.Printf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
 		prefix,
 		report.CPU,
-		float64(report.RAM)/1024/1024/1024,
-		report.RAMTotal/1024/1024/1024,
+		formatMemoryBytes(report.RAM),
+		formatMemoryBytes(report.RAMTotal),
 		report.NetIn,
 		report.NetOut,
 	)
+}
+
+func formatMemoryBytes(value int64) string {
+	if value < 1024*1024*1024 {
+		return fmt.Sprintf("%dMiB", value/1024/1024)
+	}
+	return fmt.Sprintf("%.1fGiB", float64(value)/1024/1024/1024)
 }
 
 func postJSON(endpoint string, data interface{}, bearerToken string) error {

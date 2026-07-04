@@ -12,7 +12,7 @@
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
-    "test": "node scripts/check-login-theme-shell.mjs && node scripts/check-admin-recovery-flow.mjs && node scripts/check-cloudflare-deploy-onboarding.mjs && node scripts/check-supabase-grouped-migrations.mjs && node scripts/check-live-viewer-ttl.mjs && node scripts/check-mini-ping-toggle.mjs && node scripts/check-instance-chart-range.mjs && node scripts/check-website-monitor-period-loading.mjs && node scripts/check-ping-chart-failed-series.mjs && node scripts/check-theme-active-default.mjs && node scripts/check-demo-reset-safeupdate.mjs && node scripts/check-backup-restore-safeupdate.mjs && node scripts/check-region-count-country.mjs && node scripts/check-agent-ws-query-token.mjs && node scripts/check-agent-install-token-persistence.mjs && node scripts/check-agent-website-probes.mjs && node scripts/check-agent-website-primary-fallback.mjs && node scripts/check-agent-website-public-results.mjs && node scripts/check-public-website-order.mjs && node scripts/check-admin-client-reorder-snapshot.mjs && node scripts/check-admin-website-reorder-order.mjs && node scripts/check-admin-websites-mobile-cards.mjs && cd agent && go test ./...",
+    "test": "node scripts/check-login-theme-shell.mjs && node scripts/check-admin-recovery-flow.mjs && node scripts/check-cloudflare-deploy-onboarding.mjs && node scripts/check-supabase-grouped-migrations.mjs && node scripts/check-setup-migration-checksum.mjs && node scripts/check-release-version-build.mjs && node scripts/check-site-backup-visible.mjs && node scripts/check-notification-canonical-routes.mjs && node scripts/check-agent-website-probe-rpc-shape.mjs && node scripts/check-live-viewer-ttl.mjs && node scripts/check-mini-ping-toggle.mjs && node scripts/check-instance-chart-range.mjs && node scripts/check-website-monitor-period-loading.mjs && node scripts/check-ping-chart-failed-series.mjs && node scripts/check-theme-active-default.mjs && node scripts/check-backup-restore-safeupdate.mjs && node scripts/check-region-count-country.mjs && node scripts/check-agent-ws-query-token.mjs && node scripts/check-agent-install-token-persistence.mjs && node scripts/check-agent-website-probes.mjs && node scripts/check-agent-website-primary-fallback.mjs && node scripts/check-agent-website-public-results.mjs && node scripts/check-public-website-order.mjs && node scripts/check-admin-client-reorder-snapshot.mjs && node scripts/check-admin-website-reorder-order.mjs && node scripts/check-admin-websites-mobile-cards.mjs && cd agent && go test ./...",
     "verify": "npm run lint && npm run build && npm test",
     "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json",
     "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
@@ -29,9 +29,6 @@
       },
       "JWT_SECRET": {
         "description": "后台登录会话签名密钥。建议使用至少 32 个字符的随机字符串。"
-      },
-      "DEMO_RESET_ENABLED": {
-        "description": "可选。只有公开演示站需要设为 `true`，用于每 30 分钟恢复已保存的演示快照。"
       }
     }
   }

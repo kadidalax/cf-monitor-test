@@ -318,6 +318,15 @@ SReclaimable:     100000 kB
 	}
 }
 
+func TestFormatMemoryBytesKeepsSubGiBReadable(t *testing.T) {
+	if got := formatMemoryBytes(512000000); got != "488MiB" {
+		t.Fatalf("formatMemoryBytes(512000000) = %q, want 488MiB", got)
+	}
+	if got := formatMemoryBytes(2 * 1024 * 1024 * 1024); got != "2.0GiB" {
+		t.Fatalf("formatMemoryBytes(2GiB) = %q, want 2.0GiB", got)
+	}
+}
+
 func TestKomariDiskPartitionsKeepRootAndDropVirtualMounts(t *testing.T) {
 	parts := []disk.PartitionStat{
 		{Device: "/dev/loop0", Mountpoint: "/", Fstype: "ext4"},

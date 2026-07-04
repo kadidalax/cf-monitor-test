@@ -207,7 +207,7 @@ export default function SettingsSite() {
         />
       </SettingCard>
 
-      <SettingCard title="备份与恢复" description="导出或导入系统配置" defaultOpen={false}>
+      <SettingCard title="备份与恢复" description="导出或导入系统配置" defaultOpen>
         <Flex direction="column" gap="3">
           <Box style={{ border: '1px solid var(--amber-6)', background: 'var(--amber-2)', borderRadius: 8, padding: 12 }}>
             <Text size="2" weight="bold" color="amber">备份包含完整敏感配置，但文件会加密</Text>

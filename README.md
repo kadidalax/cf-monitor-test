@@ -1,4 +1,4 @@
-# CF VPS Monitor
+﻿# CF VPS Monitor
 
 CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承载前端、API、实时连接和定时任务，使用 Durable Objects 协调实时状态，使用 Supabase Postgres 保存配置和历史数据，使用 Go Agent 在服务器上采集指标。
 
@@ -27,23 +27,24 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 运行时配置
 
-部署后在 Worker 的 **Settings -> Variables & Secrets** 中添加：
 
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
 | `SUPABASE_URL` | Variable | Supabase Project URL，例如 `https://xxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | Supabase `service_role` 或 Secret key，不能使用 anon key |
-| `JWT_SECRET` | Secret | 后台会话签名密钥，至少 32 字节，建议使用随机字符串 |
+| `JWT_SECRET` | Secret | 后台会话签名密钥，建议使用随机字符串 |
 
 ## 面板部署
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor-test)
 
+Cloudflare deploy 后请在 `Settings -> Variables & Secrets` 确认三项运行时配置已存在。
+
 适合不使用命令行的用户。
 
-1. 在 Supabase 创建或选择项目。
+1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview**页面 复制 `Project URL`, 打开**Project Settings -> API Keys**页面，复制`service_role` key (Secret keys)。
-3. 点击 **Deploy to Cloudflare**。
+3. 点击 上面的**Deploy to Cloudflare**。
 4. 登录 Cloudflare, 选择账号、仓库名和 Worker 名称。
 5. 填入对应变量的值 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`。
 6. 点击部署。
@@ -131,3 +132,14 @@ cd agent && go test ./...
 - [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
 - [Supabase Management API](https://supabase.com/docs/reference/api/introduction)
 - [Supabase Data API Security](https://supabase.com/docs/guides/api/securing-your-api)
+
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=kadidalax%2Fcf-vps-monitor&type=timeline&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=timeline&legend=top-left" />
+ </picture>
+</a>

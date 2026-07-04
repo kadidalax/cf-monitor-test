@@ -1568,7 +1568,11 @@ as $$
       least(greatest(coalesce(input_limit, 20), 1), 50) as safe_limit
   ),
   selected as (
-    select wm.*
+    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
+      timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
+      agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
+      last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
+      last_effective_reason, last_error, down_since, last_notified_at, created_at, updated_at
     from website_monitors wm, args a
     where wm.enabled = true
       and wm.agent_probe_mode = 'selected'
@@ -1580,7 +1584,11 @@ as $$
   ),
   country_candidates as (
     select
-      wm.*,
+      wm.id, wm.name, wm.url, wm.method, wm.expected_status_min, wm.expected_status_max, wm.interval_sec,
+      wm.timeout_sec, wm.grace_period_sec, wm.enabled, wm.hidden, wm.agent_probe_mode, wm.agent_probe_clients,
+      wm.agent_probe_limit, wm.agent_probe_status_enabled, wm.sort_order, wm.status, wm.last_checked_at,
+      wm.last_success_at, wm.last_failure_at, wm.last_status_code, wm.last_raw_status_code, wm.last_latency_ms,
+      wm.last_effective_reason, wm.last_error, wm.down_since, wm.last_notified_at, wm.created_at, wm.updated_at,
       c.uuid,
       row_number() over (
         partition by wm.id, coalesce(nullif(c.region, ''), c.uuid)
@@ -1596,7 +1604,11 @@ as $$
       and wm.agent_probe_mode = 'country_auto'
   ),
   country_selected as (
-    select *
+    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
+      timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
+      agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
+      last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
+      last_effective_reason, last_error, down_since, last_notified_at, created_at, updated_at
     from country_candidates, args a
     where uuid = a.client_id
       and country_rank = 1
@@ -1605,12 +1617,7 @@ as $$
   all_rows as (
     select * from selected
     union
-    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
-      timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
-      agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
-      last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
-      last_effective_reason, last_error, down_since, last_notified_at, created_at, updated_at
-    from country_selected
+    select * from country_selected
   )
   select coalesce(jsonb_agg(to_jsonb(row_data) order by sort_order asc, id asc), '[]'::jsonb)
   from (
@@ -3674,7 +3681,7 @@ begin
     if coalesce(array_length(task_ids, 1), 0) > 0 then
       delete from ping_tasks where not (id = any(task_ids));
     else
-      delete from ping_tasks;
+      delete from ping_tasks where true;
     end if;
 
     for item in select value from jsonb_array_elements(input_backup->'ping_tasks')
@@ -3717,7 +3724,7 @@ begin
   end if;
 
   if input_backup ? 'offline_notifications' and jsonb_typeof(input_backup->'offline_notifications') = 'array' then
-    delete from offline_notifications;
+    delete from offline_notifications where true;
     insert into offline_notifications (client, enable, grace_period, last_notified)
     select
       value->>'client',
@@ -3729,7 +3736,7 @@ begin
   end if;
 
   if input_backup ? 'expiry_notifications' and jsonb_typeof(input_backup->'expiry_notifications') = 'array' then
-    delete from expiry_notifications;
+    delete from expiry_notifications where true;
     insert into expiry_notifications (client, enable, advance_days, last_notified)
     select
       value->>'client',
@@ -3741,7 +3748,7 @@ begin
   end if;
 
   if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then
-    delete from load_notifications;
+    delete from load_notifications where true;
     for item in select value from jsonb_array_elements(input_backup->'load_notifications')
     loop
       if coalesce(item->>'id', '') ~ '^[0-9]+$' and (item->>'id')::bigint > 0 then

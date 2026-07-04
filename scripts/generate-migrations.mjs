@@ -10,6 +10,7 @@ const outputFile = join(root, 'worker', 'src', 'generated', 'supabase-migrations
 function normalizeSql(sql) {
   return sql
     .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n')
     .replace(/^\s*begin\s*;\s*/i, '')
     .replace(/\s*commit\s*;\s*$/i, '')
     .trim();

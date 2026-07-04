@@ -26,7 +26,6 @@ import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability'
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
-import { runDemoResetIfDue } from './utils/demo-reset';
 import {
   checkWebsiteMonitorHttp,
   shouldNotifyWebsiteDown,
@@ -52,7 +51,6 @@ type RuntimeBindings = {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
-  DEMO_RESET_ENABLED?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.
@@ -70,7 +68,6 @@ export type Variables = {
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const BUNDLED_VERSION = workerPackage.version?.trim() || 'dev';
-const BUILD_MARK = 'dev-agent-ws-query-token-20260701';
 const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
 const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
@@ -357,7 +354,7 @@ app.get('/api/version', (c) => {
     version: appVersion,
     name: 'CF VPS Monitor',
     hash: appVersion.replace(/^v/i, '') || 'dev',
-    build: BUILD_MARK,
+    build: `release-${appVersion}`,
   });
 });
 
@@ -891,9 +888,6 @@ async function runScheduledStep(
 async function runScheduled(env: Bindings): Promise<void> {
   const now = new Date();
   const context = createScheduledRunContext(env);
-  await runScheduledStep(context, 'cron_demo_reset', 'cron_demo_reset_error', 'demo reset', async () => {
-    await runDemoResetIfDue(context.database, env, now.getTime());
-  });
   await runScheduledStep(context, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now));
   await runScheduledStep(context, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now));
   await runScheduledStep(context, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now));
