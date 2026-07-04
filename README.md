@@ -1,4 +1,4 @@
-﻿# CF VPS Monitor
+# CF VPS Monitor
 
 CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承载前端、API、实时连接和定时任务，使用 Durable Objects 协调实时状态，使用 Supabase Postgres 保存配置和历史数据，使用 Go Agent 在服务器上采集指标。
 
@@ -7,13 +7,21 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 - **服务器监控**：在线状态、CPU、GPU、内存、Swap、磁盘、负载、温度、网络速率、月度流量、系统信息、IPv4/IPv6、进程数、TCP/UDP 连接数。
 - **实时看板**：首页、节点详情页和后台首页通过 WebSocket 获取实时数据。
-- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报。
 - **Ping 监控**：支持 ICMP、TCP、HTTP Ping 任务，可分配到全部节点或指定节点，并展示延迟历史。
 - **网站监控**：支持 HTTP/HTTPS GET、HTTP/HTTPS HEAD 和 TCP 检测，支持期望状态码、超时、间隔、启停、隐藏、排序、手动检测和 Agent 节点侧探测。
 - **后台管理**：节点增删改、批量隐藏/删除、拖拽排序、记录清理、Agent Token 轮换、安装命令生成、系统设置、审计日志、健康检查、容量估算、备份恢复、账号改名和改密。
 - **通知**：支持 Telegram 和 SMTP Email，可配置离线、到期、负载以及网站监控相关通知。
 - **主题**：内置 `monitor` 和 `next` 主题，支持主题包、自定义 CSS、图片和字体资源。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用 Supabase `service_role` key 重置唯一管理员。
+- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报，足可监控50台服务器。
+
+## 预览图
+
+<img width="1696" height="965" alt="image" src="https://github.com/user-attachments/assets/fbd8bab6-258a-44e0-96c3-106fd7b26fae" />
+<img width="1695" height="954" alt="image" src="https://github.com/user-attachments/assets/1afbd54b-1320-4635-be4f-1cf291748abd" />
+<img width="1698" height="955" alt="image" src="https://github.com/user-attachments/assets/b9e6be02-bc41-49d5-a7d6-f57a2b9c8b32" />
+
+
 
 ## 架构
 
@@ -23,7 +31,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
 | `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Linux/Windows 安装脚本 |
 | `supabase/migrations/` | Supabase 表、索引、RLS、RPC、授权和默认数据 |
-| `scripts/` | 部署、迁移清单生成和回归检查脚本 |
+| `scripts/` | 部署和迁移清单生成脚本 |
 
 ## 运行时配置
 
