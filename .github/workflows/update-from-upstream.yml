@@ -1,0 +1,33 @@
+name: Update from upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to update
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch }}
+
+      - name: Sync from official main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/kadidalax/cf-vps-monitor.git || true
+          git fetch upstream main
+          git checkout "${{ inputs.branch }}"
+          git reset --hard upstream/main
+          git push --force origin "${{ inputs.branch }}"

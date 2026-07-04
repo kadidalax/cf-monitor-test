@@ -32,6 +32,12 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
+import { APP_VERSION } from '../utils/app-version';
+import {
+  compareVersions,
+  workflowUrlFromRepositoryUrl,
+  type UpdateCheckResult,
+} from '../utils/update-check';
 import { deleteAdminSessionEdgeCache, invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
 import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
@@ -63,6 +69,9 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
+const OFFICIAL_REPOSITORY = 'kadidalax/cf-vps-monitor';
+const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
+let updateCheckCache: { expiresAt: number; value: UpdateCheckResult } | null = null;
 const LIVE_POLICY_SETTING_KEYS = new Set([
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
@@ -1225,6 +1234,65 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   await db.insertAuditLog(database, username, 'maintenance_cleanup', `手动维护清理完成: ${JSON.stringify(result)}`);
   return result;
 }
+
+type GitHubLatestRelease = {
+  tag_name?: unknown;
+  html_url?: unknown;
+  name?: unknown;
+  body?: unknown;
+  published_at?: unknown;
+};
+
+function releaseString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+async function fetchLatestRelease(): Promise<GitHubLatestRelease> {
+  const response = await fetch(`https://api.github.com/repos/${OFFICIAL_REPOSITORY}/releases/latest`, {
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'cf-vps-monitor-update-check',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub latest release returned ${response.status}`);
+  }
+  return await response.json();
+}
+
+// ============ 系统更新 ============
+
+adminRoutes.get('/update-check', async (c) => {
+  const now = Date.now();
+  if (updateCheckCache && updateCheckCache.expiresAt > now) {
+    return c.json(updateCheckCache.value);
+  }
+
+  try {
+    const release = await fetchLatestRelease();
+    const latestVersion = releaseString(release.tag_name) || 'dev';
+    const currentVersion = APP_VERSION;
+    const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
+    const result: UpdateCheckResult = {
+      current_version: currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`,
+      latest_version: latestVersion.startsWith('v') ? latestVersion : `v${latestVersion}`,
+      has_update: compareVersions(latestVersion, currentVersion) > 0,
+      release_url: releaseString(release.html_url),
+      actions_url: actionsUrl,
+      workflow_configured: Boolean(actionsUrl),
+      title: releaseString(release.name) || latestVersion,
+      body: releaseString(release.body),
+      published_at: releaseString(release.published_at),
+    };
+    updateCheckCache = { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result };
+    return c.json(result);
+  } catch (error) {
+    return c.json({
+      error: 'Update check failed',
+      detail: errorDetail(error),
+    }, 502);
+  }
+});
 
 // ============ 客户端管理 ============
 

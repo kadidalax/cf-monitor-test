@@ -41,6 +41,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `SUPABASE_URL` | Variable | Supabase Project URL，例如 `https://xxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | Supabase `service_role` 或 Secret key，不能使用 anon key |
 | `JWT_SECRET` | Secret | 后台会话签名密钥，建议使用随机字符串 |
+| `GITHUB_REPOSITORY_URL` | Variable | 可选。你的部署仓库地址，例如 `https://github.com/用户名/仓库名`，用于后台生成升级跳转链接 |
 
 ## 面板部署
 
@@ -73,6 +74,28 @@ npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put JWT_SECRET
 npm run deploy
 ```
+
+## 后台一键同步更新
+
+后台会检测官方 Release。检测到更新后，可从“关于 -> 系统更新”跳转到你自己仓库的 GitHub Actions 页面执行升级。
+
+用户需要做：
+
+1. 首次进入 GitHub Actions，如页面提示启用 workflow，点击启用。
+2. 打开仓库 `Settings -> Actions -> General -> Workflow permissions`，选择 `Read and write permissions`。
+3. 不需要勾选 `Allow GitHub Actions to create and approve pull requests`。
+4. 不需要创建或填写 GitHub Token。
+5. 在 Cloudflare Worker 变量中配置：
+
+   ```text
+   GITHUB_REPOSITORY_URL=https://github.com/<your-name>/<your-repo>
+   ```
+
+6. 后台检测到更新后，进入“关于 -> 系统更新”，点击“立即升级”。
+7. 在 GitHub Actions 页面点击 `Run workflow`。
+8. 等 Cloudflare Git 部署自动完成。
+
+注意：升级 workflow 会将你的仓库分支直接同步为官方 `main`，不会创建备份分支，也不会保留你对源码的二次修改。
 
 
 ## 使用流程
