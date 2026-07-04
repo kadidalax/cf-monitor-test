@@ -11,6 +11,19 @@ const migration = readdirSync('supabase/migrations')
   .join('\n')
   .replace(/\r\n/g, '\n');
 
+function lastFunctionDefinition(name, argsPattern) {
+  const pattern = new RegExp(`create or replace function public\\.${name}\\(${argsPattern}\\)[\\s\\S]*?\\$\\$;`, 'gi');
+  const matches = [...migration.matchAll(pattern)];
+  assert.ok(matches.length > 0, `${name}(${argsPattern}) must exist`);
+  return matches.at(-1)[0];
+}
+
+const createClientSql = lastFunctionDefinition('cfm_create_client', 'input_client jsonb');
+const rotateClientTokenSql = lastFunctionDefinition(
+  'cfm_rotate_client_token',
+  'input_uuid text, input_token text, input_token_hash text',
+);
+
 assert.doesNotMatch(
   adminRoutes,
   /setClientInstallToken|function getOrCreateInstallToken[\s\S]*?generateUniqueClientToken/,
@@ -30,15 +43,15 @@ assert.match(
 );
 
 assert.match(
-  migration,
+  createClientSql,
   /create or replace function public\.cfm_create_client\([\s\S]*insert into clients \(uuid, token, token_hash[\s\S]*input_client->>'token'[\s\S]*input_client->>'token_hash'/i,
-  'create client RPC must store token and token_hash from the Worker',
+  'latest create client RPC must store token and token_hash from the Worker',
 );
 
 assert.match(
-  migration,
+  rotateClientTokenSql,
   /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)[\s\S]*set token = input_token,[\s\S]*token_hash = input_token_hash/i,
-  'rotate token RPC must store token and token_hash from the Worker',
+  'latest rotate token RPC must store token and token_hash from the Worker',
 );
 
 console.log('agent install token persistence check passed');
