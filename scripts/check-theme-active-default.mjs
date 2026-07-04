@@ -13,8 +13,8 @@ assert.match(publicSettings, /active_theme:\s*'monitor'/, 'frontend public setti
 assert.match(publicSettings, /text\s*===\s*'default'\s*\?\s*'monitor'\s*:\s*text/, 'frontend public settings must normalize legacy default theme');
 
 for (const migration of [
-  'supabase/migrations/20260615000000_core_schema.sql',
-  'supabase/migrations/20260618000000_feature_schema.sql',
+  'supabase/migrations/1_core_schema.sql',
+  'supabase/migrations/3_feature_schema.sql',
 ]) {
   assert.match(read(migration), /\('active_theme',\s*'monitor'\)/, `${migration} must seed active_theme as monitor`);
 }

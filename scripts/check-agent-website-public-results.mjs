@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-const migration = readFileSync('supabase/migrations/20260622000000_rpc_api.sql', 'utf8');
+const migration = readFileSync('supabase/migrations/4_rpc_api.sql', 'utf8');
 const liveData = readFileSync('worker/src/do/live-data.ts', 'utf8');
 
 const checks = [

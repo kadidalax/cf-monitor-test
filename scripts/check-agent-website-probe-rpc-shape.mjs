@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
-const migration = readFileSync('supabase/migrations/20260622000000_rpc_api.sql', 'utf8');
+const migration = readFileSync('supabase/migrations/4_rpc_api.sql', 'utf8');
 const fn = migration.match(/create or replace function public\.cfm_agent_website_probe_tasks[\s\S]*?\n\$\$;/i)?.[0] || '';
 
 assert.ok(fn, 'cfm_agent_website_probe_tasks migration must exist');
