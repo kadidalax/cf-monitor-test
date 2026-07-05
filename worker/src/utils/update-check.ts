@@ -52,6 +52,10 @@ export function workflowUrlFromRepositoryUrl(repositoryUrl: string | undefined):
   }
 }
 
+export function branchPackageJsonUrl(repository: string, branch: string): string {
+  return `https://raw.githubusercontent.com/${repository}/${encodeURIComponent(branch)}/worker/package.json`;
+}
+
 export function normalizeGitSha(value: string | undefined): string {
   return (value || '').trim().toLowerCase();
 }

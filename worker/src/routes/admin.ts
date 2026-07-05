@@ -34,6 +34,7 @@ import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
 import { APP_VERSION } from '../utils/app-version';
 import {
+  branchPackageJsonUrl,
   compareVersions,
   normalizeGitSha,
   shortGitSha,
@@ -1293,7 +1294,7 @@ function fetchBranch(repository: string, branch: string): Promise<GitHubBranch> 
 }
 
 async function fetchBranchPackageVersion(repository: string, branch: string): Promise<string> {
-  const response = await fetch(`https://raw.githubusercontent.com/${repository}/${encodeURIComponent(branch)}/package.json`, {
+  const response = await fetch(branchPackageJsonUrl(repository, branch), {
     headers: {
       'Accept': 'application/json',
       'User-Agent': 'cf-vps-monitor-update-check',

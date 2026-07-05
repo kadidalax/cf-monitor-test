@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 const {
   compareVersions,
+  branchPackageJsonUrl,
   normalizeVersion,
   shortGitSha,
   workflowUrlFromRepositoryUrl,
@@ -15,6 +16,11 @@ assert.equal(compareVersions('v2.0.1', '2.0.1'), 0);
 assert.equal(compareVersions('2.0.0', '2.0.1'), -1);
 assert.equal(compareVersions('dev', '2.0.1'), -1);
 assert.equal(compareVersions('2.0.1', 'dev'), 1);
+
+assert.equal(
+  branchPackageJsonUrl('example/cf-vps-monitor', 'dev'),
+  'https://raw.githubusercontent.com/example/cf-vps-monitor/dev/worker/package.json',
+);
 
 assert.equal(
   workflowUrlFromRepositoryUrl('https://github.com/example/cf-vps-monitor'),
