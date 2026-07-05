@@ -42,6 +42,9 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | Supabase `service_role` 或 Secret key，不能使用 anon key |
 | `JWT_SECRET` | Secret | 后台会话签名密钥，建议使用随机字符串 |
 | `GITHUB_REPOSITORY_URL` | Variable | 可选。你的部署仓库地址，例如 `https://github.com/用户名/仓库名`，用于后台生成升级跳转链接 |
+| `UPDATE_SOURCE_REPOSITORY` | Variable | 可选。更新检测源仓库，默认 `kadidalax/cf-vps-monitor` |
+| `UPDATE_SOURCE_BRANCH` | Variable | 可选。配置后按指定分支最新提交检测更新；不配置则按 latest Release 检测 |
+| `CURRENT_GIT_COMMIT` | Variable | 可选。当前部署提交 SHA；分支检测模式用于判断是否落后 |
 
 ## 面板部署
 
@@ -96,6 +99,15 @@ npm run deploy
 8. 等 Cloudflare Git 部署自动完成。
 
 注意：升级 workflow 会将你的仓库分支直接同步为官方 `main`，不会创建备份分支，也不会保留你对源码的二次修改。
+
+开发/演示环境如果要检测测试仓库的 `dev` 分支，可配置：
+
+```text
+UPDATE_SOURCE_REPOSITORY=kadidalax/cf-monitor-test
+UPDATE_SOURCE_BRANCH=dev
+CURRENT_GIT_COMMIT=<当前部署提交 SHA>
+GITHUB_REPOSITORY_URL=https://github.com/kadidalax/cf-monitor-test
+```
 
 
 ## 使用流程

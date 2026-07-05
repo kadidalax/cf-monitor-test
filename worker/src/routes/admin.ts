@@ -35,6 +35,8 @@ import { readJsonWithLimit } from '../utils/request-body';
 import { APP_VERSION } from '../utils/app-version';
 import {
   compareVersions,
+  normalizeGitSha,
+  shortGitSha,
   workflowUrlFromRepositoryUrl,
   type UpdateCheckResult,
 } from '../utils/update-check';
@@ -69,9 +71,9 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
-const OFFICIAL_REPOSITORY = 'kadidalax/cf-vps-monitor';
+const DEFAULT_UPDATE_SOURCE_REPOSITORY = 'kadidalax/cf-vps-monitor';
 const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
-let updateCheckCache: { expiresAt: number; value: UpdateCheckResult } | null = null;
+const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
 const LIVE_POLICY_SETTING_KEYS = new Set([
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
@@ -1243,48 +1245,110 @@ type GitHubLatestRelease = {
   published_at?: unknown;
 };
 
+type GitHubBranch = {
+  name?: unknown;
+  commit?: {
+    sha?: unknown;
+    html_url?: unknown;
+    commit?: {
+      message?: unknown;
+      author?: {
+        date?: unknown;
+      };
+    };
+  };
+};
+
 function releaseString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-async function fetchLatestRelease(): Promise<GitHubLatestRelease> {
-  const response = await fetch(`https://api.github.com/repos/${OFFICIAL_REPOSITORY}/releases/latest`, {
+function updateSourceRepository(env: Bindings): string {
+  return env.UPDATE_SOURCE_REPOSITORY?.trim() || DEFAULT_UPDATE_SOURCE_REPOSITORY;
+}
+
+function updateSourceBranch(env: Bindings): string {
+  return env.UPDATE_SOURCE_BRANCH?.trim() || '';
+}
+
+async function fetchGitHubJson<T>(path: string): Promise<T> {
+  const response = await fetch(`https://api.github.com/${path}`, {
     headers: {
       'Accept': 'application/vnd.github+json',
       'User-Agent': 'cf-vps-monitor-update-check',
     },
   });
   if (!response.ok) {
-    throw new Error(`GitHub latest release returned ${response.status}`);
+    throw new Error(`GitHub API returned ${response.status}`);
   }
   return await response.json();
+}
+
+function fetchLatestRelease(repository: string): Promise<GitHubLatestRelease> {
+  return fetchGitHubJson<GitHubLatestRelease>(`repos/${repository}/releases/latest`);
+}
+
+function fetchBranch(repository: string, branch: string): Promise<GitHubBranch> {
+  return fetchGitHubJson<GitHubBranch>(`repos/${repository}/branches/${encodeURIComponent(branch)}`);
+}
+
+async function buildReleaseUpdateResult(c: AdminContext, repository: string): Promise<UpdateCheckResult> {
+  const release = await fetchLatestRelease(repository);
+  const latestVersion = releaseString(release.tag_name) || 'dev';
+  const currentVersion = APP_VERSION;
+  const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
+  return {
+    current_version: currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`,
+    latest_version: latestVersion.startsWith('v') ? latestVersion : `v${latestVersion}`,
+    has_update: compareVersions(latestVersion, currentVersion) > 0,
+    release_url: releaseString(release.html_url),
+    actions_url: actionsUrl,
+    workflow_configured: Boolean(actionsUrl),
+    title: releaseString(release.name) || latestVersion,
+    body: releaseString(release.body),
+    published_at: releaseString(release.published_at),
+  };
+}
+
+async function buildBranchUpdateResult(c: AdminContext, repository: string, branch: string): Promise<UpdateCheckResult> {
+  const branchData = await fetchBranch(repository, branch);
+  const latestSha = normalizeGitSha(releaseString(branchData.commit?.sha));
+  const currentSha = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
+  const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
+  const commitUrl = releaseString(branchData.commit?.html_url) ||
+    `https://github.com/${repository}/tree/${encodeURIComponent(branch)}`;
+  const message = releaseString(branchData.commit?.commit?.message);
+  const publishedAt = releaseString(branchData.commit?.commit?.author?.date);
+  return {
+    current_version: currentSha ? shortGitSha(currentSha) : `v${APP_VERSION}`,
+    latest_version: latestSha ? shortGitSha(latestSha) : branch,
+    has_update: Boolean(latestSha && (!currentSha || latestSha !== currentSha)),
+    release_url: commitUrl,
+    actions_url: actionsUrl,
+    workflow_configured: Boolean(actionsUrl),
+    title: `${repository}@${branch}`,
+    body: message || `远程分支 ${branch} 的最新提交。`,
+    published_at: publishedAt,
+  };
 }
 
 // ============ 系统更新 ============
 
 adminRoutes.get('/update-check', async (c) => {
   const now = Date.now();
-  if (updateCheckCache && updateCheckCache.expiresAt > now) {
-    return c.json(updateCheckCache.value);
+  const repository = updateSourceRepository(c.env);
+  const branch = updateSourceBranch(c.env);
+  const cacheKey = `${repository}:${branch || 'release'}:${normalizeGitSha(c.env.CURRENT_GIT_COMMIT)}`;
+  const cached = updateCheckCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return c.json(cached.value);
   }
 
   try {
-    const release = await fetchLatestRelease();
-    const latestVersion = releaseString(release.tag_name) || 'dev';
-    const currentVersion = APP_VERSION;
-    const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
-    const result: UpdateCheckResult = {
-      current_version: currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`,
-      latest_version: latestVersion.startsWith('v') ? latestVersion : `v${latestVersion}`,
-      has_update: compareVersions(latestVersion, currentVersion) > 0,
-      release_url: releaseString(release.html_url),
-      actions_url: actionsUrl,
-      workflow_configured: Boolean(actionsUrl),
-      title: releaseString(release.name) || latestVersion,
-      body: releaseString(release.body),
-      published_at: releaseString(release.published_at),
-    };
-    updateCheckCache = { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result };
+    const result = branch
+      ? await buildBranchUpdateResult(c, repository, branch)
+      : await buildReleaseUpdateResult(c, repository);
+    updateCheckCache.set(cacheKey, { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result });
     return c.json(result);
   } catch (error) {
     return c.json({

@@ -52,6 +52,9 @@ type RuntimeBindings = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
   GITHUB_REPOSITORY_URL?: string;
+  UPDATE_SOURCE_REPOSITORY?: string;
+  UPDATE_SOURCE_BRANCH?: string;
+  CURRENT_GIT_COMMIT?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.

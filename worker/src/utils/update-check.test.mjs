@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 const {
   compareVersions,
   normalizeVersion,
+  shortGitSha,
   workflowUrlFromRepositoryUrl,
 } = await import('./update-check.ts');
 
@@ -25,3 +26,5 @@ assert.equal(
 );
 assert.equal(workflowUrlFromRepositoryUrl('https://gitlab.com/example/cf-vps-monitor'), null);
 assert.equal(workflowUrlFromRepositoryUrl('not a url'), null);
+assert.equal(shortGitSha('77D873F2552638E38BEBF1D18BC38DB7721042F5'), '77d873f');
+assert.equal(shortGitSha(undefined), '');
