@@ -1292,6 +1292,18 @@ function fetchBranch(repository: string, branch: string): Promise<GitHubBranch> 
   return fetchGitHubJson<GitHubBranch>(`repos/${repository}/branches/${encodeURIComponent(branch)}`);
 }
 
+async function fetchBranchPackageVersion(repository: string, branch: string): Promise<string> {
+  const response = await fetch(`https://raw.githubusercontent.com/${repository}/${encodeURIComponent(branch)}/package.json`, {
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'cf-vps-monitor-update-check',
+    },
+  });
+  if (!response.ok) return '';
+  const data = await response.json() as { version?: unknown };
+  return typeof data.version === 'string' ? data.version.trim() : '';
+}
+
 async function buildReleaseUpdateResult(c: AdminContext, repository: string): Promise<UpdateCheckResult> {
   const release = await fetchLatestRelease(repository);
   const latestVersion = releaseString(release.tag_name) || 'dev';
@@ -1311,7 +1323,10 @@ async function buildReleaseUpdateResult(c: AdminContext, repository: string): Pr
 }
 
 async function buildBranchUpdateResult(c: AdminContext, repository: string, branch: string): Promise<UpdateCheckResult> {
-  const branchData = await fetchBranch(repository, branch);
+  const [branchData, latestPackageVersion] = await Promise.all([
+    fetchBranch(repository, branch),
+    fetchBranchPackageVersion(repository, branch).catch(() => ''),
+  ]);
   const latestSha = normalizeGitSha(releaseString(branchData.commit?.sha));
   const currentSha = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
   const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
@@ -1319,15 +1334,22 @@ async function buildBranchUpdateResult(c: AdminContext, repository: string, bran
     `https://github.com/${repository}/tree/${encodeURIComponent(branch)}`;
   const message = releaseString(branchData.commit?.commit?.message);
   const publishedAt = releaseString(branchData.commit?.commit?.author?.date);
+  const latestDisplayVersion = latestPackageVersion
+    ? latestPackageVersion.startsWith('v') ? latestPackageVersion : `v${latestPackageVersion}`
+    : latestSha ? shortGitSha(latestSha) : branch;
+  const currentDisplayVersion = latestPackageVersion && currentSha && latestSha === currentSha
+    ? latestDisplayVersion
+    : APP_VERSION.startsWith('v') ? APP_VERSION : `v${APP_VERSION}`;
+  const shaSummary = latestSha ? `\n\n最新提交：${shortGitSha(latestSha)}${currentSha ? `\n当前部署：${shortGitSha(currentSha)}` : ''}` : '';
   return {
-    current_version: currentSha ? shortGitSha(currentSha) : `v${APP_VERSION}`,
-    latest_version: latestSha ? shortGitSha(latestSha) : branch,
+    current_version: currentDisplayVersion,
+    latest_version: latestDisplayVersion,
     has_update: Boolean(latestSha && (!currentSha || latestSha !== currentSha)),
     release_url: commitUrl,
     actions_url: actionsUrl,
     workflow_configured: Boolean(actionsUrl),
     title: `${repository}@${branch}`,
-    body: message || `远程分支 ${branch} 的最新提交。`,
+    body: `${message || `远程分支 ${branch} 的最新提交。`}${shaSummary}`,
     published_at: publishedAt,
   };
 }
@@ -1340,7 +1362,7 @@ adminRoutes.get('/update-check', async (c) => {
   const branch = updateSourceBranch(c.env);
   const cacheKey = `${repository}:${branch || 'release'}:${normalizeGitSha(c.env.CURRENT_GIT_COMMIT)}`;
   const cached = updateCheckCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
+  if (c.req.query('refresh') !== '1' && cached && cached.expiresAt > now) {
     return c.json(cached.value);
   }
 

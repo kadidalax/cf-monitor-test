@@ -35,9 +35,9 @@ export default function AdminAbout() {
       .catch(() => {});
   }, []);
 
-  const loadUpdateInfo = () => {
+  const loadUpdateInfo = (refresh = false) => {
     setUpdateLoading(true);
-    fetch('/api/admin/update-check')
+    fetch(`/api/admin/update-check${refresh ? '?refresh=1' : ''}`)
       .then(async (r) => {
         const data = await r.json();
         if (!r.ok) throw data;
@@ -123,15 +123,10 @@ export default function AdminAbout() {
               {!updateInfo.workflow_configured && (
                 <Text size="2" color="orange">未配置 GITHUB_REPOSITORY_URL，无法生成你的仓库升级入口。</Text>
               )}
-              {updateInfo.workflow_configured && updateInfo.has_update && (
-                <Text size="2" color="orange">
-                  升级会直接同步官方 main，不创建备份分支，也不会保留源码二次修改。
-                </Text>
-              )}
             </>
           )}
           <Flex gap="2" wrap="wrap">
-            <Button variant="soft" onClick={loadUpdateInfo} disabled={updateLoading}>重新检查</Button>
+            <Button variant="soft" onClick={() => loadUpdateInfo(true)} disabled={updateLoading}>重新检查</Button>
             <Button variant="soft" disabled={!updateInfo?.release_url} onClick={() => openExternal(updateInfo?.release_url)}>查看 Release</Button>
             <Button disabled={!updateInfo?.workflow_configured || !updateInfo?.has_update} onClick={() => openExternal(updateInfo?.actions_url)}>立即升级</Button>
           </Flex>

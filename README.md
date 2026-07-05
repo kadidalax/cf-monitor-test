@@ -98,8 +98,6 @@ npm run deploy
 7. 在 GitHub Actions 页面点击 `Run workflow`。
 8. 等 Cloudflare Git 部署自动完成。
 
-注意：升级 workflow 会将你的仓库分支直接同步为官方 `main`，不会创建备份分支，也不会保留你对源码的二次修改。
-
 开发/演示环境如果要检测测试仓库的 `dev` 分支，可配置：
 
 ```text
