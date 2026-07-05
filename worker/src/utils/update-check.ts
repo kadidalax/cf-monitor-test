@@ -3,8 +3,11 @@ export type UpdateCheckResult = {
   latest_version: string;
   has_update: boolean;
   release_url: string;
+  upgrade_url: string | null;
   actions_url: string | null;
   workflow_configured: boolean;
+  update_mode: 'actions' | 'fork';
+  repository_url: string | null;
   title: string;
   body: string;
   published_at: string;
@@ -39,21 +42,35 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   return normalizedA > normalizedB ? 1 : -1;
 }
 
-export function workflowUrlFromRepositoryUrl(repositoryUrl: string | undefined): string | null {
+export function canonicalGitHubRepositoryUrl(repositoryUrl: string | undefined): string | null {
   if (!repositoryUrl) return null;
+  const raw = repositoryUrl.trim();
+  const withScheme = /^https?:\/\//i.test(raw)
+    ? raw
+    : raw.startsWith('github.com/')
+      ? `https://${raw}`
+      : /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(raw)
+        ? `https://github.com/${raw}`
+        : raw;
   try {
-    const url = new URL(repositoryUrl.trim());
-    if (url.hostname !== 'github.com') return null;
+    const url = new URL(withScheme);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null;
+    if (url.username || url.password || url.search || url.hash) return null;
     const parts = url.pathname.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '').split('/');
     if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-    return `https://github.com/${parts[0]}/${parts[1]}/actions/workflows/update-from-upstream.yml`;
+    return `https://github.com/${parts[0]}/${parts[1]}`;
   } catch {
     return null;
   }
 }
 
-export function branchPackageJsonUrl(repository: string, branch: string): string {
-  return `https://raw.githubusercontent.com/${repository}/${encodeURIComponent(branch)}/worker/package.json`;
+export function repositoryUrlFromRepositoryUrl(repositoryUrl: string | undefined): string | null {
+  return canonicalGitHubRepositoryUrl(repositoryUrl);
+}
+
+export function workflowUrlFromRepositoryUrl(repositoryUrl: string | undefined): string | null {
+  const repository = canonicalGitHubRepositoryUrl(repositoryUrl);
+  return repository ? `${repository}/actions/workflows/update-from-upstream.yml` : null;
 }
 
 export function normalizeGitSha(value: string | undefined): string {

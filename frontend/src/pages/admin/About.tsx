@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { Flex, Card, Text, Heading, Badge, Grid, Box, Separator, Button } from '@radix-ui/themes';
+import { Flex, Card, Text, Heading, Badge, Grid, Box, Separator, Button, TextField, Select } from '@radix-ui/themes';
 import { Monitor, Cloud, Database, Zap } from 'lucide-react';
 import { formatAppVersion } from '../../utils/version';
+import { useApi } from '../../contexts/AuthContext';
 
 interface VersionInfo {
   version: string;
@@ -14,8 +15,11 @@ interface UpdateCheckInfo {
   latest_version: string;
   has_update: boolean;
   release_url: string;
+  upgrade_url: string | null;
   actions_url: string | null;
   workflow_configured: boolean;
+  update_mode: 'actions' | 'fork';
+  repository_url: string | null;
   title: string;
   body: string;
   published_at: string;
@@ -23,10 +27,22 @@ interface UpdateCheckInfo {
   detail?: string;
 }
 
+interface UpdateSettings {
+  update_mode: 'actions' | 'fork';
+  update_repository_url: string;
+}
+
 export default function AdminAbout() {
+  const apiFetch = useApi();
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckInfo | null>(null);
   const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateSettings, setUpdateSettings] = useState<UpdateSettings>({
+    update_mode: 'actions',
+    update_repository_url: '',
+  });
+  const [updateSettingsSaving, setUpdateSettingsSaving] = useState(false);
+  const [updateSettingsMessage, setUpdateSettingsMessage] = useState('');
 
   useEffect(() => {
     fetch('/api/version')
@@ -35,21 +51,31 @@ export default function AdminAbout() {
       .catch(() => {});
   }, []);
 
+  const loadUpdateSettings = () => {
+    apiFetch('/admin/settings?scope=update')
+      .then((data) => data as UpdateSettings)
+      .then((data) => setUpdateSettings({
+        update_mode: data.update_mode === 'fork' ? 'fork' : 'actions',
+        update_repository_url: data.update_repository_url || '',
+      }))
+      .catch(() => {});
+  };
+
   const loadUpdateInfo = (refresh = false) => {
     setUpdateLoading(true);
-    fetch(`/api/admin/update-check${refresh ? '?refresh=1' : ''}`)
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) throw data;
-        setUpdateInfo(data);
-      })
+    apiFetch(`/admin/update-check${refresh ? '?refresh=1' : ''}`)
+      .then((data) => data as UpdateCheckInfo)
+      .then(setUpdateInfo)
       .catch((error) => setUpdateInfo({
         current_version: formatAppVersion(version?.version),
         latest_version: '',
         has_update: false,
         release_url: '',
+        upgrade_url: null,
         actions_url: null,
         workflow_configured: false,
+        update_mode: updateSettings.update_mode,
+        repository_url: null,
         title: '',
         body: '',
         published_at: '',
@@ -60,10 +86,27 @@ export default function AdminAbout() {
   };
 
   useEffect(() => {
+    loadUpdateSettings();
     loadUpdateInfo();
   }, []);
 
+  const saveUpdateSettings = () => {
+    setUpdateSettingsSaving(true);
+    setUpdateSettingsMessage('');
+    apiFetch('/admin/settings', {
+      method: 'POST',
+      body: JSON.stringify(updateSettings),
+    })
+      .then(() => {
+        setUpdateSettingsMessage('已保存');
+        loadUpdateInfo(true);
+      })
+      .catch((error) => setUpdateSettingsMessage(error?.message || '保存失败'))
+      .finally(() => setUpdateSettingsSaving(false));
+  };
+
   const currentVersion = updateInfo?.current_version || formatAppVersion(version?.version);
+  const updateActionLabel = updateSettings.update_mode === 'fork' ? '前往同步 Fork' : '前往升级';
   const openExternal = (url: string | null | undefined) => {
     if (!url) return;
     window.open(url, '_blank', 'noopener,noreferrer');
@@ -103,6 +146,51 @@ export default function AdminAbout() {
             {updateInfo?.has_update && <Badge color="orange">有更新</Badge>}
           </Flex>
           <Text size="2" color="gray">当前版本：{currentVersion}</Text>
+          <Card variant="surface">
+            <Flex direction="column" gap="3">
+              <Grid columns={{ initial: '1', sm: '2' }} gap="3">
+                <Box>
+                  <Text as="label" size="2" weight="medium">升级方式</Text>
+                  <Select.Root
+                    value={updateSettings.update_mode}
+                    onValueChange={(value) => setUpdateSettings((current) => ({
+                      ...current,
+                      update_mode: value === 'fork' ? 'fork' : 'actions',
+                    }))}
+                  >
+                    <Select.Trigger mt="1" />
+                    <Select.Content>
+                      <Select.Item value="actions">一键部署仓库：GitHub Actions</Select.Item>
+                      <Select.Item value="fork">Fork 仓库：Sync fork</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                </Box>
+                <Box>
+                  <Text as="label" size="2" weight="medium">部署仓库地址</Text>
+                  <TextField.Root
+                    mt="1"
+                    value={updateSettings.update_repository_url}
+                    placeholder="https://github.com/用户名/仓库名"
+                    onChange={(event) => setUpdateSettings((current) => ({
+                      ...current,
+                      update_repository_url: event.target.value,
+                    }))}
+                  />
+                </Box>
+              </Grid>
+              <Flex align="center" justify="between" gap="3" wrap="wrap">
+                <Text size="1" color="gray">更新源固定为 kadidalax/cf-vps-monitor 的 latest Release。</Text>
+                <Flex align="center" gap="2">
+                  {updateSettingsMessage && (
+                    <Text size="1" color={updateSettingsMessage === '已保存' ? 'green' : 'red'}>{updateSettingsMessage}</Text>
+                  )}
+                  <Button size="2" variant="soft" onClick={saveUpdateSettings} disabled={updateSettingsSaving}>
+                    {updateSettingsSaving ? '保存中...' : '保存设置'}
+                  </Button>
+                </Flex>
+              </Flex>
+            </Flex>
+          </Card>
           {updateLoading && <Text size="2" color="gray">正在检查更新...</Text>}
           {updateInfo?.error && (
             <Text size="2" color="red">
@@ -121,14 +209,14 @@ export default function AdminAbout() {
                 </Text>
               )}
               {!updateInfo.workflow_configured && (
-                <Text size="2" color="orange">未配置 GITHUB_REPOSITORY_URL，无法生成你的仓库升级入口。</Text>
+                <Text size="2" color="orange">请先保存部署仓库地址，才能生成升级入口。</Text>
               )}
             </>
           )}
           <Flex gap="2" wrap="wrap">
             <Button variant="soft" onClick={() => loadUpdateInfo(true)} disabled={updateLoading}>重新检查</Button>
             <Button variant="soft" disabled={!updateInfo?.release_url} onClick={() => openExternal(updateInfo?.release_url)}>查看 Release</Button>
-            <Button disabled={!updateInfo?.workflow_configured || !updateInfo?.has_update} onClick={() => openExternal(updateInfo?.actions_url)}>立即升级</Button>
+            <Button disabled={!updateInfo?.workflow_configured || !updateInfo?.has_update} onClick={() => openExternal(updateInfo?.upgrade_url)}>{updateActionLabel}</Button>
           </Flex>
         </Flex>
 
