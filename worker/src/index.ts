@@ -129,7 +129,8 @@ function databaseStartupErrorResponse(request: Request, error: unknown): Respons
 }
 
 function canServeWithoutDatabaseStartup(pathname: string): boolean {
-  return pathname === '/assets/' ||
+  return pathname === '/db-init' ||
+    pathname === '/assets/' ||
     pathname.startsWith('/assets/') ||
     pathname === '/favicon.ico' ||
     pathname === '/favicon-16x16.png' ||
