@@ -1,22 +1,16 @@
 import assert from 'node:assert/strict';
 
 const {
-  compareVersions,
   canonicalGitHubRepositoryUrl,
-  normalizeVersion,
+  formatAppVersion,
   repositoryUrlFromRepositoryUrl,
   shortGitSha,
   workflowUrlFromRepositoryUrl,
 } = await import('./update-check.ts');
 
-assert.equal(normalizeVersion('v2.0.1'), '2.0.1');
-assert.equal(normalizeVersion(' 2.0.1 '), '2.0.1');
-
-assert.equal(compareVersions('2.0.1', '2.0.0'), 1);
-assert.equal(compareVersions('v2.0.1', '2.0.1'), 0);
-assert.equal(compareVersions('2.0.0', '2.0.1'), -1);
-assert.equal(compareVersions('dev', '2.0.1'), -1);
-assert.equal(compareVersions('2.0.1', 'dev'), 1);
+assert.equal(formatAppVersion('2.0.1'), 'v2.0.1');
+assert.equal(formatAppVersion('v2.0.1'), 'v2.0.1');
+assert.equal(formatAppVersion(''), 'dev');
 
 assert.equal(canonicalGitHubRepositoryUrl('https://github.com/example/cf-vps-monitor'), 'https://github.com/example/cf-vps-monitor');
 assert.equal(canonicalGitHubRepositoryUrl('https://github.com/example/cf-vps-monitor.git'), 'https://github.com/example/cf-vps-monitor');

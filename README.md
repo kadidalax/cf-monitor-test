@@ -122,11 +122,11 @@ sudo ./install-linux.sh --uninstall -i 实例ID
 
 适合点击上方 Deploy Button 后，由 Cloudflare 帮你创建/连接 GitHub 仓库的部署方式。
 
-1. 在后台 `关于 -> 系统更新`：
-   - `升级方式` 选择 `一键部署仓库：GitHub Actions`
-   - `部署仓库地址` 填你的仓库地址，例如 `https://github.com/用户名/仓库名`
+1. 在后台 `关于 -> 版本更新`：
+   - `更新方式` 选择 `一键部署仓库：GitHub Actions`
+   - `你的部署仓库地址` 填你的仓库地址，例如 `https://github.com/用户名/仓库名`
    - 点击 `保存设置`
-2. 后台检测到更新后，点击 `前往升级`。
+2. 后台检测到更新后，点击 `前往更新`。
 3. 首次打开该仓库的 **Actions** 页面时，如 GitHub 提示启用 workflow，点击启用。
 4. 如果仓库默认 `GITHUB_TOKEN` 没有写权限，打开 `Settings -> Actions -> General -> Workflow permissions`，选择 `Read and write permissions`。
 5. 在 GitHub Actions 页面选择 `Update from upstream`，点击 `Run workflow`。
@@ -136,11 +136,11 @@ sudo ./install-linux.sh --uninstall -i 实例ID
 
 适合先 Fork 官方仓库，再在 Cloudflare Workers Builds 里连接这个 Fork 仓库的部署方式。
 
-1. 在后台 `关于 -> 系统更新`：
-   - `升级方式` 选择 `Fork 仓库：Sync fork`
-   - `部署仓库地址` 填你的 Fork 仓库地址，例如 `https://github.com/用户名/cf-vps-monitor`
+1. 在后台 `关于 -> 版本更新`：
+   - `更新方式` 选择 `Fork 仓库：Sync fork`
+   - `你的部署仓库地址` 填你的 Fork 仓库地址，例如 `https://github.com/用户名/cf-vps-monitor`
    - 点击 `保存设置`
-2. 后台检测到更新后，点击 `前往同步 Fork`，打开你的 Fork 仓库首页。
+2. 后台检测到更新后，点击 `前往更新`，打开你的 Fork 仓库首页。
 3. 在 GitHub 仓库文件列表上方点击 `Sync fork` 下拉菜单。
 4. 确认上游提交后点击 `Update branch`。
 5. 如果 GitHub 提示冲突，需要按提示创建 PR 或手动解决冲突。
