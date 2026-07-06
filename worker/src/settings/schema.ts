@@ -24,6 +24,7 @@ export const REMOVED_SETTING_KEYS = new Set([
   'custom_body',
   'custom_footer_html',
   'agent_auto_discovery_key',
+  'update_mode',
 ]);
 
 export const SETTING_SCHEMA = {
@@ -75,12 +76,6 @@ export const SETTING_SCHEMA = {
     defaultValue: '',
     public: false,
     maxLength: 64,
-  },
-  update_mode: {
-    type: 'enum',
-    defaultValue: 'actions',
-    public: false,
-    values: ['actions', 'fork'],
   },
   update_repository_url: {
     type: 'string',

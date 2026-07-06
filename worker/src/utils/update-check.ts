@@ -6,9 +6,6 @@ export type UpdateCheckResult = {
   has_update: boolean;
   source_url: string;
   upgrade_url: string | null;
-  actions_url: string | null;
-  workflow_configured: boolean;
-  update_mode: 'actions' | 'fork';
   repository_url: string | null;
   title: string;
   body: string;
@@ -44,11 +41,6 @@ export function canonicalGitHubRepositoryUrl(repositoryUrl: string | undefined):
 
 export function repositoryUrlFromRepositoryUrl(repositoryUrl: string | undefined): string | null {
   return canonicalGitHubRepositoryUrl(repositoryUrl);
-}
-
-export function workflowUrlFromRepositoryUrl(repositoryUrl: string | undefined): string | null {
-  const repository = canonicalGitHubRepositoryUrl(repositoryUrl);
-  return repository ? `${repository}/actions/workflows/update-from-upstream.yml` : null;
 }
 
 export function normalizeGitSha(value: string | undefined): string {

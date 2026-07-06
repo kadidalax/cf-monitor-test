@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Flex, Card, Text, Heading, Badge, Grid, Box, Button, TextField, Select, Tabs } from '@radix-ui/themes';
+import { Flex, Card, Text, Heading, Badge, Grid, Box, Button, TextField, Tabs } from '@radix-ui/themes';
 import { Activity, Bell, Cloud, Code2, Database, Github, Monitor, ShieldCheck, Server, Zap } from 'lucide-react';
 import { formatAppVersion } from '../../utils/version';
 import { useApi } from '../../contexts/AuthContext';
@@ -18,9 +18,6 @@ interface UpdateCheckInfo {
   has_update: boolean;
   source_url: string;
   upgrade_url: string | null;
-  actions_url: string | null;
-  workflow_configured: boolean;
-  update_mode: 'actions' | 'fork';
   repository_url: string | null;
   title: string;
   body: string;
@@ -30,7 +27,6 @@ interface UpdateCheckInfo {
 }
 
 interface UpdateSettings {
-  update_mode: 'actions' | 'fork';
   update_repository_url: string;
 }
 
@@ -80,7 +76,6 @@ export default function AdminAbout() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckInfo | null>(null);
   const [updateLoading, setUpdateLoading] = useState(false);
   const [updateSettings, setUpdateSettings] = useState<UpdateSettings>({
-    update_mode: 'actions',
     update_repository_url: '',
   });
   const [updateSettingsSaving, setUpdateSettingsSaving] = useState(false);
@@ -97,7 +92,6 @@ export default function AdminAbout() {
     apiFetch('/admin/settings?scope=update')
       .then((data) => data as UpdateSettings)
       .then((data) => setUpdateSettings({
-        update_mode: data.update_mode === 'fork' ? 'fork' : 'actions',
         update_repository_url: data.update_repository_url || '',
       }))
       .catch(() => {});
@@ -116,9 +110,6 @@ export default function AdminAbout() {
         has_update: false,
         source_url: '',
         upgrade_url: null,
-        actions_url: null,
-        workflow_configured: false,
-        update_mode: updateSettings.update_mode,
         repository_url: null,
         title: '',
         body: '',
@@ -152,7 +143,6 @@ export default function AdminAbout() {
   const currentVersion = updateInfo?.current_version || formatAppVersion(version?.version);
   const displayedHash = version?.hash && version.hash !== 'dev' ? version.hash : '未记录';
   const currentCommit = updateInfo?.current_commit || displayedHash;
-  const updateActionLabel = updateSettings.update_mode === 'fork' ? '前往同步 Fork' : '前往更新';
   const openExternal = (url: string | null | undefined) => {
     if (!url) return;
     window.open(url, '_blank', 'noopener,noreferrer');
@@ -250,25 +240,8 @@ export default function AdminAbout() {
                   <Text as="p" size="2" color="gray" mt="1">检测方式：推送编码。官方仓库最新编码不同即视为有更新。</Text>
                 </Box>
 
-                <Box>
-                  <Text as="label" size="2" weight="medium">更新方式</Text>
-                  <Select.Root
-                    value={updateSettings.update_mode}
-                    onValueChange={(value) => setUpdateSettings((current) => ({
-                      ...current,
-                      update_mode: value === 'fork' ? 'fork' : 'actions',
-                    }))}
-                  >
-                    <Select.Trigger mt="1" style={{ width: '100%' }} />
-                    <Select.Content>
-                      <Select.Item value="actions">一键部署仓库：GitHub Actions</Select.Item>
-                      <Select.Item value="fork">Fork 仓库：Sync fork</Select.Item>
-                    </Select.Content>
-                  </Select.Root>
-                </Box>
-
                 <Text size="1" className="admin-about-warning">
-                  请按实际部署方式选择。选择错误，或与部署仓库不一致，会导致更新入口无效或更新失败。
+                  当前只支持 Fork 仓库通过 GitHub Sync fork 同步更新。一键部署自动创建的仓库不保证包含更新工作流，已不再作为后台更新方式。
                 </Text>
 
                 <Box>
@@ -283,7 +256,7 @@ export default function AdminAbout() {
                     }))}
                   />
                   <Text as="p" size="1" color="gray" mt="1">
-                    填写当前 Worker 连接并部署的 GitHub 仓库地址，不是官方更新源。
+                    填写当前 Worker 连接并部署的 Fork 仓库地址，不是官方更新源。
                   </Text>
                 </Box>
 
@@ -342,14 +315,14 @@ export default function AdminAbout() {
                     {updateInfo.body.slice(0, 1200)}
                   </Text>
                 )}
-                {updateInfo && !updateInfo.workflow_configured && !updateInfo.error && (
-                  <Text size="2" color="orange">请先保存你的部署仓库地址，才能生成更新入口。</Text>
+                {updateInfo && !updateInfo.upgrade_url && !updateInfo.error && (
+                  <Text size="2" color="orange">请先保存你的 Fork 部署仓库地址，才能生成更新入口。</Text>
                 )}
 
                 <Flex gap="2" wrap="wrap" mt="auto">
                   <Button variant="soft" onClick={() => loadUpdateInfo(true)} disabled={updateLoading}>重新检测</Button>
                   <Button variant="soft" disabled={!updateInfo?.source_url} onClick={() => openExternal(updateInfo?.source_url)}>查看更新</Button>
-                  <Button disabled={!updateInfo?.workflow_configured || !updateInfo?.has_update} onClick={() => openExternal(updateInfo?.upgrade_url)}>{updateActionLabel}</Button>
+                  <Button disabled={!updateInfo?.upgrade_url || !updateInfo?.has_update} onClick={() => openExternal(updateInfo?.upgrade_url)}>前往同步 Fork</Button>
                 </Flex>
               </Flex>
             </Card>

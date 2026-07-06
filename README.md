@@ -44,6 +44,19 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 面板部署
 
+### Fork 原仓库部署【推荐，方便更新】
+
+
+1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
+2. 打开 Supabase 项目 **Project Overview**页面 复制 `Project URL`, 打开**Project Settings -> API Keys**页面，复制`service_role` key (Secret keys)。
+3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。
+4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
+5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
+6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`，点击 **部署**。
+7. 如果 Cloudflare 里创建的 Worker 名称不是 `cf-vps-monitor`，需要同步修改 Fork 仓库的 `worker/wrangler.toml` 里的 `name`，两者必须一致。
+8. 去[Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期1小时的Access Token
+9. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
+
 
 
 ### 直接一键部署
@@ -58,18 +71,6 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 6. 去[Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期1小时的Access Token
 7. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
 
-### Fork 原仓库部署【推荐，方便更新】
-
-
-1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
-2. 打开 Supabase 项目 **Project Overview**页面 复制 `Project URL`, 打开**Project Settings -> API Keys**页面，复制`service_role` key (Secret keys)。
-3. 打开 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor)，点击 `Fork` 创建自己的仓库。
-4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
-5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
-6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`，点击 **部署**。
-7. 如果 Cloudflare 里创建的 Worker 名称不是 `cf-vps-monitor`，需要同步修改 Fork 仓库的 `worker/wrangler.toml` 里的 `name`，两者必须一致。
-8. 去[Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期1小时的Access Token
-9. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
 
 ## 命令行部署
 
@@ -116,35 +117,24 @@ sudo ./install-linux.sh --uninstall -i 实例ID
 
 ## 后台一键同步更新
 
-后台固定检测 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) 的 latest Release。进入后台 `关于 -> 系统更新`，先保存“升级方式”和“部署仓库地址”，以后检测到更新时会显示升级入口。
+后台固定检测 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
 
-### 如果是 一键部署 Cloudflare 创建的仓库
-
-适合点击上方 Deploy Button 后，由 Cloudflare 帮你创建/连接 GitHub 仓库的部署方式。
-
-1. 在后台 `关于 -> 版本更新`：
-   - `更新方式` 选择 `一键部署仓库：GitHub Actions`
-   - `你的部署仓库地址` 填你的仓库地址，例如 `https://github.com/用户名/仓库名`
-   - 点击 `保存设置`
-2. 后台检测到更新后，点击 `前往更新`。
-3. 首次打开该仓库的 **Actions** 页面时，如 GitHub 提示启用 workflow，点击启用。
-4. 如果仓库默认 `GITHUB_TOKEN` 没有写权限，打开 `Settings -> Actions -> General -> Workflow permissions`，选择 `Read and write permissions`。
-5. 在 GitHub Actions 页面选择 `Update from upstream`，点击 `Run workflow`。
-6. Workflow 会把当前分支同步到官方仓库；同步产生的 push 会触发 Cloudflare Workers Builds 自动构建部署。
-
-### 如果是 Fork 原仓库部署
+### 如果是 Fork 原仓库部署【推荐】
 
 适合先 Fork 官方仓库，再在 Cloudflare Workers Builds 里连接这个 Fork 仓库的部署方式。
 
 1. 在后台 `关于 -> 版本更新`：
-   - `更新方式` 选择 `Fork 仓库：Sync fork`
    - `你的部署仓库地址` 填你的 Fork 仓库地址，例如 `https://github.com/用户名/cf-vps-monitor`
    - 点击 `保存设置`
-2. 后台检测到更新后，点击 `前往更新`，打开你的 Fork 仓库首页。
+2. 后台检测到更新后，点击 `前往同步 Fork`，打开你的 Fork 仓库首页。
 3. 在 GitHub 仓库文件列表上方点击 `Sync fork` 下拉菜单。
 4. 确认上游提交后点击 `Update branch`。
 5. 如果 GitHub 提示冲突，需要按提示创建 PR 或手动解决冲突。
 6. Fork 更新产生的 push 会触发 Cloudflare Workers Builds 自动构建部署。
+
+### 如果是 Deploy Button 一键部署
+
+Cloudflare 一键部署自动创建的仓库不保证包含可用的更新工作流，后台不再提供这类更新入口。需要后续稳定同步更新时，建议改用上面的 Fork 原仓库部署方式。
 
 
 ## 本地开发

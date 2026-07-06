@@ -39,7 +39,6 @@ import {
   repositoryUrlFromRepositoryUrl,
   normalizeGitSha,
   shortGitSha,
-  workflowUrlFromRepositoryUrl,
   type UpdateCheckResult,
 } from '../utils/update-check';
 import { deleteAdminSessionEdgeCache, invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
@@ -139,7 +138,6 @@ const SETTINGS_SCOPE_KEYS = {
     'offline_notify_never_reported',
   ],
   update: [
-    'update_mode',
     'update_repository_url',
   ],
 } as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;
@@ -1303,22 +1301,17 @@ async function fetchLatestWorkerVersion(repository: string, commitSha: string): 
     : 'dev';
 }
 
-async function getUpdateSettings(c: AdminContext): Promise<{
-  mode: 'actions' | 'fork';
-  repositoryUrl: string;
-}> {
+async function getUpdateSettings(c: AdminContext): Promise<{ repositoryUrl: string }> {
   const database = getDatabase(c.env);
-  const stored = await db.getSettingsByKeys(database, ['update_mode', 'update_repository_url'], true);
+  const stored = await db.getSettingsByKeys(database, ['update_repository_url'], true);
   const settings = buildAdminSettings(stored);
   return {
-    mode: settings.update_mode === 'fork' ? 'fork' : 'actions',
     repositoryUrl: settings.update_repository_url,
   };
 }
 
 async function buildCommitUpdateResult(
   repository: string,
-  mode: 'actions' | 'fork',
   deploymentRepositoryUrl: string,
   currentCommitRaw: string | undefined,
 ): Promise<UpdateCheckResult> {
@@ -1327,8 +1320,6 @@ async function buildCommitUpdateResult(
   const latestVersion = await fetchLatestWorkerVersion(repository, latestCommit);
   const currentCommit = normalizeGitSha(currentCommitRaw);
   const repositoryUrl = repositoryUrlFromRepositoryUrl(deploymentRepositoryUrl);
-  const actionsUrl = workflowUrlFromRepositoryUrl(repositoryUrl || undefined);
-  const upgradeUrl = mode === 'fork' ? repositoryUrl : actionsUrl;
   const message = updateString(commit.commit?.message);
   return {
     current_version: formatAppVersion(APP_VERSION),
@@ -1337,10 +1328,7 @@ async function buildCommitUpdateResult(
     latest_commit: shortGitSha(latestCommit),
     has_update: Boolean(latestCommit) && currentCommit !== latestCommit,
     source_url: updateString(commit.html_url) || `https://github.com/${repository}/commits/${OFFICIAL_UPDATE_BRANCH}`,
-    upgrade_url: upgradeUrl,
-    actions_url: actionsUrl,
-    workflow_configured: Boolean(upgradeUrl),
-    update_mode: mode,
+    upgrade_url: repositoryUrl,
     repository_url: repositoryUrl,
     title: message.split('\n')[0] || latestCommit,
     body: message,
@@ -1352,16 +1340,16 @@ async function buildCommitUpdateResult(
 adminRoutes.get('/update-check', async (c) => {
   const now = Date.now();
   try {
-    const { mode, repositoryUrl } = await getUpdateSettings(c);
+    const { repositoryUrl } = await getUpdateSettings(c);
     const repository = OFFICIAL_UPDATE_REPOSITORY;
     const currentCommit = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
-    const cacheKey = `${repository}:${OFFICIAL_UPDATE_BRANCH}:commit:${mode}:${repositoryUrl}:${currentCommit}`;
+    const cacheKey = `${repository}:${OFFICIAL_UPDATE_BRANCH}:commit:${repositoryUrl}:${currentCommit}`;
     const cached = updateCheckCache.get(cacheKey);
     if (c.req.query('refresh') !== '1' && cached && cached.expiresAt > now) {
       return c.json(cached.value);
     }
 
-    const result = await buildCommitUpdateResult(repository, mode, repositoryUrl, currentCommit);
+    const result = await buildCommitUpdateResult(repository, repositoryUrl, currentCommit);
     updateCheckCache.set(cacheKey, { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result });
     return c.json(result);
   } catch (error) {

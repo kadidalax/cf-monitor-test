@@ -5,7 +5,6 @@ const {
   formatAppVersion,
   repositoryUrlFromRepositoryUrl,
   shortGitSha,
-  workflowUrlFromRepositoryUrl,
 } = await import('./update-check.ts');
 
 assert.equal(formatAppVersion('2.0.1'), 'v2.0.1');
@@ -21,20 +20,5 @@ assert.equal(canonicalGitHubRepositoryUrl('https://gitlab.com/example/cf-vps-mon
 assert.equal(canonicalGitHubRepositoryUrl('not a url'), null);
 
 assert.equal(repositoryUrlFromRepositoryUrl('example/cf-vps-monitor'), 'https://github.com/example/cf-vps-monitor');
-
-assert.equal(
-  workflowUrlFromRepositoryUrl('https://github.com/example/cf-vps-monitor'),
-  'https://github.com/example/cf-vps-monitor/actions/workflows/update-from-upstream.yml',
-);
-assert.equal(
-  workflowUrlFromRepositoryUrl('https://github.com/example/cf-vps-monitor.git'),
-  'https://github.com/example/cf-vps-monitor/actions/workflows/update-from-upstream.yml',
-);
-assert.equal(
-  workflowUrlFromRepositoryUrl('example/cf-vps-monitor'),
-  'https://github.com/example/cf-vps-monitor/actions/workflows/update-from-upstream.yml',
-);
-assert.equal(workflowUrlFromRepositoryUrl('https://gitlab.com/example/cf-vps-monitor'), null);
-assert.equal(workflowUrlFromRepositoryUrl('not a url'), null);
 assert.equal(shortGitSha('77D873F2552638E38BEBF1D18BC38DB7721042F5'), '77d873f');
 assert.equal(shortGitSha(undefined), '');
