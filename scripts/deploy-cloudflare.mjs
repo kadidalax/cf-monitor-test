@@ -13,6 +13,9 @@ const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const keepsExistingVars = deployArgs.includes('--keep-vars');
 const wranglerDeployArgs = deployArgs.filter(arg => arg !== '--skip-migrations');
+const deployCommand = process.env.CF_MONITOR_DEPLOY_COMMAND === 'versions-upload'
+  ? ['versions', 'upload']
+  : ['deploy'];
 
 function runWrangler(args, options = {}) {
   return spawnSync(process.execPath, [wrangler, ...args], {
@@ -100,12 +103,17 @@ function checkSecrets() {
   }
 }
 
+function buildWranglerDeployArgs() {
+  const args = [...deployCommand, '--config', deployConfig, ...wranglerDeployArgs];
+  if (hasDeploySecretsFile) args.push('--secrets-file', deploySecretsFile);
+  return args;
+}
+
 writeDeployConfig();
 const hasDeploySecretsFile = writeDeploySecretsFile();
 
 if (isDryRun) {
-  const args = ['deploy', '--config', deployConfig, ...wranglerDeployArgs];
-  if (hasDeploySecretsFile) args.push('--secrets-file', deploySecretsFile);
+  const args = buildWranglerDeployArgs();
   const deploy = runWrangler(args, { stdio: 'inherit' });
   if (hasDeploySecretsFile) rmSync(deploySecretsFile, { force: true });
   process.exit(deploy.status ?? 1);
@@ -117,8 +125,7 @@ if (!keepsExistingVars && !hasDeploySecretsFile) {
 
 console.log('Deploying Worker. Initialize the database after deploy at /db-init.');
 
-const args = ['deploy', '--config', deployConfig, ...wranglerDeployArgs];
-if (hasDeploySecretsFile) args.push('--secrets-file', deploySecretsFile);
+const args = buildWranglerDeployArgs();
 const deploy = runWrangler(args, { stdio: 'inherit' });
 if (hasDeploySecretsFile) rmSync(deploySecretsFile, { force: true });
 if (deploy.status !== 0) process.exit(deploy.status ?? 1);
