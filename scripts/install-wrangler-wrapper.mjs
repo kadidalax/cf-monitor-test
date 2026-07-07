@@ -1,9 +1,8 @@
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const binDir = join(root, 'node_modules', '.bin');
 
 const sh = `#!/bin/sh
 basedir=$(dirname "$(echo "$0" | sed -e 's,\\\\,/,g')")
@@ -54,8 +53,18 @@ if (Test-Path "$basedir/node$exe") {
 exit $LASTEXITCODE
 `;
 
-mkdirSync(binDir, { recursive: true });
-writeFileSync(join(binDir, 'wrangler'), sh, { mode: 0o755 });
-writeFileSync(join(binDir, 'wrangler.cmd'), cmd);
-writeFileSync(join(binDir, 'wrangler.ps1'), ps1);
-chmodSync(join(binDir, 'wrangler'), 0o755);
+export function installWranglerWrapper(rootDir = root) {
+  const binDir = join(rootDir, 'node_modules', '.bin');
+  mkdirSync(binDir, { recursive: true });
+  for (const name of ['wrangler', 'wrangler.cmd', 'wrangler.ps1']) {
+    rmSync(join(binDir, name), { force: true });
+  }
+  writeFileSync(join(binDir, 'wrangler'), sh, { mode: 0o755 });
+  writeFileSync(join(binDir, 'wrangler.cmd'), cmd);
+  writeFileSync(join(binDir, 'wrangler.ps1'), ps1);
+  chmodSync(join(binDir, 'wrangler'), 0o755);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  installWranglerWrapper();
+}
