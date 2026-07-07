@@ -39,7 +39,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | --- | --- | --- |
 | `SUPABASE_URL` | Variable | Supabase Project URL，例如 `https://xxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | Supabase `service_role` 或 Secret key，不能使用 anon key |
-| `JWT_SECRET` | Secret | 后台会话签名密钥，建议使用随机字符串 |
+| `JWT_SECRET` | Secret | 后台会话签名密钥，必须至少 32 字节；英文/数字不少于 32 个字符 |
 
 ## 面板部署
 
@@ -51,8 +51,8 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。
 4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
 5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
-6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`。
-7. 确认 **构建命令** 是 `npm run build`，**部署命令** 是 `npm run deploy`。不要使用默认的 `npx wrangler deploy`，否则加密变量不会写入 Worker Secret。
+6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
+7. 保持默认 **构建命令** `npm run build` 和 **部署命令** `npx wrangler deploy`，也可以手动改为 `npm run deploy`。
 8. 点击 **部署**。
 9. 如果 Cloudflare 里创建的 Worker 名称不是 `cf-vps-monitor`，需要同步修改 Fork 仓库的 `wrangler.toml` 里的 `name`，两者必须一致。
 10. 去 [Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期 1 小时的 Access Token。
@@ -68,8 +68,8 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 2. 打开 Supabase 项目 **Project Overview**页面 复制 `Project URL`, 打开**Project Settings -> API Keys**页面，复制`service_role` key (Secret keys)。
 3. 点击 上面的**Deploy to Cloudflare**。
 4. 登录 Cloudflare, 选择账号、仓库名和 Worker 名称。
-5. 填入对应变量的值 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`。
-6. 确认 **构建命令** 是 `npm run build`，**部署命令** 是 `npm run deploy`。不要使用默认的 `npx wrangler deploy`，否则加密变量不会写入 Worker Secret。
+5. 填入对应变量的值 `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
+6. 保持默认 **构建命令** `npm run build` 和 **部署命令** `npx wrangler deploy`，也可以手动改为 `npm run deploy`。
 7. 点击 **部署**。
 8. 去 [Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期 1 小时的 Access Token。
 9. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
