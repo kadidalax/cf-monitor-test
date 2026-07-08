@@ -34,7 +34,7 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   nicExclude: '',
 };
 
-export const CF_MONITOR_BRANCH = 'main';
+export const CF_MONITOR_BRANCH = CF_MONITOR_REPOSITORY === 'kadidalax/cf-monitor-test' ? 'dev' : 'main';
 export const CF_MONITOR_AGENT_SCRIPT_REF = `refs/heads/${CF_MONITOR_BRANCH}`;
 export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download`;
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
@@ -167,7 +167,7 @@ function normalizeInstanceId(value?: string) {
 
 function sudoBashPipe(downloadCommand: string, args: string[]) {
   const quotedArgs = args.map(shellQuote).join(' ');
-  return `${downloadCommand} | sudo bash -s -- ${quotedArgs}`;
+  return `${downloadCommand} | { SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo; $SUDO bash -s -- ${quotedArgs}; }`;
 }
 
 export function buildAgentInstallCommand({
