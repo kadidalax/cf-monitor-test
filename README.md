@@ -6,12 +6,12 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 特性
 
-- **服务器监控**：在线状态、CPU、GPU、内存、Swap、磁盘、负载、温度、网络速率、月度流量、系统信息、IPv4/IPv6、进程数、TCP/UDP 连接数。
+- **服务器监控**：在线状态、CPU、GPU、内存、Swap、磁盘、负载、温度、网络速率、月度流量、账单、到期时间、系统信息、IPv4/IPv6、进程数、TCP/UDP 连接数。
 - **实时看板**：首页、节点详情页和后台首页通过 WebSocket 获取实时数据。
 - **Ping 监控**：支持 ICMP、TCP、HTTP Ping 任务，可分配到全部节点或指定节点，并展示延迟历史。
 - **网站监控**：支持 HTTP/HTTPS GET、HTTP/HTTPS HEAD 和 TCP 检测，支持期望状态码、超时、间隔、启停、隐藏、排序、手动检测和 Agent 节点侧探测。
 - **后台管理**：节点增删改、批量隐藏/删除、拖拽排序、记录清理、Agent Token 轮换、安装命令生成、系统设置、审计日志、健康检查、容量估算、备份恢复、账号改名和改密。
-- **通知**：支持 Telegram 和 SMTP Email，可配置离线、到期、负载以及网站监控相关通知。
+- **通知**：支持 Telegram 、 SMTP Email 和 Webhook，可配置离线、到期、负载以及网站监控相关通知。
 - **主题**：内置 `monitor` 和 `next` 主题，支持主题包、自定义 CSS、图片和字体资源。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
 - **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报，足可监控50台服务器。
@@ -50,7 +50,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview** 页面复制 `Project URL`；打开 **Project Settings -> API Keys -> Publishable and secret API keys**，复制 **Secret keys** 中的 `default` Secret key，格式通常为 `sb_secret_...`。
-3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。
+3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。到Actions 选择**Agent Release** 点击**Run workflow** 填入创建自己的版本号，再次点击**Run workflow** 创建自己仓库的Agent 安装脚本。
 4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
 5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
 6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
@@ -97,16 +97,16 @@ npm run deploy
 
 1. 登录后台。
 2. 在“服务器”添加节点。
-3. 打开节点安装命令，选择 Unix 自动检测或 Windows。
+3. 打开节点安装命令，选择 Unix 自动检测或 Windows。复制安装命令。请确认你的安装脚本指向的仓库有效且你已经在actions里运行了创建agent脚本的workflow。
 4. 在 VPS 上执行安装命令，等待 Agent 上线。
 5. 需要 Ping 监控时，在“Ping”创建任务。
 6. 需要网站监控时，在“网站”创建 HTTP/HTTPS 或 TCP 检测目标。
-7. 需要告警时，在“通知”配置 Telegram 或 SMTP Email。
+7. 需要告警时，在“通知”配置 Telegram、SMTP Email 或 webhook推送。
 
 
 同一台服务器可以安装多个 Agent 实例。每个安装命令会带独立 `instance-id`，默认生成独立服务名和安装目录。
 
-Unix 安装命令会自动判断 Linux、Alpine/OpenRC、macOS、FreeBSD，以及 root/非 root 环境。非 root 或 Serv00 这类共享主机会安装到用户目录，并使用 `nohup` + `crontab @reboot` 尝试保持后台运行。旧 `install-linux.sh` 保留兼容，不再作为面板默认入口。
+Unix 安装命令会自动判断 Linux、Alpine/OpenRC、macOS、FreeBSD，以及 root/非 root 环境。非 root 或 Serv00 这类共享主机会安装到用户目录，并使用 `nohup` + `crontab @reboot` 尝试保持后台运行。
 
 卸载单个 Unix 实例：
 
@@ -138,6 +138,7 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-monitor-test/refs/head
 4. 确认上游提交后点击 `Update branch`。
 5. 如果 GitHub 提示冲突，需要按提示创建 PR 或手动解决冲突。
 6. Fork 更新产生的 push 会触发 Cloudflare Workers Builds 自动构建部署。
+7. 更新后最好打开 `https://你的 Worker 域名/db-init` 初始化一下数据库。
 
 ### 如果是 Deploy Button 一键部署
 
