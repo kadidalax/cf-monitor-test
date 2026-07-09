@@ -28,7 +28,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | --- | --- |
 | `frontend/` | React + Vite + Radix UI + Tailwind，构建产物由 Workers Static Assets 托管 |
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
-| `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Linux/Windows 安装脚本 |
+| `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Unix/Windows 安装脚本 |
 | `supabase/migrations/` | Supabase 表、索引、RLS、RPC、授权和默认数据 |
 | `scripts/` | 部署和迁移清单生成脚本 |
 
@@ -97,7 +97,7 @@ npm run deploy
 
 1. 登录后台。
 2. 在“服务器”添加节点。
-3. 打开节点安装命令，选择 Linux 或 Windows。
+3. 打开节点安装命令，选择 Unix 自动检测或 Windows。
 4. 在 VPS 上执行安装命令，等待 Agent 上线。
 5. 需要 Ping 监控时，在“Ping”创建任务。
 6. 需要网站监控时，在“网站”创建 HTTP/HTTPS 或 TCP 检测目标。
@@ -106,10 +106,12 @@ npm run deploy
 
 同一台服务器可以安装多个 Agent 实例。每个安装命令会带独立 `instance-id`，默认生成独立服务名和安装目录。
 
-卸载单个 Linux 实例：
+Unix 安装命令会自动判断 Linux、Alpine/OpenRC、macOS、FreeBSD，以及 root/非 root 环境。非 root 或 Serv00 这类共享主机会安装到用户目录，并使用 `nohup` + `crontab @reboot` 尝试保持后台运行。旧 `install-linux.sh` 保留兼容，不再作为面板默认入口。
+
+卸载单个 Unix 实例：
 
 ```bash
-sudo ./install-linux.sh --uninstall -i 实例ID
+wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-monitor-test/refs/heads/dev/agent/install.sh' | sh -s -- --uninstall -i 实例ID
 ```
 
 卸载单个 Windows 实例：

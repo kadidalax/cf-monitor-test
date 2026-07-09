@@ -144,6 +144,7 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/api/setup/status' ||
     pathname === '/api/setup/database/init' ||
     pathname === '/api/version' ||
+    pathname === '/agent/install.sh' ||
     pathname === '/agent/install-linux.sh' ||
     pathname === '/agent/install-windows.ps1' ||
     pathname === '/api/login' ||
@@ -265,6 +266,7 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
+app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-monitor-test/dev/agent/install.sh', 302));
 app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-monitor-test/dev/agent/install-linux.sh', 302));
 app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-monitor-test/dev/agent/install-windows.ps1', 302));
 
