@@ -302,6 +302,9 @@ export default function Index() {
     };
 
     const loadWhenVisible = () => {
+      // 名副其实：隐藏时不拉。visibilitychange 双向触发，切走那次同样要跳过；
+      // 切回可见时该事件会再次触发，届时立刻补拉一次。
+      if (document.hidden) return;
       loadClients();
     };
     const refreshPublicClients = (detail?: PublicDataUpdateDetail) => {
@@ -375,6 +378,8 @@ export default function Index() {
     };
 
     const loadWhenVisible = () => {
+      // 同上：隐藏时不拉，切回可见由 visibilitychange 补一次。
+      if (document.hidden) return;
       loadWebsites(true);
     };
 

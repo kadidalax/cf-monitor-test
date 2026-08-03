@@ -34,7 +34,11 @@ interface CapacityEstimate {
   agent_ping_task_pulls_per_day?: number;
   agent_basic_info_reports_per_day?: number;
   agent_websocket_connects_per_day?: number;
+  agent_websocket_messages_per_day?: number;
+  cron_invocations_per_day?: number;
+  admin_tour_worker_requests?: number;
   estimated_worker_requests_per_day?: number;
+  estimated_durable_object_requests_per_day?: number;
   legacy_ping_records_per_day?: number;
   ping_records_saved_per_day?: number;
   ping_storage_mode?: string;
@@ -104,6 +108,11 @@ const ESTIMATED_PING_RECORD_BYTES = 160;
 const ESTIMATED_PING_SNAPSHOT_BYTES = 220;
 const WORKER_FREE_DAILY_REQUESTS = 100_000;
 const WORKER_PAID_DAILY_REQUESTS = 10_000_000;
+// 与 worker/wrangler.toml 的 crons 配置保持一致（每 2 分钟一次）：
+// 定时任务是空闲基线的主要来源，实测约占 94%。
+const CRON_INVOCATIONS_PER_DAY = 720;
+// Cloudflare 对入站 WebSocket 消息按 20:1 折算计费（出站消息与协议 ping 免费）。
+const WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
 const CAPACITY_COUNT_FAR_CHECK_SEC = 6 * 60 * 60;
 const CAPACITY_COUNT_NEAR_CHECK_SEC = 10 * 60;
 const CAPACITY_COUNT_CRITICAL_CHECK_SEC = 60;
@@ -468,13 +477,23 @@ export default function SettingsGeneral() {
       0,
       Number(capacity?.agent_websocket_connects_per_day || clients),
     );
-    const localWorkerRequestsPerDay = agentPingTaskPullsPerDay
+    // Agent 的 ping 拉取 / 结果上报 / basic_info 上报全部走 WebSocket，
+    // 按 Durable Object 入站消息计费（20:1），**不是** Worker 请求。
+    // 此前这里把它们直接当 Worker 请求相加，导致面板显示远高于实际。
+    const agentWebsocketMessagesPerDay = agentPingTaskPullsPerDay
       + pingResultReportsPerDay
-      + agentBasicInfoReportsPerDay
+      + agentBasicInfoReportsPerDay;
+    const localWorkerRequestsPerDay = CRON_INVOCATIONS_PER_DAY
       + agentWebsocketConnectsPerDay;
+    const localDurableObjectRequestsPerDay = Math.ceil(
+      agentWebsocketMessagesPerDay / WEBSOCKET_MESSAGE_BILLING_RATIO,
+    ) + agentWebsocketConnectsPerDay;
     const mixedWorkerRequestsPerDay = hasLocalCapacityEdits
       ? localWorkerRequestsPerDay
       : Math.max(localWorkerRequestsPerDay, Number(capacity?.estimated_worker_requests_per_day || 0));
+    const mixedDurableObjectRequestsPerDay = hasLocalCapacityEdits
+      ? localDurableObjectRequestsPerDay
+      : Math.max(localDurableObjectRequestsPerDay, Number(capacity?.estimated_durable_object_requests_per_day || 0));
     const capacityCountCheckIntervalSec = recordEnabled
       ? estimateCapacityCountCheckIntervalSec(estimatedRowsRetained, recordHighWatermarkRows)
       : 0;
@@ -524,6 +543,7 @@ export default function SettingsGeneral() {
       workerFreeDailyRequests,
       workerPaidDailyRequests,
       mixedWorkerRequestsPerDay,
+      mixedDurableObjectRequestsPerDay,
       mixedWorkerPercent: mixedWorkerRequestsPerDay / workerFreeDailyRequests * 100,
       mixedPaidWorkerPercent: mixedWorkerRequestsPerDay / workerPaidDailyRequests * 100,
     };

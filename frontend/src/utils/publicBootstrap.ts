@@ -16,7 +16,8 @@ export interface PublicBootstrapPayload {
   server_time?: number;
 }
 
-let bootstrapPromise: Promise<PublicBootstrapPayload> | null = null;
+/** 在途的 bootstrap 请求，按 include_hidden 分槽；fresh 标记该请求是否以 cacheBust 发起。 */
+const bootstrapInFlight = new Map<string, { promise: Promise<PublicBootstrapPayload>; fresh: boolean }>();
 let bootstrapCache: PublicBootstrapPayload | null = null;
 let clientPatchCache: PublicBootstrapClientPatch | null = null;
 const PUBLIC_BOOTSTRAP_STORAGE_KEY = 'cf_monitor_public_bootstrap';
@@ -211,7 +212,16 @@ export function patchCachedPublicBootstrapClients(detail?: PublicBootstrapClient
 
 export async function fetchPublicBootstrap(options: { cache?: RequestCache; cacheBust?: boolean; includeHidden?: boolean } = {}): Promise<PublicBootstrapPayload> {
   const includeHidden = Boolean(options.includeHidden);
-  if (bootstrapPromise && !options.cacheBust && !includeHidden) return bootstrapPromise;
+  const wantsFresh = Boolean(options.cacheBust);
+  const key = includeHidden ? 'hidden' : 'public';
+
+  // 并发去重：一次 notifyPublicDataUpdated 会同时唤醒多个订阅者
+  // （LiveDataContext 与 Index 都会拉 bootstrap），它们应共用同一次网络请求。
+  // 要求新鲜数据的调用方只能复用同样以 cacheBust 发起的在途请求，
+  // 否则可能拿到走了缓存的旧响应。
+  const inFlight = bootstrapInFlight.get(key);
+  if (inFlight && (!wantsFresh || inFlight.fresh)) return inFlight.promise;
+
   const url = new URL('/api/public/bootstrap', typeof window === 'undefined' ? 'http://localhost' : window.location.origin);
   if (options.cacheBust) url.searchParams.set('_fresh', String(Date.now()));
   if (includeHidden) url.searchParams.set('include_hidden', '1');
@@ -225,8 +235,8 @@ export async function fetchPublicBootstrap(options: { cache?: RequestCache; cach
       return includeHidden ? normalized : savePublicBootstrap(normalized);
     })
     .finally(() => {
-      if (bootstrapPromise === promise) bootstrapPromise = null;
+      if (bootstrapInFlight.get(key)?.promise === promise) bootstrapInFlight.delete(key);
     });
-  if (!includeHidden) bootstrapPromise = promise;
+  bootstrapInFlight.set(key, { promise, fresh: wantsFresh });
   return promise;
 }

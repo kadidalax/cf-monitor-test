@@ -176,6 +176,12 @@ const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 120;
 const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
 const MAX_UNIFIED_PING_INTERVAL_SEC = 3600;
 const AGENT_BASIC_INFO_REPORTS_PER_DAY = 48;
+// 与 wrangler.toml 的 crons 配置保持一致（每 2 分钟一次）。
+const WORKER_CRON_INTERVAL_SEC = 120;
+// Cloudflare 对入站 WebSocket 消息按 20:1 折算计费（出站消息与协议 ping 免费）。
+const WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
+// 实测：走遍所有后台页面一轮的 Worker 请求数。
+const ADMIN_TOUR_WORKER_REQUESTS = 23;
 const CAPACITY_COUNT_FAR_CHECK_SEC = 6 * 60 * 60;
 const CAPACITY_COUNT_NEAR_CHECK_SEC = 10 * 60;
 const CAPACITY_COUNT_CRITICAL_CHECK_SEC = 60;
@@ -1147,10 +1153,21 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
   const agentPingTaskPullsPerDay = estimateAgentPingTaskPullsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
   const agentBasicInfoReportsPerDay = clientCount * AGENT_BASIC_INFO_REPORTS_PER_DAY;
   const agentWebsocketConnectsPerDay = clientCount;
-  const estimatedWorkerRequestsPerDay =
+  // Agent 的 ping 任务拉取、结果上报、basic_info 上报**全部走 WebSocket**，
+  // 按 Durable Object 的入站消息计费（官方 20:1 折算），并不是 Worker 请求。
+  // 此前把它们直接加进 Worker 请求，导致面板显示的数字远高于实际（实测偏高约 4 倍）。
+  const agentWebsocketMessagesPerDay =
     agentPingTaskPullsPerDay +
     pingResultReportsPerDay +
-    agentBasicInfoReportsPerDay +
+    agentBasicInfoReportsPerDay;
+  // Worker 请求的真实来源：定时任务 + agent 建连 + 浏览器侧访问。
+  // 浏览器侧无法从服务端预估（取决于有多少人开着面板、开多久），单独给出参考值。
+  const cronInvocationsPerDay = Math.floor(86400 / WORKER_CRON_INTERVAL_SEC);
+  const estimatedWorkerRequestsPerDay =
+    cronInvocationsPerDay +
+    agentWebsocketConnectsPerDay;
+  const estimatedDurableObjectRequestsPerDay =
+    Math.ceil(agentWebsocketMessagesPerDay / WEBSOCKET_MESSAGE_BILLING_RATIO) +
     agentWebsocketConnectsPerDay;
   const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
   const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
@@ -1204,7 +1221,12 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     agent_ping_task_pulls_per_day: agentPingTaskPullsPerDay,
     agent_basic_info_reports_per_day: agentBasicInfoReportsPerDay,
     agent_websocket_connects_per_day: agentWebsocketConnectsPerDay,
+    agent_websocket_messages_per_day: agentWebsocketMessagesPerDay,
+    websocket_message_billing_ratio: WEBSOCKET_MESSAGE_BILLING_RATIO,
+    cron_invocations_per_day: cronInvocationsPerDay,
+    admin_tour_worker_requests: ADMIN_TOUR_WORKER_REQUESTS,
     estimated_worker_requests_per_day: estimatedWorkerRequestsPerDay,
+    estimated_durable_object_requests_per_day: estimatedDurableObjectRequestsPerDay,
     estimated_monitor_records_retained: estimatedMonitorRecordsRetained,
     estimated_gpu_snapshots_retained: estimatedGpuSnapshotsRetained,
     estimated_ping_records_retained: estimatedPingRecordsRetained,
