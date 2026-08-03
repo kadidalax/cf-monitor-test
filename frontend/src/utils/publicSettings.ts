@@ -44,6 +44,8 @@ const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
 
 let cachedPublicSettings: { value: PublicSettings; expiresAt: number } | null = null;
 let inflightPublicSettings: Promise<PublicSettings> | null = null;
+/** 在途请求是否以 force 发起；force 调用只能复用同样 force 的在途请求。 */
+let inflightPublicSettingsIsForced = false;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -120,12 +122,14 @@ export async function fetchPublicSettings(options: { force?: boolean; signal?: A
   if (!options.force && cachedPublicSettings && cachedPublicSettings.expiresAt > Date.now()) {
     return cachedPublicSettings.value;
   }
-  if (!options.force && inflightPublicSettings) {
+  // 并发去重：一次通知会同时唤醒多个订阅者。要求最新数据的调用方只能复用
+  // 同样以 force 发起的在途请求，否则可能拿到走了缓存的旧响应。
+  if (inflightPublicSettings && (!options.force || inflightPublicSettingsIsForced)) {
     return inflightPublicSettings;
   }
 
   const publicSettingsUrl = options.force ? `/api/public?v=${Date.now()}` : '/api/public';
-  inflightPublicSettings = fetchWithBootstrapRetry(publicSettingsUrl, { signal: options.signal })
+  const promise = fetchWithBootstrapRetry(publicSettingsUrl, { signal: options.signal })
     .then(async (res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const settings = normalizePublicSettings(await res.json());
@@ -136,8 +140,13 @@ export async function fetchPublicSettings(options: { force?: boolean; signal?: A
       throw new Error('Invalid public settings response');
     })
     .finally(() => {
-      inflightPublicSettings = null;
+      if (inflightPublicSettings === promise) {
+        inflightPublicSettings = null;
+        inflightPublicSettingsIsForced = false;
+      }
     });
 
-  return inflightPublicSettings;
+  inflightPublicSettings = promise;
+  inflightPublicSettingsIsForced = Boolean(options.force);
+  return promise;
 }
