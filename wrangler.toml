@@ -1,4 +1,4 @@
-name = "cf-monitor-test"
+name = "cf-vps-monitor-demo"
 main = "worker/src/index.ts"
 compatibility_date = "2026-06-21"
 compatibility_flags = ["nodejs_compat"]
