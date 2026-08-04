@@ -2544,7 +2544,7 @@ declare
 begin
   insert into website_monitors (
     name, url, method, expected_status_min, expected_status_max,
-    interval_sec, timeout_sec, grace_period_sec, enabled, hidden,
+    interval_sec, timeout_sec, grace_period_sec, enabled, hidden, hide_url,
     agent_probe_mode, agent_probe_clients, agent_probe_limit, agent_probe_status_enabled,
     sort_order
   ) values (
@@ -2558,6 +2558,7 @@ begin
     coalesce((input_monitor->>'grace_period_sec')::integer, 180),
     coalesce((input_monitor->>'enabled')::boolean, true),
     coalesce((input_monitor->>'hidden')::boolean, false),
+    coalesce((input_monitor->>'hide_url')::boolean, false),
     case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else 'off' end,
     case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else '[]'::jsonb end,
     least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, 3), 1), 10),
@@ -2587,6 +2588,7 @@ as $$
     grace_period_sec = coalesce((input_monitor->>'grace_period_sec')::integer, grace_period_sec),
     enabled = case when input_monitor ? 'enabled' then coalesce((input_monitor->>'enabled')::boolean, enabled) else enabled end,
     hidden = case when input_monitor ? 'hidden' then coalesce((input_monitor->>'hidden')::boolean, hidden) else hidden end,
+    hide_url = case when input_monitor ? 'hide_url' then coalesce((input_monitor->>'hide_url')::boolean, hide_url) else hide_url end,
     agent_probe_mode = case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else agent_probe_mode end,
     agent_probe_clients = case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else agent_probe_clients end,
     agent_probe_limit = case when input_monitor ? 'agent_probe_limit' then least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, agent_probe_limit), 1), 10) else agent_probe_limit end,
@@ -4321,7 +4323,7 @@ declare
 begin
   insert into website_monitors (
     name, url, method, expected_status_min, expected_status_max,
-    interval_sec, timeout_sec, grace_period_sec, enabled, hidden,
+    interval_sec, timeout_sec, grace_period_sec, enabled, hidden, hide_url,
     agent_probe_mode, agent_probe_clients, agent_probe_limit, agent_probe_status_enabled,
     sort_order
   ) values (
@@ -4335,6 +4337,7 @@ begin
     coalesce((input_monitor->>'grace_period_sec')::integer, 180),
     coalesce((input_monitor->>'enabled')::boolean, true),
     coalesce((input_monitor->>'hidden')::boolean, false),
+    coalesce((input_monitor->>'hide_url')::boolean, false),
     case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else 'country_auto' end,
     case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else '[]'::jsonb end,
     least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, 3), 1), 10),
@@ -4364,6 +4367,7 @@ as $$
     grace_period_sec = coalesce((input_monitor->>'grace_period_sec')::integer, grace_period_sec),
     enabled = case when input_monitor ? 'enabled' then coalesce((input_monitor->>'enabled')::boolean, enabled) else enabled end,
     hidden = case when input_monitor ? 'hidden' then coalesce((input_monitor->>'hidden')::boolean, hidden) else hidden end,
+    hide_url = case when input_monitor ? 'hide_url' then coalesce((input_monitor->>'hide_url')::boolean, hide_url) else hide_url end,
     agent_probe_mode = case when input_monitor->>'agent_probe_mode' in ('off', 'selected', 'country_auto') then input_monitor->>'agent_probe_mode' else agent_probe_mode end,
     agent_probe_clients = case when input_monitor ? 'agent_probe_clients' and jsonb_typeof(input_monitor->'agent_probe_clients') = 'array' then input_monitor->'agent_probe_clients' else agent_probe_clients end,
     agent_probe_limit = case when input_monitor ? 'agent_probe_limit' then least(greatest(coalesce((input_monitor->>'agent_probe_limit')::integer, agent_probe_limit), 1), 10) else agent_probe_limit end,

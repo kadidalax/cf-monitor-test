@@ -58,6 +58,25 @@ assert.equal(
 const schema = readFileSync(new URL('../../../supabase/migrations/1_core_schema.sql', import.meta.url), 'utf8');
 assert.match(schema, /hide_url boolean not null default false/, '新装库的建表语句要含 hide_url');
 
+// --- 回归锁：写路径也必须认识 hide_url ---
+// 首次实现只改了读 RPC，写 RPC 仍按固定列名清单落库，开关值被静默丢弃，
+// 表现为「界面能打开开关、保存成功、但毫无效果」。
+assert.match(
+  rpc,
+  /coalesce\(\(input_monitor->>'hide_url'\)::boolean, false\)/,
+  'cfm_create_website_monitor 必须写入 hide_url',
+);
+assert.match(
+  rpc,
+  /hide_url = case when input_monitor \? 'hide_url' then coalesce\(\(input_monitor->>'hide_url'\)::boolean, hide_url\) else hide_url end/,
+  'cfm_update_website_monitor 必须更新 hide_url',
+);
+assert.ok(
+  (rpc.match(/insert into website_monitors \(/g) || []).length ===
+  (rpc.match(/interval_sec, timeout_sec, grace_period_sec, enabled, hidden, hide_url,/g) || []).length,
+  '所有 website_monitors 的 insert 列清单都要含 hide_url——漏掉任一版本都会让开关失效',
+);
+
 // --- 回归锁：WebSocket 广播必须分公开/管理两份，否则「隐藏」只是前端不渲染 ---
 const admin = readFileSync(new URL('../routes/admin.ts', import.meta.url), 'utf8');
 assert.match(admin, /function publicWebsiteMetadataDetail/, '必须存在公开载荷裁剪函数');
