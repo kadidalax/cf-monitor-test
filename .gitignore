@@ -52,3 +52,6 @@ Thumbs.db
 *.exe
 agent/cf-monitor-agent.exe
 agent/agent.exe
+
+# 文档目录仅本地保留，不提交、不推送
+docs/
