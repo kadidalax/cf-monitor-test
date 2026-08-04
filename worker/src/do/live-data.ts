@@ -1058,12 +1058,12 @@ export class LiveDataDO {
     }
   }
 
-  private broadcastMetadataChanged(detail: JsonObject = {}) {
+  private broadcastMetadataChanged(detail: JsonObject = {}, audience: 'all' | 'public' | 'admin' = 'all') {
     this.broadcastToViewers({
       type: 'metadata_changed',
       ...detail,
       timestamp: Date.now(),
-    });
+    }, audience);
   }
 
   private countViewers(viewerIp?: string): { total: number; sameIp: number } {
@@ -1684,7 +1684,10 @@ export class LiveDataDO {
     if (request.method === 'POST' && url.pathname === '/metadata-refresh') {
       const parsed = await parseJsonRequestWithLimit(request, HTTP_CLIENT_META_MAX_BODY_BYTES);
       if ('response' in parsed) return parsed.response;
-      this.broadcastMetadataChanged(parsed.body);
+      // audience 只用于投递范围，不进广播载荷
+      const { audience, ...detail } = parsed.body as JsonObject & { audience?: unknown };
+      const target = audience === 'public' || audience === 'admin' ? audience : 'all';
+      this.broadcastMetadataChanged(detail, target);
       return Response.json({ success: true });
     }
 

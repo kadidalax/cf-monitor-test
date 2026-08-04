@@ -9,7 +9,10 @@ const DEFAULT_WEBSITE_INTERVAL_SEC = 120;
 export interface WebsiteMonitorSummary {
   id: number;
   name: string;
-  url: string;
+  /** 勾选「对游客隐藏地址」时服务端返回 null——此时不得渲染任何链接。 */
+  url: string | null;
+  /** 服务端下发的监控类型，用于区分 TCP 与 HTTP，不依赖 url 字符串。 */
+  method?: 'GET' | 'HEAD' | 'TCP';
   interval_sec: number;
   status: WebsiteMonitorStatus;
   last_checked_at: string | null;
@@ -43,9 +46,15 @@ function lastSeenText(value: string | null) {
   return `${Math.floor(minutes / 60)}h 之前`;
 }
 
+function isTcpMonitor(monitor: WebsiteMonitorSummary) {
+  // 优先用服务端下发的 method；隐藏地址时 url 为 null，不能再靠字符串前缀判断
+  if (monitor.method) return monitor.method === 'TCP';
+  return Boolean(monitor.url?.startsWith('tcp:'));
+}
+
 function statusLine(monitor: WebsiteMonitorSummary) {
   const latency = `${monitor.last_latency_ms ?? 0}ms`;
-  if (monitor.url.startsWith('tcp:')) return `${statusText(monitor.status)} · TCP · ${latency}`;
+  if (isTcpMonitor(monitor)) return `${statusText(monitor.status)} · TCP · ${latency}`;
   if (monitor.status === 'down') return `${statusText(monitor.status)} · HTTP ${monitor.last_raw_status_code ?? monitor.last_status_code ?? '-'} · ${latency}`;
   return `${statusText(monitor.status)} · ${latency}`;
 }
@@ -140,15 +149,22 @@ export default function WebsiteMonitorList({
             <span className={`kuma-monitor-uptime-pill is-${monitor.status}`}>{uptimePercent(periodChecks)}</span>
             <Box className="kuma-monitor-row-main">
               <Flex align="center" gap="2" className="kuma-monitor-url-line">
-                <a
-                  href={monitor.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  {monitor.name}
-                </a>
-                <ExternalLink size={12} aria-hidden="true" />
+                {monitor.url ? (
+                  <>
+                    <a
+                      href={monitor.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {monitor.name}
+                    </a>
+                    <ExternalLink size={12} aria-hidden="true" />
+                  </>
+                ) : (
+                  // 地址对游客隐藏：整个 <a> 都不渲染，避免右键复制链接或查看源码拿到地址
+                  <span className="kuma-monitor-name-plain">{monitor.name}</span>
+                )}
               </Flex>
               <Text size="1" color={monitor.status === 'up' ? 'green' : monitor.status === 'down' ? 'red' : 'gray'}>
                 {statusLine(monitor)}

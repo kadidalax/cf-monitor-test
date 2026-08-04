@@ -199,6 +199,7 @@ create table if not exists website_monitors (
   grace_period_sec integer not null default 180,
   enabled boolean not null default true,
   hidden boolean not null default false,
+  hide_url boolean not null default false,
   agent_probe_mode text not null default 'off',
   agent_probe_clients jsonb not null default '[]'::jsonb,
   agent_probe_limit integer not null default 3,

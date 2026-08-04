@@ -107,7 +107,9 @@ function normalizeWebsiteSummary(input: unknown, options: { includeHidden?: bool
   return {
     id,
     name: String(value.name || ''),
-    url: String(value.url || ''),
+    // 服务端对游客隐藏地址时返回 null；此处必须保留 null，不能兜底成空串以外的值
+    url: value.url == null ? null : String(value.url),
+    method: value.method === 'TCP' || value.method === 'HEAD' || value.method === 'GET' ? value.method : undefined,
     interval_sec: typeof value.interval_sec === 'number' ? value.interval_sec : 120,
     status: value.status === 'up' || value.status === 'down' || value.status === 'paused' ? value.status : 'pending',
     last_checked_at: typeof value.last_checked_at === 'string' ? value.last_checked_at : null,

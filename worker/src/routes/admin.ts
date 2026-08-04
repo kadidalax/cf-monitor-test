@@ -584,6 +584,25 @@ type WebsiteMonitorMetadataDetail = true | {
   remove?: number[];
   reorder?: number[];
 };
+
+/**
+ * 网站监控的公开广播载荷。
+ *
+ * 广播默认投递给**所有**观众（含游客），而管理端写操作推的是完整 monitor 记录，
+ * 因此必须在此裁剪，否则「对游客隐藏」只是前端不渲染、数据仍在 WebSocket 帧里。
+ * - 勾了「对游客隐藏此监控」：整条不进公开载荷
+ * - 勾了「对游客隐藏地址」：url 置为 null
+ */
+function publicWebsiteMetadataDetail(detail: WebsiteMonitorMetadataDetail): WebsiteMonitorMetadataDetail {
+  if (detail === true) return true;
+  if (!Array.isArray(detail.upsert)) return detail;
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+  const upsert = detail.upsert
+    .filter(item => !(isRecord(item) && item.hidden === true))
+    .map(item => (isRecord(item) && item.hide_url === true ? { ...item, url: null } : item));
+  return { ...detail, upsert };
+}
 const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
   'name',
   'url',
@@ -599,7 +618,12 @@ const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
 
 function invalidateWebsiteMonitorPublicState(c: AdminContext, websites: WebsiteMonitorMetadataDetail = true): void {
   invalidateAdminPublicMetadata(c);
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites }));
+  // 分两份投递：管理员收完整记录，游客收裁剪后的载荷
+  runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites, audience: 'admin' }));
+  runAdminBackground(c, broadcastLiveMetadataChanged(c, {
+    websites: publicWebsiteMetadataDetail(websites),
+    audience: 'public',
+  }));
   runAdminBackground(c, refreshLiveAgentPolicy(c));
 }
 

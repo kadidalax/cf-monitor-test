@@ -1444,6 +1444,8 @@ alter table website_monitors add column if not exists agent_probe_mode text not 
 alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
 alter table website_monitors add column if not exists agent_probe_limit integer not null default 3;
 alter table website_monitors add column if not exists agent_probe_status_enabled boolean not null default false;
+-- 对游客隐藏地址：公开出口返回 null，管理端不受影响
+alter table website_monitors add column if not exists hide_url boolean not null default false;
 alter table website_monitors drop constraint if exists website_monitors_agent_probe_mode_check;
 alter table website_monitors add constraint website_monitors_agent_probe_mode_check check (agent_probe_mode in ('off', 'selected', 'country_auto'));
 alter table website_monitors drop constraint if exists website_monitors_agent_probe_limit_check;
@@ -2456,7 +2458,11 @@ begin
     ),
     monitor_row as (
       select
-        id, name, url, interval_sec, status, last_checked_at,
+        id, name,
+        -- 对游客隐藏地址：非管理员出口返回 null
+        case when input_include_hidden or hide_url = false then url else null end as url,
+        method, hide_url,
+        interval_sec, status, last_checked_at,
         last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
       from website_monitors
       where id = input_id
@@ -4167,7 +4173,11 @@ begin
     ),
     monitor_row as (
       select
-        id, name, url, interval_sec, status, last_checked_at,
+        id, name,
+        -- 对游客隐藏地址：非管理员出口返回 null
+        case when input_include_hidden or hide_url = false then url else null end as url,
+        method, hide_url,
+        interval_sec, status, last_checked_at,
         last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
       from website_monitors
       where id = input_id
@@ -4489,7 +4499,11 @@ as $$
   ),
   monitor_rows as (
     select
-      id, name, url, interval_sec, status, last_checked_at,
+      id, name,
+      -- 对游客隐藏地址：非管理员出口返回 null，避免 URL 从 REST 接口泄露
+      case when input_include_hidden or hide_url = false then url else null end as url,
+      method, hide_url,
+      interval_sec, status, last_checked_at,
       last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason,
       sort_order
     from website_monitors

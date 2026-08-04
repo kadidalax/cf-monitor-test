@@ -249,6 +249,8 @@ export interface WebsiteMonitor {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  /** 对游客隐藏地址：公开出口的 url 返回 null，管理端不受影响。 */
+  hide_url: boolean;
   agent_probe_mode: WebsiteAgentProbeMode;
   agent_probe_clients: string[];
   agent_probe_limit: number;
@@ -310,7 +312,11 @@ export type WebsiteCheckInput =
 export interface PublicWebsiteMonitor {
   id: number;
   name: string;
-  url: string;
+  /** 勾选「对游客隐藏地址」时为 null——游客侧只有名称与状态。 */
+  url: string | null;
+  /** 公开下发监控类型，供前端区分 TCP 与 HTTP，不泄露地址。 */
+  method: WebsiteMonitorMethod;
+  hide_url: boolean;
   interval_sec: number;
   status: WebsiteMonitorStatus;
   last_checked_at: string | null;

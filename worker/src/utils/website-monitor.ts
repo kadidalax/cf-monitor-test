@@ -18,6 +18,8 @@ export interface WebsiteMonitorInput {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  /** 对游客隐藏地址：公开出口的 url 返回 null，管理端不受影响。 */
+  hide_url: boolean;
   agent_probe_mode: WebsiteAgentProbeMode;
   agent_probe_clients: string[];
   agent_probe_limit: number;
@@ -239,6 +241,7 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
       grace_period_sec,
       enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
       hidden: typeof input.hidden === 'boolean' ? input.hidden : false,
+      hide_url: typeof input.hide_url === 'boolean' ? input.hide_url : false,
       agent_probe_mode,
       agent_probe_clients: readStringArray(input.agent_probe_clients),
       agent_probe_limit,

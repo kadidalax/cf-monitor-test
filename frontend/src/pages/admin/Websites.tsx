@@ -63,6 +63,8 @@ interface WebsiteMonitor {
   grace_period_sec: number;
   enabled: boolean;
   hidden: boolean;
+  /** 对游客隐藏地址：公开出口的 url 返回 null。 */
+  hide_url: boolean;
   agent_probe_mode: WebsiteAgentProbeMode;
   agent_probe_clients: string[];
   agent_probe_limit: number;
@@ -98,6 +100,7 @@ const emptyForm = {
   grace_period_sec: 180,
   enabled: true,
   hidden: false,
+  hide_url: false,
   agent_probe_mode: 'country_auto' as WebsiteAgentProbeMode,
   agent_probe_clients: [] as string[],
   agent_probe_limit: 3,
@@ -467,6 +470,7 @@ export default function AdminWebsites() {
       grace_period_sec: monitor.grace_period_sec,
       enabled: monitor.enabled,
       hidden: monitor.hidden,
+      hide_url: Boolean(monitor.hide_url),
       agent_probe_mode: monitor.agent_probe_mode || 'off',
       agent_probe_clients: Array.isArray(monitor.agent_probe_clients) ? monitor.agent_probe_clients : [],
       agent_probe_limit: monitor.agent_probe_limit || 3,
@@ -843,7 +847,8 @@ export default function AdminWebsites() {
             </Grid>
             <Flex gap="4" wrap="wrap">
               <label className="admin-website-toggle"><Switch checked={form.enabled} onCheckedChange={(value) => update('enabled', value)} />启用检测</label>
-              <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对游客隐藏</label>
+              <label className="admin-website-toggle"><Switch checked={form.hide_url} onCheckedChange={(value) => update('hide_url', value)} />对游客隐藏地址</label>
+              <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对游客隐藏此监控</label>
             </Flex>
             <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
               <label>
