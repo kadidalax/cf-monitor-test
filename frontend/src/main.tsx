@@ -15,7 +15,6 @@ type MonitorAccentColor = 'cyan' | 'violet' | 'purple';
 
 const ACCENT_BY_DISPLAY_THEME: Record<DisplayTheme, MonitorAccentColor> = {
   monitor: 'violet',
-  next: 'cyan',
   aurora: 'purple',
 };
 

@@ -34,27 +34,6 @@
   --monitor-card-radius: 8px;
 }
 
-html[data-monitor-theme='next'] {
-  --monitor-page-bg: linear-gradient(180deg, #f4f9fb 0%, #ecf4f8 100%);
-  --monitor-panel: color-mix(in srgb, #ffffff 86%, transparent);
-  --monitor-panel-strong: color-mix(in srgb, #ffffff 96%, transparent);
-  --monitor-panel-muted: color-mix(in srgb, #eef9fb 82%, transparent);
-  --monitor-border: color-mix(in srgb, #0e7490 14%, transparent);
-  --monitor-border-strong: color-mix(in srgb, #0f766e 22%, transparent);
-  --monitor-shadow: 0 18px 55px rgba(8, 47, 73, 0.08);
-  --monitor-shadow-hover: 0 22px 70px rgba(8, 47, 73, 0.14);
-  --monitor-accent: #0891b2;
-  --monitor-accent-soft: color-mix(in srgb, var(--monitor-accent) 13%, transparent);
-  --monitor-ring-track: color-mix(in srgb, #0e7490 8%, transparent);
-  --monitor-secondary: #10b981;
-  --monitor-success: #10b981;
-  --monitor-warning: #d97706;
-  --monitor-danger: #e11d48;
-  --monitor-load-cool: linear-gradient(90deg, #a7f3d0 0%, #67e8f9 46%, #0891b2 100%);
-  --monitor-load-warm: linear-gradient(90deg, #a7f3d0 0%, #22d3ee 42%, #d97706 100%);
-  --monitor-load-hot: linear-gradient(90deg, #bae6fd 0%, #f59e0b 44%, #e11d48 100%);
-}
-
 html[data-monitor-theme='aurora'] {
   --monitor-page-bg:
     radial-gradient(circle at 12% -6%, rgba(255, 107, 157, 0.30), transparent 42%),
@@ -115,29 +94,6 @@ html[data-theme-appearance='dark'] {
   --monitor-load-hot: linear-gradient(90deg, #8b5cf6 0%, #fb7185 48%, #e11d48 100%);
 }
 
-html[data-theme-appearance='dark'][data-monitor-theme='next'] {
-  --monitor-page-bg:
-    radial-gradient(circle at 16% 0%, rgba(34, 211, 238, 0.16), transparent 34%),
-    radial-gradient(circle at 86% 6%, rgba(52, 211, 153, 0.12), transparent 30%),
-    linear-gradient(180deg, #070b12 0%, #0b1220 100%);
-  --monitor-panel: color-mix(in srgb, #111827 86%, transparent);
-  --monitor-panel-strong: color-mix(in srgb, #172033 94%, transparent);
-  --monitor-panel-muted: color-mix(in srgb, #101827 88%, transparent);
-  --monitor-border: color-mix(in srgb, #cffafe 13%, transparent);
-  --monitor-border-strong: color-mix(in srgb, #6ee7b7 20%, transparent);
-  --monitor-shadow-hover: 0 16px 48px rgba(0, 0, 0, 0.38);
-  --monitor-accent: #22d3ee;
-  --monitor-accent-soft: color-mix(in srgb, var(--monitor-accent) 16%, transparent);
-  --monitor-ring-track: color-mix(in srgb, #cffafe 9%, transparent);
-  --monitor-secondary: #34d399;
-  --monitor-success: #34d399;
-  --monitor-warning: #f59e0b;
-  --monitor-danger: #f43f5e;
-  --monitor-load-cool: linear-gradient(90deg, #34d399 0%, #22d3ee 58%, #67e8f9 100%);
-  --monitor-load-warm: linear-gradient(90deg, #34d399 0%, #22d3ee 38%, #f59e0b 100%);
-  --monitor-load-hot: linear-gradient(90deg, #22d3ee 0%, #f59e0b 45%, #f43f5e 100%);
-}
-
 html[data-theme-appearance='dark'][data-monitor-theme='aurora'] {
   --monitor-page-bg:
     radial-gradient(circle at 14% -4%, rgba(168, 85, 247, 0.26), transparent 40%),
@@ -194,29 +150,6 @@ html[data-theme-appearance='dark'][data-monitor-theme='aurora'] {
     --monitor-load-cool: linear-gradient(90deg, #22d3ee 0%, #8b5cf6 58%, #a78bfa 100%);
     --monitor-load-warm: linear-gradient(90deg, #22d3ee 0%, #8b5cf6 38%, #fbbf24 100%);
     --monitor-load-hot: linear-gradient(90deg, #8b5cf6 0%, #fb7185 48%, #e11d48 100%);
-  }
-
-  html:not([data-theme-appearance='light'])[data-monitor-theme='next'] {
-    --monitor-page-bg:
-      radial-gradient(circle at 16% 0%, rgba(34, 211, 238, 0.16), transparent 34%),
-      radial-gradient(circle at 86% 6%, rgba(52, 211, 153, 0.12), transparent 30%),
-      linear-gradient(180deg, #070b12 0%, #0b1220 100%);
-    --monitor-panel: color-mix(in srgb, #111827 86%, transparent);
-    --monitor-panel-strong: color-mix(in srgb, #172033 94%, transparent);
-    --monitor-panel-muted: color-mix(in srgb, #101827 88%, transparent);
-    --monitor-border: color-mix(in srgb, #cffafe 13%, transparent);
-    --monitor-border-strong: color-mix(in srgb, #6ee7b7 20%, transparent);
-    --monitor-shadow-hover: 0 16px 48px rgba(0, 0, 0, 0.38);
-    --monitor-accent: #22d3ee;
-    --monitor-accent-soft: color-mix(in srgb, var(--monitor-accent) 16%, transparent);
-    --monitor-ring-track: color-mix(in srgb, #cffafe 9%, transparent);
-    --monitor-secondary: #34d399;
-    --monitor-success: #34d399;
-    --monitor-warning: #f59e0b;
-    --monitor-danger: #f43f5e;
-    --monitor-load-cool: linear-gradient(90deg, #34d399 0%, #22d3ee 58%, #67e8f9 100%);
-    --monitor-load-warm: linear-gradient(90deg, #34d399 0%, #22d3ee 38%, #f59e0b 100%);
-    --monitor-load-hot: linear-gradient(90deg, #22d3ee 0%, #f59e0b 45%, #f43f5e 100%);
   }
 
   html:not([data-theme-appearance='light'])[data-monitor-theme='aurora'] {
@@ -1120,13 +1053,13 @@ body {
   box-shadow: 0 0 12px color-mix(in srgb, var(--monitor-danger, #ef4444) 34%, transparent);
 }
 
-.node-card-next-layout,
+.node-card-tile-layout,
 .node-card-monitor-layout {
   display: grid;
   min-width: 0;
 }
 
-.node-card-next-layout {
+.node-card-tile-layout {
   display: none;
   gap: 5px;
 }
@@ -1437,7 +1370,7 @@ html[data-monitor-theme='monitor'] .node-card-title-meta {
 }
 
 html[data-monitor-theme='monitor'] .node-card-system-line,
-html[data-monitor-theme='monitor'] .node-card-next-layout {
+html[data-monitor-theme='monitor'] .node-card-tile-layout {
   display: none;
 }
 
@@ -1479,42 +1412,36 @@ html[data-monitor-theme='monitor'] .node-os-chip {
   background: var(--monitor-panel-muted);
 }
 
-/* ========== Next display theme ========== */
-/* aurora 复用 next 的方块指标布局，只加逗号项，next 的计算样式不变 */
-html[data-monitor-theme='next'] .node-card-monitor-layout,
-html[data-monitor-theme='next'] .node-card-title-meta,
+/* ========== Aurora 方块指标布局 ========== */
+/* 这套布局原属已移除的 Next 主题，现由 Aurora 独占。
+   类名已由 .node-card-next-layout 改为 .node-card-tile-layout——
+   针对旧类名写过自定义 CSS 的第三方主题包需相应更新。 */
 html[data-monitor-theme='aurora'] .node-card-monitor-layout,
 html[data-monitor-theme='aurora'] .node-card-title-meta {
   display: none !important;
 }
 
-html[data-monitor-theme='next'] .node-card-system-line,
-html[data-monitor-theme='next'] .node-card-next-layout,
 html[data-monitor-theme='aurora'] .node-card-system-line,
-html[data-monitor-theme='aurora'] .node-card-next-layout {
+html[data-monitor-theme='aurora'] .node-card-tile-layout {
   display: grid;
 }
 
-html[data-monitor-theme='next'] .node-card-system-line,
 html[data-monitor-theme='aurora'] .node-card-system-line {
   display: flex;
 }
 
-html[data-monitor-theme='next'] .node-metric-tile,
 html[data-monitor-theme='aurora'] .node-metric-tile {
   min-height: 48px;
   padding: 6px 7px;
   gap: 3px;
 }
 
-html[data-monitor-theme='next'] .node-metric-label,
 html[data-monitor-theme='aurora'] .node-metric-label {
   font-size: 12px !important;
   font-weight: 800 !important;
   color: var(--gray-11);
 }
 
-html[data-monitor-theme='next'] .node-metric-value,
 html[data-monitor-theme='aurora'] .node-metric-value {
   font-size: 15px !important;
   font-weight: 850 !important;
@@ -1522,21 +1449,18 @@ html[data-monitor-theme='aurora'] .node-metric-value {
   font-variant-numeric: tabular-nums;
 }
 
-html[data-monitor-theme='next'] .node-metric-detail,
 html[data-monitor-theme='aurora'] .node-metric-detail {
   font-size: 11.5px !important;
   font-weight: 650 !important;
   color: var(--gray-11);
 }
 
-html[data-monitor-theme='next'] .node-network-summary-label,
 html[data-monitor-theme='aurora'] .node-network-summary-label {
   font-size: 12px !important;
   font-weight: 800 !important;
   color: var(--gray-11);
 }
 
-html[data-monitor-theme='next'] .node-network-value strong,
 html[data-monitor-theme='aurora'] .node-network-value strong {
   font-weight: 850;
 }
@@ -1544,7 +1468,7 @@ html[data-monitor-theme='aurora'] .node-network-value strong {
 /* ========== Aurora display theme ========== */
 /* Layout.tsx 在没有自定义背景图时给 .layout 打了内联的
    `background-image: none; background-color: var(--accent-1)`，会整屏盖掉
-   body/.layout 的 --monitor-page-bg。monitor/next 的页面渐变本就是近白两段，
+   body/.layout 的 --monitor-page-bg。Monitor 的页面渐变本就是近白两段，
    盖掉几乎无感；aurora 整套主题的识别度全在这层极光上，盖掉后浅色下就是一张白纸。
    内联样式只能用 !important 顶回去。配了背景图时 className 会带 .bg-cover，
    此时必须让位给用户的图，所以用 :not(.bg-cover) 限定。 */
@@ -5188,7 +5112,6 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
     box-shadow: 0 0 0 6px color-mix(in srgb, var(--monitor-ring-track) 42%, transparent) inset;
   }
 
-  html[data-monitor-theme='next'] .node-card .rt-CardInner,
   html[data-monitor-theme='aurora'] .node-card .rt-CardInner {
     padding: 8px !important;
   }
@@ -5283,8 +5206,7 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   }
 
   .node-card .rt-CardInner,
-  html[data-monitor-theme='monitor'] .node-card .rt-CardInner,
-  html[data-monitor-theme='next'] .node-card .rt-CardInner {
+  html[data-monitor-theme='monitor'] .node-card .rt-CardInner {
     padding: 7px !important;
   }
 
@@ -5344,23 +5266,19 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
     padding: 6px;
   }
 
-  html[data-monitor-theme='next'] .node-metric-tile,
   html[data-monitor-theme='aurora'] .node-metric-tile {
     min-height: 48px;
     padding: 6px;
   }
 
-  html[data-monitor-theme='next'] .node-metric-label,
   html[data-monitor-theme='aurora'] .node-metric-label {
     font-size: 11.5px !important;
   }
 
-  html[data-monitor-theme='next'] .node-metric-value,
   html[data-monitor-theme='aurora'] .node-metric-value {
     font-size: 13.5px !important;
   }
 
-  html[data-monitor-theme='next'] .node-metric-detail,
   html[data-monitor-theme='aurora'] .node-metric-detail {
     font-size: 11px !important;
   }

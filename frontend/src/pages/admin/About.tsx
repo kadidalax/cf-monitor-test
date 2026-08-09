@@ -44,7 +44,7 @@ const coreFeatures = [
   '总流量持久统计，重启后继续累计',
   '自定义 Ping 任务与延迟图表',
   '网站监控，支持 Worker / Agent 检测',
-  '公开状态页，支持 monitor / next 主题',
+  '公开状态页，支持 monitor / aurora 主题',
   '节点标签、分组、排序、对游客隐藏',
 ];
 

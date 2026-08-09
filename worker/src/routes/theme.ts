@@ -31,18 +31,20 @@ const BUILTIN_THEMES = [
     previewUrl: '/theme-previews/monitor.svg',
   },
   {
-    short: 'next',
-    name: 'Next',
-    description: '项目内置 Next 主题',
-    previewUrl: '/theme-previews/next.svg',
-  },
-  {
     short: 'aurora',
     name: 'Aurora',
     description: '项目内置 Aurora 极光玻璃主题',
     previewUrl: '/theme-previews/aurora.svg',
   },
 ] as const;
+
+// 已退场内置主题的迁移目标。必须与前端 displayTheme.ts 的 legacyDisplayThemeMap 逐项一致，
+// 否则前台按别名渲染 Aurora、后台却认不出 active_theme，"当前"标记会落空。
+// 只做读时翻译，不改写数据库——存量 active_theme='next' 的站点无需重新初始化。
+const LEGACY_THEME_ALIASES: Record<string, string> = {
+  'cf-monitor': 'aurora',
+  next: 'aurora',
+};
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -82,12 +84,20 @@ function isBuiltinTheme(short: string): short is typeof BUILTIN_THEMES[number]['
   return BUILTIN_THEMES.some(theme => theme.short === short);
 }
 
+// 退场主题的 short 同样是保留字：它们会被 normalizeActiveTheme 重定向，
+// 一旦被上传占用，该主题包将无法启用（别名指向别处）、不出现在列表里、
+// 也删不掉（删除端点经别名后判定为内置），成为一条卡死的幽灵记录。
+function isReservedThemeShort(short: string): boolean {
+  return isBuiltinTheme(short) || Object.prototype.hasOwnProperty.call(LEGACY_THEME_ALIASES, short);
+}
+
 function builtinThemePreviewUrl(short: string): string {
   return BUILTIN_THEMES.find(theme => theme.short === short)?.previewUrl || '';
 }
 
 function normalizeActiveTheme(short: string | null | undefined): string {
-  return short && short !== 'default' ? short : 'monitor';
+  const value = short && short !== 'default' ? short : 'monitor';
+  return LEGACY_THEME_ALIASES[value] || value;
 }
 
 function builtinThemeRecord(short: typeof BUILTIN_THEMES[number]['short']): db.ThemeUpsertInput {
@@ -189,8 +199,10 @@ adminThemeRoutes.get('/', async (c) => {
   ]);
   const themeMap = new Map(themes.map(theme => [theme.short, theme]));
   const builtinSummaries = BUILTIN_THEMES.map(theme => builtinThemeSummary(theme.short, activeTheme, themeMap.get(theme.short)));
+  // 退场主题在 themes 表里可能残留记录（配置过主题时 ensureBuiltinTheme 会写入）。
+  // 失去内置身份后它们会混进"上传主题"列表，还带一个可用的删除按钮，必须挡掉。
   const uploadedSummaries = themes
-    .filter(theme => !isBuiltinTheme(theme.short))
+    .filter(theme => !isReservedThemeShort(theme.short))
     .map(theme => themeSummary(theme, activeTheme));
   return c.json({
     active_theme: activeTheme,
@@ -225,7 +237,7 @@ adminThemeRoutes.post('/upload', async (c) => {
     const detail = error instanceof Error ? error.message : '未知错误';
     return c.json({ error: `主题包解析失败: ${detail}` }, 400);
   }
-  if (isBuiltinTheme(parsed.theme.short)) return c.json({ error: '不能覆盖内置主题' }, 400);
+  if (isReservedThemeShort(parsed.theme.short)) return c.json({ error: '不能覆盖内置主题' }, 400);
 
   const database = getDatabase(c.env);
   const existing = await db.getTheme(database, parsed.theme.short);

@@ -368,7 +368,7 @@ export default function NodeCard({ client, live, online, includeHidden = false }
               <NodeIpBadges client={client} />
             </div>
 
-            <div className="node-card-next-layout" data-monitor-layout="next">
+            <div className="node-card-tile-layout" data-monitor-layout="tile">
               <div className="node-metric-grid">
                 <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
                 <CompactMetric label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
