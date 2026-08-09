@@ -11,8 +11,16 @@ import { getExplicitThemeAppearance, normalizeThemeMode } from './utils/themeApp
 import type { ThemeMode } from './utils/themeAppearance';
 import { DisplayTheme, normalizeDisplayTheme } from './utils/displayTheme';
 
-function accentColorForDisplayTheme(theme: DisplayTheme): 'cyan' | 'violet' {
-  return theme === 'next' ? 'cyan' : 'violet';
+type MonitorAccentColor = 'cyan' | 'violet' | 'purple';
+
+const ACCENT_BY_DISPLAY_THEME: Record<DisplayTheme, MonitorAccentColor> = {
+  monitor: 'violet',
+  next: 'cyan',
+  aurora: 'purple',
+};
+
+function accentColorForDisplayTheme(theme: DisplayTheme): MonitorAccentColor {
+  return ACCENT_BY_DISPLAY_THEME[normalizeDisplayTheme(theme)];
 }
 
 // 初始化主题：在 React 渲染前从 localStorage 读取
@@ -34,7 +42,7 @@ const Root = () => {
   const [appearance, setAppearance] = React.useState<'light' | 'dark' | undefined>(
     () => initialAppearance,
   );
-  const [accentColor, setAccentColor] = React.useState<'cyan' | 'violet'>(
+  const [accentColor, setAccentColor] = React.useState<MonitorAccentColor>(
     () => accentColorForDisplayTheme(normalizeDisplayTheme(savedDisplayTheme)),
   );
 

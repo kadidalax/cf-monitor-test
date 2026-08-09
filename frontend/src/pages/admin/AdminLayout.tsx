@@ -5,7 +5,7 @@ import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucid
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useDisplayTheme } from "../../contexts/DisplayThemeContext";
-import { normalizeDisplayTheme } from "../../utils/displayTheme";
+import { displayThemeLabels, getNextDisplayTheme, normalizeDisplayTheme } from "../../utils/displayTheme";
 import { CF_MONITOR_GITHUB_URL } from "../../utils/projectLinks";
 import { formatAppVersion } from "../../utils/version";
 import {
@@ -110,7 +110,7 @@ export default function AdminLayout() {
 
   const themeIcon =
     theme === "dark" ? <Moon size={18} /> : theme === "light" ? <Sun size={18} /> : <Laptop size={18} />;
-  const nextDisplayTheme = displayTheme === "monitor" ? "next" : "monitor";
+  const nextDisplayTheme = displayThemeLabels[getNextDisplayTheme(displayTheme)];
   const nextThemeLabel =
     theme === "light" ? "切换成深色模式" : theme === "dark" ? "切换成跟随系统" : "切换成浅色模式";
 

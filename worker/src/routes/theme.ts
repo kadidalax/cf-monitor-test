@@ -36,6 +36,12 @@ const BUILTIN_THEMES = [
     description: '项目内置 Next 主题',
     previewUrl: '/theme-previews/next.svg',
   },
+  {
+    short: 'aurora',
+    name: 'Aurora',
+    description: '项目内置 Aurora 极光玻璃主题',
+    previewUrl: '/theme-previews/aurora.svg',
+  },
 ] as const;
 
 function isObject(value: unknown): value is Record<string, unknown> {
