@@ -297,8 +297,8 @@ export default function AdminLayout() {
           top: 0;
           border-right: 1px solid var(--monitor-border);
           background: var(--monitor-panel);
-          backdrop-filter: blur(18px) saturate(150%);
           -webkit-backdrop-filter: blur(18px) saturate(150%);
+          backdrop-filter: blur(18px) saturate(150%);
           overflow-y: auto;
           display: flex;
           flex-direction: column;
