@@ -215,8 +215,22 @@ copy_binary_to() {
   if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] install ${src} ${dst}"
   else
-    cp "$src" "$dst"
-    chmod 0755 "$dst"
+    # 不能直接覆写目标：agent 正在运行时以 O_TRUNC 打开会返回 ETXTBSY（Text file busy），
+    # 升级路径必然失败。先写同目录临时文件再 rename——同一文件系统内原子替换，
+    # 且 rename 只解绑旧 inode，不受 ETXTBSY 限制，正在运行的进程继续用旧 inode 直到重启。
+    tmp="${dst}.new.$$"
+    if ! cp "$src" "$tmp"; then
+      rm -f "$tmp"
+      die "Failed to stage agent binary at ${tmp}."
+    fi
+    if ! chmod 0755 "$tmp"; then
+      rm -f "$tmp"
+      die "Failed to set permissions on ${tmp}."
+    fi
+    if ! mv -f "$tmp" "$dst"; then
+      rm -f "$tmp"
+      die "Failed to replace agent binary at ${dst}."
+    fi
   fi
 }
 
