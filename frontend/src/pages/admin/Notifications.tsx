@@ -10,9 +10,21 @@ import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { SettingCard, SettingInput, SettingTextarea } from '../../components/admin/SettingCard';
+import { summarizeSelectionValue } from '../../utils/batchPrefill';
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 
 const notificationTabValues = ['settings', 'offline', 'expiry', 'load'] as const;
+
+/**
+ * 默认离线通知宽限期（秒）。
+ * 取 360 而非更短值，是为了给「上报间隔 120 秒」留足余量：落库节流最坏情况下
+ * last_time 会拉开到约两倍上报间隔，宽限期过短会在链路正常时误报离线。
+ * 需与 worker 侧 `DEFAULT_OFFLINE_GRACE_PERIOD_SEC` 保持一致。
+ */
+const DEFAULT_GRACE_PERIOD_SEC = 360;
+
+/** 默认到期提前提醒天数。 */
+const DEFAULT_EXPIRY_ADVANCE_DAYS = 7;
 type NotificationTab = typeof notificationTabValues[number];
 type NotificationClient = {
   uuid: string;
@@ -110,15 +122,17 @@ export default function AdminNotifications() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClients, setSelectedClients] = useState<string[]>([]);
   const [batchDialogOpen, setBatchDialogOpen] = useState(false);
-  const [batchForm, setBatchForm] = useState({ enable: true, grace_period: 180 });
+  const [batchForm, setBatchForm] = useState({ enable: true, grace_period: DEFAULT_GRACE_PERIOD_SEC });
+  const [batchGraceMixed, setBatchGraceMixed] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingOffline, setEditingOffline] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({ enable: false, grace_period: 180 });
+  const [editForm, setEditForm] = useState({ enable: false, grace_period: DEFAULT_GRACE_PERIOD_SEC });
   const [expiryBatchDialogOpen, setExpiryBatchDialogOpen] = useState(false);
-  const [expiryBatchForm, setExpiryBatchForm] = useState({ enable: true, advance_days: 7 });
+  const [expiryBatchForm, setExpiryBatchForm] = useState({ enable: true, advance_days: DEFAULT_EXPIRY_ADVANCE_DAYS });
+  const [expiryBatchDaysMixed, setExpiryBatchDaysMixed] = useState(false);
   const [expiryEditDialogOpen, setExpiryEditDialogOpen] = useState(false);
   const [editingExpiry, setEditingExpiry] = useState<string | null>(null);
-  const [expiryEditForm, setExpiryEditForm] = useState({ enable: false, advance_days: 7 });
+  const [expiryEditForm, setExpiryEditForm] = useState({ enable: false, advance_days: DEFAULT_EXPIRY_ADVANCE_DAYS });
 
   // Load tab state
   const [loadDialogOpen, setLoadDialogOpen] = useState(false);
@@ -276,7 +290,7 @@ export default function AdminNotifications() {
   const toggleOffline = async (clientUuid: string, enable: boolean) => {
     const result = await apiFetch('/admin/notification/offline/edit', {
       method: 'POST',
-      body: JSON.stringify({ client: clientUuid, enable, grace_period: 180 }),
+      body: JSON.stringify({ client: clientUuid, enable, grace_period: DEFAULT_GRACE_PERIOD_SEC }),
     });
     if (result.success) {
       toast.success(enable ? '已开启离线通知' : '已关闭离线通知');
@@ -292,7 +306,7 @@ export default function AdminNotifications() {
     setEditingOffline(clientUuid);
     setEditForm({
       enable: existing?.enable || false,
-      grace_period: existing?.grace_period || 180,
+      grace_period: existing?.grace_period || DEFAULT_GRACE_PERIOD_SEC,
     });
     setEditDialogOpen(true);
   };
@@ -322,7 +336,16 @@ export default function AdminNotifications() {
       toast.error('请先选择服务器');
       return;
     }
-    setBatchForm({ enable: true, grace_period: 180 });
+    // 预填选中节点的当前值而非固定数字：全部相同取该值，不一致取众数并提示。
+    // 未配置过通知的节点按默认值计入，使统计覆盖全部选中项。
+    const summary = summarizeSelectionValue(
+      selectedClients.map(
+        (uuid) => notificationMap.get(uuid)?.grace_period || DEFAULT_GRACE_PERIOD_SEC,
+      ),
+      DEFAULT_GRACE_PERIOD_SEC,
+    );
+    setBatchForm({ enable: true, grace_period: summary.value });
+    setBatchGraceMixed(!summary.consistent);
     setBatchDialogOpen(true);
   };
 
@@ -373,7 +396,7 @@ export default function AdminNotifications() {
     setEditingExpiry(clientUuid);
     setExpiryEditForm({
       enable: existing?.enable || false,
-      advance_days: existing?.advance_days || 7,
+      advance_days: existing?.advance_days || DEFAULT_EXPIRY_ADVANCE_DAYS,
     });
     setExpiryEditDialogOpen(true);
   };
@@ -402,7 +425,14 @@ export default function AdminNotifications() {
       toast.error('请先选择服务器');
       return;
     }
-    setExpiryBatchForm({ enable: true, advance_days: 7 });
+    const summary = summarizeSelectionValue(
+      selectedClients.map(
+        (uuid) => expiryNotificationMap.get(uuid)?.advance_days || DEFAULT_EXPIRY_ADVANCE_DAYS,
+      ),
+      DEFAULT_EXPIRY_ADVANCE_DAYS,
+    );
+    setExpiryBatchForm({ enable: true, advance_days: summary.value });
+    setExpiryBatchDaysMixed(!summary.consistent);
     setExpiryBatchDialogOpen(true);
   };
 
@@ -576,11 +606,16 @@ export default function AdminNotifications() {
   };
 
   // ─── Test message ───
+  // 测试一律以表单当前值为准：把当前设置随请求发出去，后端只取通知相关白名单字段，
+  // 空值按「未提供」回落到已保存配置。这样不必先保存就能测。
   const sendTestMessage = async () => {
     try {
       const result = await apiFetch('/admin/test/sendMessage', {
         method: 'POST',
-        body: JSON.stringify({ message: 'CF VPS Monitor 测试消息 - 通知配置成功!' }),
+        body: JSON.stringify({
+          message: 'CF VPS Monitor 测试消息 - 通知配置成功!',
+          settings,
+        }),
       });
       if (result.success) {
         toast.success('测试消息已发送');
@@ -601,6 +636,7 @@ export default function AdminNotifications() {
           channel: 'email',
           message: 'CF VPS Monitor 测试消息 - 邮件通知配置成功!',
           test_recipient: testRecipient.trim(),
+          settings,
         }),
       });
       if (result.success) {
@@ -623,6 +659,7 @@ export default function AdminNotifications() {
         body: JSON.stringify({
           channel: 'webhook',
           message: 'CF VPS Monitor 测试消息 - Webhook 通知配置成功!',
+          settings,
         }),
       });
       if (result.success) {
@@ -830,7 +867,9 @@ export default function AdminNotifications() {
                             type="password"
                             value={settings.email_smtp_password || ''}
                             onChange={(value) => updateSetting('email_smtp_password', value)}
-                            placeholder={settings.email_smtp_password_set === 'true' ? '已保存密码，留空则不修改' : 'SMTP 密码或授权码'}
+                            placeholder={settings.email_smtp_password_preview
+                              ? `${settings.email_smtp_password_preview}（留空则不修改）`
+                              : (settings.email_smtp_password_set === 'true' ? '已保存密码，留空则不修改' : 'SMTP 密码或授权码')}
                             width="34ch"
                           />
                         </div>
@@ -887,20 +926,28 @@ export default function AdminNotifications() {
                       <div>
                         <SettingInput
                           label="Bot Token"
-                          description="从 @BotFather 获取"
+                          description={settings.telegram_bot_token_set === 'true'
+                            ? '已配置，留空则保持不变；填写新值才会覆盖'
+                            : '从 @BotFather 获取'}
                           value={settings.telegram_bot_token || ''}
                           onChange={(value) => updateSetting('telegram_bot_token', value)}
-                          placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+                          placeholder={settings.telegram_bot_token_preview
+                            ? `${settings.telegram_bot_token_preview}（留空则不修改）`
+                            : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz'}
                           width="52ch"
                         />
                       </div>
                       <div>
                         <SettingInput
                           label="Chat ID"
-                          description="群组或用户 Chat ID"
+                          description={settings.telegram_chat_id_set === 'true'
+                            ? '已配置，留空则保持不变；填写新值才会覆盖'
+                            : '群组或用户 Chat ID'}
                           value={settings.telegram_chat_id || ''}
                           onChange={(value) => updateSetting('telegram_chat_id', value)}
-                          placeholder="-1001234567890"
+                          placeholder={settings.telegram_chat_id_preview
+                            ? `${settings.telegram_chat_id_preview}（留空则不修改）`
+                            : '-1001234567890'}
                           width="18ch"
                         />
                       </div>
@@ -966,7 +1013,9 @@ export default function AdminNotifications() {
                               type="password"
                               value={settings.webhook_secret || ''}
                               onChange={(event) => updateSensitiveWebhookSetting('webhook_secret', event.target.value)}
-                              placeholder={settings.webhook_secret_set === 'true' ? '已保存 Secret，留空则不修改' : '可选'}
+                              placeholder={settings.webhook_secret_preview
+                                ? `${settings.webhook_secret_preview}（留空则不修改）`
+                                : (settings.webhook_secret_set === 'true' ? '已保存 Secret，留空则不修改' : '可选')}
                             />
                           </label>
                         </div>
@@ -1058,7 +1107,9 @@ export default function AdminNotifications() {
                                 type="password"
                                 value={settings.webhook_password || ''}
                                 onChange={(event) => updateSensitiveWebhookSetting('webhook_password', event.target.value)}
-                                placeholder={settings.webhook_password_set === 'true' ? '已保存密码，留空则不修改' : 'password'}
+                                placeholder={settings.webhook_password_preview
+                                  ? `${settings.webhook_password_preview}（留空则不修改）`
+                                  : (settings.webhook_password_set === 'true' ? '已保存密码，留空则不修改' : 'password')}
                               />
                             </label>
                           </div>
@@ -1112,7 +1163,7 @@ export default function AdminNotifications() {
                     const notification = notificationMap.get(client.uuid);
                     const displayIp = clientDisplayIp(client);
                     const enabled = notification?.enable || false;
-                    const gracePeriod = notification?.grace_period || 180;
+                    const gracePeriod = notification?.grace_period || DEFAULT_GRACE_PERIOD_SEC;
                     const lastNotified = notification?.last_notified;
                     const lastNotifiedText = lastNotified
                       ? new Date(lastNotified).getFullYear() < 2000
@@ -1387,6 +1438,11 @@ export default function AdminNotifications() {
                 onChange={(e) => setBatchForm({ ...batchForm, grace_period: Number(e.target.value) })}
                 mt="1"
               />
+              {batchGraceMixed && (
+                <Text as="p" size="1" color="orange" mt="1">
+                  选中节点当前值不一致，已填入出现最多的值；保存后将统一为该值
+                </Text>
+              )}
             </label>
           </Flex>
           <Flex gap="2" justify="end" mt="4">
@@ -1460,6 +1516,11 @@ export default function AdminNotifications() {
                 onChange={(e) => setExpiryBatchForm({ ...expiryBatchForm, advance_days: Number(e.target.value) })}
                 mt="1"
               />
+              {expiryBatchDaysMixed && (
+                <Text as="p" size="1" color="orange" mt="1">
+                  选中节点当前值不一致，已填入出现最多的值；保存后将统一为该值
+                </Text>
+              )}
             </label>
           </Flex>
           <Flex gap="2" justify="end" mt="4">

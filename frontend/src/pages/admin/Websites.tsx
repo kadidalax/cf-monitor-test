@@ -34,7 +34,7 @@ import {
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
-import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Globe2, Grip, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import WebsiteHeartbeatBar from '../../components/WebsiteHeartbeatBar';
@@ -208,7 +208,7 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
               {...attributes}
               {...listeners}
             >
-              <GripVertical size={15} />
+              <Grip size={15} />
             </button>
           </Tooltip>
           <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />
@@ -277,7 +277,7 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
                 {...attributes}
                 {...listeners}
               >
-                <GripVertical size={15} />
+                <Grip size={15} />
               </button>
             </Tooltip>
             <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />

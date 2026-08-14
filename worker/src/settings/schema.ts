@@ -106,7 +106,7 @@ export const SETTING_SCHEMA = {
   },
   record_persist_interval_sec: {
     type: 'integer',
-    defaultValue: '120',
+    defaultValue: '30',
     public: false,
     min: 3,
     max: 3600,
@@ -120,7 +120,7 @@ export const SETTING_SCHEMA = {
   },
   record_high_watermark_rows: {
     type: 'integer',
-    defaultValue: '450000',
+    defaultValue: '700000',
     public: false,
     min: 1000,
     max: 10000000,
@@ -311,6 +311,13 @@ export const SETTING_SCHEMA = {
     type: 'boolean',
     defaultValue: 'true',
     public: false,
+  },
+  offline_confirm_rounds: {
+    type: 'integer',
+    defaultValue: '3',
+    public: false,
+    min: 1,
+    max: 10,
   },
   theme_bg_desktop: {
     type: 'string',

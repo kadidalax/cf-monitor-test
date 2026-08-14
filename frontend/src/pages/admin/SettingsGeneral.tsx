@@ -96,10 +96,11 @@ const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
 const DEFAULT_VIEWER_TTL_SEC = 120;
-const DEFAULT_RECORD_PERSIST_SEC = 120;
+const DEFAULT_RECORD_PERSIST_SEC = 30;
 const DEFAULT_PING_RECORD_PERSIST_SEC = 120;
-const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 450_000;
+const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 700_000;
 const DEFAULT_DAILY_VIEW_MINUTES = 60;
+const DEFAULT_OFFLINE_CONFIRM_ROUNDS = 3;
 const SUPABASE_FREE_DATABASE_STORAGE_REFERENCE_BYTES = 500 * 1024 * 1024;
 const SUPABASE_PRO_DATABASE_STORAGE_REFERENCE_BYTES = 8 * 1024 * 1024 * 1024;
 const ESTIMATED_MONITOR_RECORD_BYTES = 420;
@@ -664,8 +665,8 @@ export default function SettingsGeneral() {
                 />
               </div>
               <SettingInput
-                label="数据保留时间（小时）"
-                description="单位为小时，最大 72 小时（3 天）；同时作用于监控历史和 Ping 历史"
+                label="历史保留时长（小时）"
+                description="超过该时长的历史记录会被定时清理。上限 72 小时（3 天），填更大的值也会被截断；同时作用于监控历史与 Ping 历史"
                 value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
                 onChange={updateRetentionHours}
                 type="number"
@@ -673,8 +674,8 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="每日观看时间（分钟/天）"
-                description="用于配额估算，默认按每天实际打开前台查看 1 小时计算；不影响访客 10 分钟限时规则"
+                label="每日预计观看时长（分钟）"
+                description="仅用于下方的用量估算，不影响任何实际行为。按你每天大约打开前台看多久填写"
                 value={getSettingValue(settings, 'capacity_daily_view_minutes', String(DEFAULT_DAILY_VIEW_MINUTES))}
                 onChange={(value) => updateSetting('capacity_daily_view_minutes', value)}
                 type="number"
@@ -683,8 +684,8 @@ export default function SettingsGeneral() {
               />
 
               <SettingInput
-                label="采集间隔（秒）"
-                description="Agent 取样频率，单位为秒；有人看时按此频率实时上传，无人看时本地取样并按打包间隔上传"
+                label="有人观看时 · 上报间隔（秒）"
+                description="前台有访客在看时，Agent 每隔多久采集并上报一次。只在有人看的时候生效，越小越实时"
                 value={getSettingValue(settings, 'live_poll_active_interval_sec', String(DEFAULT_ACTIVE_SAMPLE_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_interval_sec', value)}
                 type="number"
@@ -692,35 +693,8 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="历史写入间隔（秒）"
-                description="实时数据仍会按采集间隔刷新，但历史记录至少间隔这么久才写入 Supabase"
-                value={getSettingValue(settings, 'record_persist_interval_sec', String(DEFAULT_RECORD_PERSIST_SEC))}
-                onChange={(value) => updateSetting('record_persist_interval_sec', value)}
-                type="number"
-                placeholder="120"
-                width="100%"
-              />
-              <SettingInput
-                label="Ping 采集与写入间隔（秒）"
-                description="统一控制 Ping 任务执行、结果上报和 Supabase 历史快照写入；最低 60 秒"
-                value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
-                onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
-                type="number"
-                placeholder="120"
-                width="100%"
-              />
-              <SettingInput
-                label="历史高水位行数（行）"
-                description="records、gpu_records、gpu_snapshots、ping_records、ping_snapshots 接近该行数时暂停历史写入，只保留实时展示，避免 Supabase 存储增长失控"
-                value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
-                onChange={(value) => updateSetting('record_high_watermark_rows', value)}
-                type="number"
-                placeholder="450000"
-                width="100%"
-              />
-              <SettingInput
-                label="无人看时打包上传间隔（秒）"
-                description="没有有效前台观看者时，按此间隔批量上传已采集的数据，最少 60 秒，单位为秒"
+                label="无人观看时 · 上报间隔（秒）"
+                description="没有访客在看时的上报间隔，最少 60 秒。绝大多数时间跑的是这一档，它才是实际的采集频率；当前每次上报 1 条，不打包"
                 value={getSettingValue(settings, 'live_poll_idle_interval_sec', String(DEFAULT_IDLE_UPLOAD_SEC))}
                 onChange={(value) => updateSetting('live_poll_idle_interval_sec', value)}
                 type="number"
@@ -728,12 +702,48 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="连接保活时长（秒）"
-                description="每个观看连接的实时刷新有效期，过期后停止实时更新，刷新页面重新计时，单位为秒"
+                label="观看状态保持时长（秒）"
+                description="访客离开页面后，仍按「有人观看」的高频维持多久才降回低频。避免刷新页面时频繁切换档位，与连接本身的保活无关"
                 value={getSettingValue(settings, 'live_poll_active_max_duration_sec', String(DEFAULT_VIEWER_TTL_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_max_duration_sec', value)}
                 type="number"
                 placeholder="120"
+                width="100%"
+              />
+              <SettingInput
+                label="历史落库最小间隔（秒）"
+                description="两次写入历史之间至少要隔多久，是一道节流下限而非固定频率。实际写入频率 = 本项与上方「上报间隔」中较大的那个——比它小的设置不会生效"
+                value={getSettingValue(settings, 'record_persist_interval_sec', String(DEFAULT_RECORD_PERSIST_SEC))}
+                onChange={(value) => updateSetting('record_persist_interval_sec', value)}
+                type="number"
+                placeholder="30"
+                width="100%"
+              />
+              <SettingInput
+                label="Ping 探测与落库间隔（秒）"
+                description="Agent 执行延迟探测的间隔，同时也是 Ping 记录写入历史的间隔；最低 60 秒。与上面的监控落库间隔互相独立"
+                value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
+                onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
+                type="number"
+                placeholder="120"
+                width="100%"
+              />
+              <SettingInput
+                label="历史写入熔断行数（行）"
+                description="五张历史表总行数达到该值后暂停写入历史，实时展示不受影响。这是防止撑爆数据库的保险丝——它数的是行数，不是字节，需按你的落库间隔换算"
+                value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
+                onChange={(value) => updateSetting('record_high_watermark_rows', value)}
+                type="number"
+                placeholder="700000"
+                width="100%"
+              />
+              <SettingInput
+                label="离线确认轮数（轮）"
+                description="连续多少轮判定为离线才真正发出告警，任意一轮判定在线立即清零。定时任务每 2 分钟一轮，默认 3 轮约等于持续 6 分钟离线才告警，用于挡掉瞬时抖动造成的误报"
+                value={getSettingValue(settings, 'offline_confirm_rounds', String(DEFAULT_OFFLINE_CONFIRM_ROUNDS))}
+                onChange={(value) => updateSetting('offline_confirm_rounds', value)}
+                type="number"
+                placeholder="3"
                 width="100%"
               />
             </div>

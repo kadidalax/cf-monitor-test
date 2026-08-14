@@ -148,14 +148,12 @@ function NetworkSummary({
           网络速率
         </Text>
         <div className="node-network-summary-values">
-          <span className="node-network-value is-up">
+          <span className="node-network-value is-up" aria-label="上传速率">
             <ArrowUp size={13} />
-            <span className="node-network-direction">上</span>
             <strong>{uploadSpeed}/s</strong>
           </span>
-          <span className="node-network-value is-down">
+          <span className="node-network-value is-down" aria-label="下载速率">
             <ArrowDown size={13} />
-            <span className="node-network-direction">下</span>
             <strong>{downloadSpeed}/s</strong>
           </span>
         </div>
@@ -167,14 +165,12 @@ function NetworkSummary({
           总流量
         </Text>
         <div className="node-network-summary-values">
-          <span className="node-network-value is-up">
+          <span className="node-network-value is-up" aria-label="上传总量">
             <ArrowUp size={13} />
-            <span className="node-network-direction">上</span>
             <strong>{formatBytes(totalUp)}</strong>
           </span>
-          <span className="node-network-value is-down">
+          <span className="node-network-value is-down" aria-label="下载总量">
             <ArrowDown size={13} />
-            <span className="node-network-direction">下</span>
             <strong>{formatBytes(totalDown)}</strong>
           </span>
         </div>

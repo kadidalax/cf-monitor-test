@@ -42,7 +42,7 @@ import {
   buildWebsiteRecoveryNotification,
   type NotificationMessage,
 } from './utils/notification-templates';
-import { evaluateOfflineNotificationEvent } from './utils/offline-notification';
+import { evaluateOfflineNotificationEvent, DEFAULT_OFFLINE_GRACE_PERIOD_SEC, DEFAULT_OFFLINE_CONFIRM_ROUNDS } from './utils/offline-notification';
 import type {
   Client as MonitorClient,
   ExpiryNotification,
@@ -435,11 +435,13 @@ const SCHEDULED_SETTING_KEYS = [
   'ping_record_preserve_time',
   'audit_log_preserve_time',
   'offline_notify_never_reported',
+  'offline_confirm_rounds',
   RECORD_CLEANUP_LAST_RUN_KEY,
 ];
 
 interface ScheduledRunContext {
   database: db.QueryDatabase;
+  env: Bindings;
   getSettings(): Promise<ScheduledSettings>;
   getAdminSettings(): Promise<ScheduledAdminSettings>;
   getClients(clientIds?: string[]): Promise<ScheduledMonitorClient[]>;
@@ -464,6 +466,7 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
 
   return {
     database,
+    env,
     getSettings() {
       settingsPromise ||= db.getSettingsByKeys(database, SCHEDULED_SETTING_KEYS, true);
       return settingsPromise;
@@ -542,6 +545,33 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   })}`);
 }
 
+/**
+ * 向 DO 查询判活结果。
+ *
+ * 返回 null 表示「这一轮拿不到可信信号」——调用方必须整轮跳过而不是当作离线，
+ * 否则 DO 短暂不可用就会把全部节点误报成离线。
+ */
+async function fetchOfflineLiveness(
+  env: Bindings,
+  items: Array<{ uuid: string; graceMs: number; fallbackLastSeen: number }>,
+): Promise<Record<string, { lastSeen: number | null; offline: boolean; streak: number }> | null> {
+  if (items.length === 0) return {};
+  try {
+    const stub = env.LIVE_DATA.get(env.LIVE_DATA.idFromName('global'));
+    const response = await stub.fetch('https://do/offline-evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clients: items }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json() as { ok?: boolean; clients?: Record<string, { lastSeen: number | null; offline: boolean; streak: number }> };
+    if (!data?.ok || !data.clients) return null;
+    return data.clients;
+  } catch {
+    return null;
+  }
+}
+
 async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listOfflineNotifications(context.database, true);
   const enabled: OfflineNotification[] = notifications.filter(item => item.enable);
@@ -558,20 +588,56 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
   );
   const latestMap = new Map(latestTimes.map(row => [row.client, row.last_time]));
 
+  // 判活以 DO 的 lastReportTime 为准（每条上报都刷新），数据库的最后记录时间只作兜底。
+  // 直接用 max(records.time) 会因为落库节流而落后 100~330 秒，是误报的根因。
+  const liveness = await fetchOfflineLiveness(
+    context.env,
+    enabled.map(item => {
+      const recordTime = Date.parse(latestMap.get(item.client) || '');
+      return {
+        uuid: item.client,
+        graceMs: Math.max(30, Number(item.grace_period || DEFAULT_OFFLINE_GRACE_PERIOD_SEC)) * 1000,
+        fallbackLastSeen: Number.isFinite(recordTime) ? recordTime : 0,
+      };
+    }),
+  );
+
+  if (!liveness) {
+    // 拿不到可信信号就整轮跳过：宁可晚报，也不要因为 DO 抖动把全部节点误报离线。
+    await db.insertAuditLog(
+      context.database,
+      'system',
+      'offline_check_skipped',
+      '离线检查已跳过：无法从 DO 获取判活信号，本轮不做任何告警',
+    );
+    return;
+  }
+
+  const streakThreshold = Math.max(1, Number(settings.offline_confirm_rounds || DEFAULT_OFFLINE_CONFIRM_ROUNDS));
+
   for (const item of enabled) {
     const client = clientMap.get(item.client);
     if (!client) continue;
 
-    const gracePeriod = Math.max(30, Number(item.grace_period || 180));
+    const gracePeriod = Math.max(30, Number(item.grace_period || DEFAULT_OFFLINE_GRACE_PERIOD_SEC));
+    const live = liveness[item.client];
+    // DO 认为在线时，用它的 lastSeen 覆盖数据库时间，避免被节流后的历史数据拖成离线
+    const lastTime = live?.lastSeen
+      ? new Date(live.lastSeen).toISOString()
+      : latestMap.get(item.client);
+
     const event = evaluateOfflineNotificationEvent({
       now,
       clientCreatedAt: client.created_at,
-      lastTime: latestMap.get(item.client),
+      lastTime,
       lastNotified: item.last_notified,
       gracePeriodSec: gracePeriod,
       notifyNeverReported,
     });
     if (!event) continue;
+
+    // 连续确认：达到阈值才真正告警。任意一轮判定在线，DO 侧的计数已自动清零。
+    if (event.type === 'offline' && (live?.streak ?? 0) < streakThreshold) continue;
 
     if (event.type === 'offline') {
       const sent = await sendNotification(context, buildOfflineNotification({

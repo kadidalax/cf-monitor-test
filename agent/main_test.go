@@ -1025,3 +1025,129 @@ func TestNormalizeTCPTargetAddress(t *testing.T) {
 		t.Fatalf("normalizeTCPTargetAddress(ipv6) = %q %q %q", address, host, port)
 	}
 }
+
+// 速率必须按接口独立基线计算：汇总标量做差会在接口集合变化时
+// 把新网卡的历史累计流量误算成一个采样周期内的增量（线上表现为几百 MB/s）。
+func TestNetworkDeltaIgnoresNewlyAppearedInterface(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_000, recv: 2_000},
+	}
+	// wg0 是新出现的隧道接口，已累计 30GB 历史流量
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_500, recv: 2_400},
+		"wg0":  {sent: 30 << 30, recv: 30 << 30},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 500 {
+		t.Fatalf("up delta = %d, want 500 (只应计 eth0 的增量)", up)
+	}
+	if down != 400 {
+		t.Fatalf("down delta = %d, want 400 (只应计 eth0 的增量)", down)
+	}
+}
+
+// 新接口在下一轮就应正常参与统计（只有出现的那一轮计 0）。
+func TestNetworkDeltaCountsInterfaceFromSecondSample(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_500, recv: 2_400},
+		"wg0":  {sent: 30 << 30, recv: 30 << 30},
+	}
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_600, recv: 2_500},
+		"wg0":  {sent: (30 << 30) + 700, recv: (30 << 30) + 800},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 800 {
+		t.Fatalf("up delta = %d, want 800 (eth0 100 + wg0 700)", up)
+	}
+	if down != 900 {
+		t.Fatalf("down delta = %d, want 900 (eth0 100 + wg0 800)", down)
+	}
+}
+
+// 单个接口计数器重置时只重建该接口基线，不影响同轮其他接口。
+func TestNetworkDeltaHandlesPerInterfaceReset(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 5_000, recv: 5_000},
+		"eth1": {sent: 9_000, recv: 9_000},
+	}
+	// eth1 计数器被重置（新值小于旧值），eth0 正常增长
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 5_300, recv: 5_200},
+		"eth1": {sent: 10, recv: 20},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 300 {
+		t.Fatalf("up delta = %d, want 300 (eth1 重置应计 0，不应拖累 eth0)", up)
+	}
+	if down != 200 {
+		t.Fatalf("down delta = %d, want 200", down)
+	}
+}
+
+// 接口消失不应产生负增量。
+func TestNetworkDeltaHandlesDisappearedInterface(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_000, recv: 1_000},
+		"tun0": {sent: 8_000, recv: 8_000},
+	}
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_200, recv: 1_100},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 200 || down != 100 {
+		t.Fatalf("delta = (%d, %d), want (200, 100)", up, down)
+	}
+}
+
+// 空输入不应 panic，也不应产生增量。
+func TestNetworkDeltaEmptyInputs(t *testing.T) {
+	if up, down := networkDelta(nil, nil); up != 0 || down != 0 {
+		t.Fatalf("nil/nil delta = (%d, %d), want (0, 0)", up, down)
+	}
+	if up, down := networkDelta(map[string]interfaceCounters{}, map[string]interfaceCounters{
+		"eth0": {sent: 5, recv: 5},
+	}); up != 0 || down != 0 {
+		t.Fatalf("首轮 delta = (%d, %d), want (0, 0)", up, down)
+	}
+}
+
+// 端到端：接口集合变化时，prepareReportForInterval 不应报出荒谬速率。
+func TestPrepareReportDoesNotSpikeOnInterfaceAppearance(t *testing.T) {
+	p := &reportPreparer{}
+
+	first := Report{
+		Timestamp:       1_000_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   1_000,
+		rawNetTotalDown: 1_000,
+		netPerInterface: map[string]interfaceCounters{
+			"eth0": {sent: 1_000, recv: 1_000},
+		},
+	}
+	p.prepareReportForInterval(first, 120)
+
+	// 120 秒后 wg0 出现，带着 30GB 历史累计
+	second := Report{
+		Timestamp:       1_120_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   1_000 + 1_200 + (30 << 30),
+		rawNetTotalDown: 1_000 + 2_400 + (30 << 30),
+		netPerInterface: map[string]interfaceCounters{
+			"eth0": {sent: 1_000 + 1_200, recv: 1_000 + 2_400},
+			"wg0":  {sent: 30 << 30, recv: 30 << 30},
+		},
+	}
+	out := p.prepareReportForInterval(second, 120)
+
+	if out.NetOut != 10 {
+		t.Fatalf("NetOut = %d, want 10 (1200 字节 / 120 秒)", out.NetOut)
+	}
+	if out.NetIn != 20 {
+		t.Fatalf("NetIn = %d, want 20 (2400 字节 / 120 秒)", out.NetIn)
+	}
+}

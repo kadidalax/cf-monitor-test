@@ -21,7 +21,7 @@ import {
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
-  GripVertical, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
+  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -101,7 +101,8 @@ function optimisticAdminClient(created: CommandClient): AdminClient {
     currency: '$',
     expired_at: '',
     traffic_limit: 0,
-    traffic_limit_type: 'max',
+    // 新增节点默认按「总计」统计流量，与 parseTrafficLimitType 的兜底值保持一致
+    traffic_limit_type: 'sum',
     sort_order: 0,
     token,
     token_last_used_at: null,
@@ -307,7 +308,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
                 {...attributes}
                 {...listeners}
               >
-                <GripVertical size={15} />
+                <Grip size={15} />
               </button>
             </Tooltip>
             <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(node.uuid)} />
@@ -319,18 +320,11 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
             onClick={() => onDetail(node)}
             title={node.name || '查看详情'}
           >
-            <span className="admin-node-card-title-copy">
-              <span className="admin-node-card-name-row">
-                <span className="admin-node-card-flag">
-                  <Flag region={node.region} size={20} />
-                </span>
-                <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
+            <span className="admin-node-card-name-row">
+              <span className="admin-node-card-flag">
+                <Flag region={node.region} size={20} />
               </span>
-              <span className="admin-node-card-badges">
-                <Badge size="1" variant="soft" color={isOnline ? 'green' : 'gray'}>{isOnline ? '在线' : '离线'}</Badge>
-                <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
-                {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
-              </span>
+              <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
             </span>
           </button>
 
@@ -340,6 +334,13 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
             <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
             <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
           </Flex>
+
+          {/* 徽章行独占第二行并跨到操作按钮列下方，让长地名能用满整卡宽度 */}
+          <span className="admin-node-card-badges">
+            <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
+            <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
+            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
+          </span>
         </div>
 
         <div className="admin-node-card-body">

@@ -165,6 +165,17 @@ type Report struct {
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
 	rawNetTotalDown int64
+	// 按接口名分列的累计计数，用于计算速率。
+	// 不能只靠上面的汇总标量做差：一旦参与统计的接口集合发生变化
+	//（隧道/VPN 接口起来、容器网卡出现），汇总值会跳增该接口的历史累计流量，
+	// 被当成一个采样周期内的增量，算出几百 MB/s 的荒谬速率。
+	netPerInterface map[string]interfaceCounters
+}
+
+// interfaceCounters 是单个网卡的累计收发字节数。
+type interfaceCounters struct {
+	sent uint64
+	recv uint64
 }
 
 type memorySnapshot struct {
@@ -363,6 +374,7 @@ type reportPreparer struct {
 	lastNetUp          int64
 	lastNetDown        int64
 	lastNetCountersRaw bool
+	lastNetPerInterface map[string]interfaceCounters
 	lastTimestampMs    int64
 	lastBasicInfoAt    time.Time
 	ready              bool
@@ -2091,6 +2103,47 @@ func sumNetworkCounters(counters []gnet.IOCountersStat, include string, exclude 
 	return sent, received
 }
 
+// collectPerInterfaceCounters 按接口名返回参与统计的网卡累计计数。
+// 速率计算需要它来做「按接口独立基线」，避免接口集合变化时把某块网卡的
+// 历史累计流量误算成一个采样周期内的增量。
+func collectPerInterfaceCounters(counters []gnet.IOCountersStat, include string, exclude string) map[string]interfaceCounters {
+	includeFilters := parseFilterList(include)
+	excludeFilters := parseFilterList(exclude)
+	perInterface := make(map[string]interfaceCounters, len(counters))
+	for _, counter := range counters {
+		if !includeNetworkInterface(counter.Name, includeFilters, excludeFilters) {
+			continue
+		}
+		perInterface[counter.Name] = interfaceCounters{
+			sent: counter.BytesSent,
+			recv: counter.BytesRecv,
+		}
+	}
+	return perInterface
+}
+
+// networkDelta 计算两次采样之间的收发增量，按接口独立处理：
+//   - 只累加「两次采样中都存在」的接口的增量；
+//   - 新出现的接口本轮只建基线、计 0，其历史累计流量不会被算成本周期增量；
+//   - 单个接口计数器回绕或重置（新值小于旧值）时只重建该接口基线，
+//     不影响同一轮里其他接口的正常增量。
+func networkDelta(previous, current map[string]interfaceCounters) (int64, int64) {
+	var up, down int64
+	for name, now := range current {
+		last, existed := previous[name]
+		if !existed {
+			continue
+		}
+		if now.sent >= last.sent {
+			up += int64(now.sent - last.sent)
+		}
+		if now.recv >= last.recv {
+			down += int64(now.recv - last.recv)
+		}
+	}
+	return up, down
+}
+
 func processCount() int {
 	if runtime.GOOS == "linux" {
 		if count := processCountFromProc("/proc"); count > 0 {
@@ -2504,6 +2557,7 @@ func collectReportWithInterval(intervalSec int) Report {
 		r.hasRawNetTotals = true
 		r.rawNetTotalUp = rawUp
 		r.rawNetTotalDown = rawDown
+		r.netPerInterface = collectPerInterfaceCounters(netIO, nicInclude, nicExclude)
 		if trafficTracker != nil {
 			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjust(rawUp, rawDown, now)
 		} else {
@@ -2587,6 +2641,7 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		p.lastNetUp = speedTotalUp
 		p.lastNetDown = speedTotalDown
 		p.lastNetCountersRaw = report.hasRawNetTotals
+		p.lastNetPerInterface = report.netPerInterface
 		p.lastTimestampMs = report.Timestamp
 		p.ready = true
 		return report
@@ -2595,17 +2650,26 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		p.lastNetUp = speedTotalUp
 		p.lastNetDown = speedTotalDown
 		p.lastNetCountersRaw = report.hasRawNetTotals
+		p.lastNetPerInterface = report.netPerInterface
 		p.lastTimestampMs = report.Timestamp
 		return report
 	}
 
-	upDelta := speedTotalUp - p.lastNetUp
-	downDelta := speedTotalDown - p.lastNetDown
-	if upDelta < 0 {
-		upDelta = 0
-	}
-	if downDelta < 0 {
-		downDelta = 0
+	var upDelta, downDelta int64
+	if report.netPerInterface != nil && p.lastNetPerInterface != nil {
+		// 按接口独立基线：只累加两次采样都存在的接口的增量。
+		// 新接口（隧道/VPN 起来）本轮只建基线，其历史累计流量不会被算成本周期增量。
+		upDelta, downDelta = networkDelta(p.lastNetPerInterface, report.netPerInterface)
+	} else {
+		// 拿不到分接口数据时退回汇总差值，并保留原有的负值钳位。
+		upDelta = speedTotalUp - p.lastNetUp
+		downDelta = speedTotalDown - p.lastNetDown
+		if upDelta < 0 {
+			upDelta = 0
+		}
+		if downDelta < 0 {
+			downDelta = 0
+		}
 	}
 
 	effectiveIntervalSec := intervalSec
@@ -2624,6 +2688,7 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 	report.NetIn = downDelta / int64(effectiveIntervalSec)
 	p.lastNetUp = speedTotalUp
 	p.lastNetDown = speedTotalDown
+	p.lastNetPerInterface = report.netPerInterface
 	p.lastTimestampMs = report.Timestamp
 
 	return report

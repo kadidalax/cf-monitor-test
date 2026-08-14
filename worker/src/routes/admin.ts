@@ -29,7 +29,8 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
-import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
+import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification, pickNotificationSettingOverrides } from '../utils/notification-dispatch';
+import { maskSecretPreview, isMaskedSecretPreview } from '../utils/secret-preview';
 import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
 import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
@@ -85,6 +86,12 @@ const ADMIN_CLIENTS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
+/**
+ * 新建节点默认的流量统计口径。
+ * 数据库列默认值仍是 'max'，改迁移会迫使存量用户重新初始化数据库，
+ * 因此在写入侧显式指定，只影响新建节点，存量节点不受影响。
+ */
+const DEFAULT_TRAFFIC_LIMIT_TYPE = 'sum';
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
 const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
@@ -135,6 +142,7 @@ const SETTINGS_SCOPE_KEYS = {
     'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
     'capacity_daily_view_minutes',
+    'offline_confirm_rounds',
   ],
   notification: [
     'notification_method',
@@ -1494,6 +1502,21 @@ adminRoutes.post('/clients/add', async (c) => {
       if (isClientUniqueConflict(error)) return c.json({ error: '客户端 UUID 或 Token 已存在' }, 409);
       throw error;
     }
+    // 新建节点的流量统计口径默认「总计」。必须在建完之后单独写一次：
+    // RPC cfm_create_client 的 insert 列是写死的（uuid/token/token_hash/
+    // token_rotated_at/name/sort_order），传再多字段也不会进库，
+    // 于是该列只会取数据库默认值，而那个默认值仍是 'max'。
+    // 改迁移能一步到位，但会迫使所有存量用户重新初始化数据库，代价不成比例。
+    // 失败不影响建节点本身，用户仍可在编辑里改。
+    try {
+      const updated = await timed(metrics, 'db_default_traffic_type', () =>
+        db.updateClientAndReturn(database, createdClient.uuid, {
+          traffic_limit_type: DEFAULT_TRAFFIC_LIMIT_TYPE,
+        }));
+      if (updated) createdClient = updated;
+    } catch {
+      // 忽略：节点已创建成功，默认口径没落上不算失败
+    }
     const safeClient = hideAdminClientToken(createdClient);
     invalidateAdminClientsCache();
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
@@ -2235,7 +2258,20 @@ adminRoutes.get('/settings', async (c) => {
       scoped.webhook_secret_set = settings.webhook_secret ? 'true' : 'false';
       scoped.webhook_headers_set = settings.webhook_headers_json ? 'true' : 'false';
       scoped.webhook_password_set = settings.webhook_password ? 'true' : 'false';
+      scoped.telegram_bot_token_set = settings.telegram_bot_token ? 'true' : 'false';
+      scoped.telegram_chat_id_set = settings.telegram_chat_id ? 'true' : 'false';
       scoped.webhook_url_host = webhookUrlHost(settings.webhook_url);
+      // 敏感项一律只下发掩码预览（两头明文、中间星号），原文不进 API 响应——
+      // 否则前端再怎么显示成星号，开发者工具里照样能看到原文。
+      scoped.telegram_bot_token_preview = maskSecretPreview(settings.telegram_bot_token);
+      // chat id 虽是标识符而非凭据，但它足以定位到具体的接收会话，
+      // 与 bot token 同等对待。个人 chat id 通常不足 12 位，会被整串打码。
+      scoped.telegram_chat_id_preview = maskSecretPreview(settings.telegram_chat_id);
+      scoped.email_smtp_password_preview = maskSecretPreview(settings.email_smtp_password);
+      scoped.webhook_secret_preview = maskSecretPreview(settings.webhook_secret);
+      scoped.webhook_password_preview = maskSecretPreview(settings.webhook_password);
+      delete scoped['telegram_bot_token'];
+      delete scoped['telegram_chat_id'];
       delete scoped['email_smtp_password'];
       delete scoped['webhook_url'];
       delete scoped['webhook_secret'];
@@ -2264,13 +2300,34 @@ adminRoutes.post('/settings', async (c) => {
     delete settingsBody.webhook_headers_set;
     delete settingsBody.webhook_password_set;
     delete settingsBody.webhook_url_host;
+    delete settingsBody.telegram_bot_token_set;
+    delete settingsBody.telegram_chat_id_set;
+    // 预览串是只读展示用的，绝不能被当成真实值写回
+    delete settingsBody.telegram_bot_token_preview;
+    delete settingsBody.telegram_chat_id_preview;
+    delete settingsBody.email_smtp_password_preview;
+    delete settingsBody.webhook_secret_preview;
+    delete settingsBody.webhook_password_preview;
     const clearWebhookUrl = settingsBody.webhook_url_clear === true || settingsBody.webhook_url_clear === 'true';
     const clearWebhookSecret = settingsBody.webhook_secret_clear === true || settingsBody.webhook_secret_clear === 'true';
+    const clearTelegramBotToken = settingsBody.telegram_bot_token_clear === true || settingsBody.telegram_bot_token_clear === 'true';
+    const clearTelegramChatId = settingsBody.telegram_chat_id_clear === true || settingsBody.telegram_chat_id_clear === 'true';
     delete settingsBody.webhook_url_clear;
     delete settingsBody.webhook_secret_clear;
+    delete settingsBody.telegram_bot_token_clear;
+    delete settingsBody.telegram_chat_id_clear;
+    // 兜底：万一前端把掩码预览当值回传，直接丢弃，避免把 "abcd********wxyz" 写进数据库
+    for (const key of ['telegram_bot_token', 'telegram_chat_id', 'email_smtp_password', 'webhook_secret', 'webhook_password']) {
+      if (isMaskedSecretPreview(settingsBody[key])) delete settingsBody[key];
+    }
     if (settingsBody.email_smtp_password === '') {
       delete settingsBody.email_smtp_password;
     }
+    // 空串表示「未改动」，回落到已保存值；要真正清空需显式带 _clear 标志
+    if (clearTelegramBotToken) settingsBody.telegram_bot_token = '';
+    else if (settingsBody.telegram_bot_token === '') delete settingsBody.telegram_bot_token;
+    if (clearTelegramChatId) settingsBody.telegram_chat_id = '';
+    else if (settingsBody.telegram_chat_id === '') delete settingsBody.telegram_chat_id;
     if (clearWebhookUrl) settingsBody.webhook_url = '';
     else if (settingsBody.webhook_url === '') delete settingsBody.webhook_url;
     if (clearWebhookSecret) settingsBody.webhook_secret = '';
@@ -3096,7 +3153,11 @@ adminRoutes.post('/test/sendMessage', async (c) => {
     const requestedChannel = typeof body.channel === 'string' && body.channel.trim() !== ''
       ? body.channel.trim()
       : undefined;
-    const adminSettings = buildAdminSettings(await db.getSettingsByKeys(database, [...NOTIFICATION_DISPATCH_SETTING_KEYS]));
+    // 通知测试以「表单当前值」为准：请求体里带的配置覆盖已保存值，未带的回落到数据库。
+    // 覆盖项与已保存值一起过 buildAdminSettings，走同一套归一化，且本请求不写库。
+    const storedSettings = await db.getSettingsByKeys(database, [...NOTIFICATION_DISPATCH_SETTING_KEYS]);
+    const overrides = pickNotificationSettingOverrides(body.settings);
+    const adminSettings = buildAdminSettings({ ...storedSettings, ...overrides });
     selectedChannel = requestedChannel || adminSettings.notification_method;
     if (!['telegram', 'email', 'webhook', 'none'].includes(selectedChannel)) {
       return c.json({ error: '未知通知方式' }, 400);

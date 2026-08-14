@@ -19,6 +19,7 @@ import {
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
+import { isRecordPersistDue } from '../utils/record-persist';
 import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
 
 // 客户端状态
@@ -31,7 +32,7 @@ interface ClientState {
   expiresAt?: number;
 }
 
-const RECORD_PERSIST_INTERVAL_MS = 120_000;
+const RECORD_PERSIST_INTERVAL_MS = 30_000;
 const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
@@ -39,7 +40,7 @@ const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
-const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 450_000;
+const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 700_000;
 const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
 const RECORD_HIGH_WATERMARK_MAX_ROWS = 10_000_000;
 const RECORD_CAPACITY_CACHE_FAR_MS = 6 * 60 * 60_000;
@@ -1643,6 +1644,10 @@ export class LiveDataDO {
       return this.removeAgentAuthSnapshot(request);
     }
 
+    if (request.method === 'POST' && url.pathname === '/offline-evaluate') {
+      return this.evaluateOfflineLiveness(request);
+    }
+
     if (request.method === 'GET' && url.pathname === '/admin-clients-snapshot') {
       const snapshot = await this.readAdminClientsSnapshot();
       return snapshot
@@ -1893,6 +1898,74 @@ export class LiveDataDO {
     await this.scheduleExpiryAlarm(now);
   }
 
+  /**
+   * 离线判活。
+   *
+   * 为什么不能沿用 `max(records.time)`：那是被落库节流过滤后的历史数据，
+   * 每客户端每 120 秒最多写一行，且重连补发的那条通常会被节流吃掉，
+   * 于是「最后一条记录的时间」会比「最后一次上报」落后 100~330 秒，
+   * 撞上宽限期就产生误报。而 `this.clients` 里的 `lastReportTime`
+   * **每条上报都会刷新**，且随 WebSocket attachment 一起持久化，休眠重建不丢。
+   *
+   * 连续确认：单次判定可能因为 DO 刚重启、attachment 尚未恢复而偏悲观，
+   * 因此这里维护每客户端的连续离线次数，由调用方决定达到几次才真正告警。
+   * 只要有一次判定在线，计数立即清零。
+   */
+  private async evaluateOfflineLiveness(request: Request): Promise<Response> {
+    let payload: JsonObject;
+    try {
+      payload = await request.json() as JsonObject;
+    } catch {
+      return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+    }
+
+    const now = Date.now();
+    const items = Array.isArray(payload.clients) ? payload.clients : [];
+    const results: Record<string, {
+      lastSeen: number | null;
+      offline: boolean;
+      streak: number;
+    }> = {};
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue;
+      const entry = raw as JsonObject;
+      const uuid = typeof entry.uuid === 'string' ? entry.uuid : '';
+      if (!uuid) continue;
+      const graceMs = Number(entry.graceMs);
+      if (!Number.isFinite(graceMs) || graceMs <= 0) continue;
+
+      const live = this.clients.get(uuid);
+      const lastSeen = live && Number.isFinite(live.lastReportTime) ? live.lastReportTime : null;
+      // 调用方可传入数据库侧的最后记录时间，两者取较新——DO 刚重启且 attachment
+      // 尚未恢复时，数据库的值可以兜底，避免把在线节点判成离线。
+      const fallback = Number(entry.fallbackLastSeen);
+      const effective = Math.max(
+        lastSeen ?? 0,
+        Number.isFinite(fallback) && fallback > 0 ? fallback : 0,
+      );
+      const offline = effective <= 0 || now - effective >= graceMs;
+
+      const streakKey = `offline:streak:${uuid}`;
+      let streak = 0;
+      if (offline) {
+        const stored = Number(await this.state.storage.get<number>(streakKey) || 0);
+        streak = (Number.isFinite(stored) ? stored : 0) + 1;
+        await this.state.storage.put(streakKey, streak);
+      } else {
+        await this.state.storage.delete(streakKey);
+      }
+
+      results[uuid] = {
+        lastSeen: effective > 0 ? effective : null,
+        offline,
+        streak,
+      };
+    }
+
+    return Response.json({ ok: true, now, clients: results });
+  }
+
   private async isPersistDue(clientId: string, now: number): Promise<boolean> {
     const storageKey = `record:persist:${clientId}`;
     let lastPersist = this.recordLastPersistAt.get(clientId);
@@ -1900,10 +1973,9 @@ export class LiveDataDO {
       lastPersist = Number(await this.state.storage.get<number>(storageKey) || 0);
       this.recordLastPersistAt.set(clientId, lastPersist);
     }
-    if (now - lastPersist < this.recordPersistIntervalMs) {
-      return false;
-    }
-    return true;
+    // 用带提前量的判定：上报间隔与落库间隔相等时，抖动导致的「早到几毫秒」
+    // 不应跳过本轮落库，否则 last_time 会拉开到两倍间隔并误报离线。
+    return isRecordPersistDue(now - lastPersist, this.recordPersistIntervalMs);
   }
 
   private async markPersistAttempt(clientId: string, now: number): Promise<void> {
