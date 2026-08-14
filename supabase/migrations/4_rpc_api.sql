@@ -1358,7 +1358,7 @@ as $$
       records.client,
       case
         when input_metric = 'ram' then case when ram_total > 0 then (ram::double precision / ram_total) * 100 else 0 end
-        when input_metric = 'load' then coalesce(load, 0)
+        when input_metric = 'load' then load
         when input_metric = 'disk' then case when disk_total > 0 then (disk::double precision / disk_total) * 100 else 0 end
         when input_metric = 'temp' then coalesce(temp, 0)
         else coalesce(cpu, 0)
@@ -1367,6 +1367,9 @@ as $$
     join ids on ids.client = records.client
     where records.time >= input_start::timestamptz
       and records.time <= input_end::timestamptz
+      -- 负载不可用的采样点直接排除：既不计入 samples，也不拉低均值。
+      -- 若当成 0 参与统计，节点看起来「一直不超阈值」，与「没有数据」是两回事。
+      and (input_metric <> 'load' or records.load is not null)
   )
   select coalesce(jsonb_agg(to_jsonb(row_data) order by client), '[]'::jsonb)
   from (
@@ -1439,6 +1442,11 @@ begin
   );
 end;
 $$;
+
+-- 负载「不可用」用 null 表示：lxcfs 未虚拟化 loadavg 的容器读到的是宿主机负载，
+-- 报 0 会被读成空闲。存量库的 records.load 建成了 not null default 0，这里幂等放开。
+alter table records alter column load drop not null;
+alter table records alter column load drop default;
 
 alter table website_monitors add column if not exists agent_probe_mode text not null default 'off';
 alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;

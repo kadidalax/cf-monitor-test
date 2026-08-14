@@ -52,7 +52,9 @@ create table if not exists records (
   ram_total bigint not null default 0,
   swap bigint not null default 0,
   swap_total bigint not null default 0,
-  load double precision not null default 0,
+  -- load 允许 null：容器内 /proc/loadavg 透传宿主机时探针显式上报「不可用」，
+  -- 用 null 而不是 0（0 会被读成空闲，比错值更误导）。
+  load double precision,
   temp double precision not null default 0,
   disk bigint not null default 0,
   disk_total bigint not null default 0,

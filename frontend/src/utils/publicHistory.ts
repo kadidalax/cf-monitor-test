@@ -7,7 +7,8 @@ export interface PublicMonitorRecord {
   swap_total: number;
   disk: number;
   disk_total: number;
-  load: number;
+  // null = 探针报告本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
+  load: number | null;
   temp: number;
   net_in: number;
   net_out: number;
@@ -54,11 +55,23 @@ function allNumbers<K extends string>(values: Record<K, number | null>): values 
   return Object.values(values).every((value): value is number => value !== null);
 }
 
+// 负载允许显式为 null（不可用）。这里必须与 numberField 分开：
+// numberField 把 null 当作「字段非法」，会让 allNumbers 判否而**整条记录被丢弃**——
+// 后果是那台节点的历史图表整段消失，而不是负载一项缺失。
+// 返回 undefined 表示字段真的非法，整条丢弃。
+function loadField(record: Record<string, unknown>): number | null | undefined {
+  if (!('load' in record) || record.load === undefined) return 0;
+  if (record.load === null) return null;
+  return typeof record.load === 'number' && Number.isFinite(record.load) ? record.load : undefined;
+}
+
 export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRecord | null {
   const record = asRecord(payload);
   if (!record) return null;
   const time = timeField(record);
   if (!time) return null;
+  const load = loadField(record);
+  if (load === undefined) return null;
   const values = {
     cpu: numberField(record, 'cpu'),
     ram: numberField(record, 'ram'),
@@ -67,7 +80,6 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     swap_total: numberField(record, 'swap_total'),
     disk: numberField(record, 'disk'),
     disk_total: numberField(record, 'disk_total'),
-    load: numberField(record, 'load'),
     temp: numberField(record, 'temp'),
     net_in: numberField(record, 'net_in'),
     net_out: numberField(record, 'net_out'),
@@ -89,7 +101,7 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     swap_total: values.swap_total,
     disk: values.disk,
     disk_total: values.disk_total,
-    load: values.load,
+    load,
     temp: values.temp,
     net_in: values.net_in,
     net_out: values.net_out,

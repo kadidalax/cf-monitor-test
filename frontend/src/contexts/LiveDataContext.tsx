@@ -34,7 +34,8 @@ export interface LiveRecord {
   net_out: number;
   net_total_up: number;
   net_total_down: number;
-  load: number;
+  // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
+  load: number | null;
   temp: number;
   uptime: number;
   process_count: number;

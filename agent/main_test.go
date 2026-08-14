@@ -831,8 +831,169 @@ func TestProcDefaultRouteInterfacesMissingFilesIsEmpty(t *testing.T) {
 	}
 }
 
-// 回归锁（扫源码）：采集点必须把同一个网卡集合同时喂给累计流量和实时速率。
+// ===== 负载可信度判定 =====
 //
+// test2-LXC 实测：1 核 LXC 容器上报负载 9.29，而 /proc/loadavg 的任务总数是 9500，
+// 容器里只有 17 个进程——那个负载是宿主机的。lxcfs 挂了但没开 lxcfs.loadavg=1。
+
+func TestLoadAverageTrustworthy(t *testing.T) {
+	cases := []struct {
+		name           string
+		taskTotal      int
+		visibleThreads int
+		inContainer    bool
+		want           bool
+	}{
+		{"物理机一律信任", 9500, 60, false, true},
+		{"LXC 透传宿主机（实测数量级）", 9482, 60, true, false},
+		{"容器内 lxcfs 已虚拟化", 55, 40, true, true},
+		{"容器内多线程应用不算穿透", 500, 500, true, true},
+		{"差额小于绝对门限不判穿透", 125, 30, true, true},
+		{"读不到任务总数时按可信处理", 0, 60, true, true},
+		{"数不到线程时按可信处理", 9482, 0, true, true},
+	}
+	for _, tc := range cases {
+		if got := loadAverageTrustworthy(tc.taskTotal, tc.visibleThreads, tc.inContainer); got != tc.want {
+			t.Fatalf("%s: loadAverageTrustworthy(%d, %d, %v) = %v, want %v",
+				tc.name, tc.taskTotal, tc.visibleThreads, tc.inContainer, got, tc.want)
+		}
+	}
+}
+
+func TestParseLoadAverageTaskTotal(t *testing.T) {
+	cases := map[string]int{
+		"9.71 10.09 10.90 3/9482 3197878": 9482,
+		"0.00 0.01 0.05 1/122 4242":       122,
+		"0.00 0.01 0.05":                  0,
+		"0.00 0.01 0.05 broken 4242":      0,
+		"":                                0,
+	}
+	for input, want := range cases {
+		if got := parseLoadAverageTaskTotal(input); got != want {
+			t.Fatalf("parseLoadAverageTaskTotal(%q) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestContainerRuntimeName(t *testing.T) {
+	t.Run("systemd container 标记", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{"run/systemd/container": "lxc\n"})
+		if got := containerRuntimeName(root); got != "lxc" {
+			t.Fatalf("containerRuntimeName = %q, want lxc", got)
+		}
+	})
+	t.Run("docker 标记文件", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{".dockerenv": ""})
+		if got := containerRuntimeName(root); got != "docker" {
+			t.Fatalf("containerRuntimeName = %q, want docker", got)
+		}
+	})
+	t.Run("lxcfs 挂载", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{
+			"proc/mounts": "lxcfs /proc/loadavg fuse.lxcfs rw,nosuid,nodev,relatime 0 0\n",
+		})
+		if got := containerRuntimeName(root); got != "lxc" {
+			t.Fatalf("containerRuntimeName = %q, want lxc", got)
+		}
+	})
+	t.Run("物理机没有任何标记", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{
+			"proc/mounts":   "/dev/vda1 / ext4 rw,relatime 0 0\n",
+			"proc/1/cgroup": "0::/init.scope\n",
+		})
+		if got := containerRuntimeName(root); got != "" {
+			t.Fatalf("containerRuntimeName = %q, want empty", got)
+		}
+	})
+}
+
+func TestCountVisibleThreads(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"1/task/1/status":    "",
+		"1/task/17/status":   "",
+		"42/task/42/status":  "",
+		"self/task/1/status": "",
+		"uptime":             "1 2",
+	})
+	if got := countVisibleThreads(root); got != 3 {
+		t.Fatalf("countVisibleThreads = %d, want 3 (非数字目录不计入)", got)
+	}
+}
+
+// 端到端复刻 test2-LXC 的现场：lxcfs 挂载 + loadavg 报 9482 个任务，
+// 而命名空间里只看得到寥寥几个线程。
+func TestEvaluateLoadAverageTrustOnHostPassthroughContainer(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"run/systemd/container":  "lxc\n",
+		"proc/mounts":            "lxcfs /proc/loadavg fuse.lxcfs rw 0 0\n",
+		"proc/loadavg":           "9.71 10.09 10.90 3/9482 3197878\n",
+		"proc/1/task/1/status":   "",
+		"proc/17/task/17/status": "",
+	})
+
+	trusted, detail := evaluateLoadAverageTrust(root)
+	if trusted {
+		t.Fatalf("expected host passthrough to be distrusted, detail=%q", detail)
+	}
+	if !strings.Contains(detail, "9482") {
+		t.Fatalf("detail = %q, want it to carry the observed task total", detail)
+	}
+}
+
+func TestEvaluateLoadAverageTrustOnBareMetal(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"proc/mounts":  "/dev/vda1 / ext4 rw,relatime 0 0\n",
+		"proc/loadavg": "9.71 10.09 10.90 3/9482 3197878\n",
+	})
+
+	trusted, _ := evaluateLoadAverageTrust(root)
+	if !trusted {
+		t.Fatal("bare metal must always trust /proc/loadavg (物理机零回归)")
+	}
+}
+
+// 线路契约：不可信时序列化成 null，而不是 0。0 会被读成「空闲」，比错值更误导。
+func TestReportSerializesUnavailableLoadAsNull(t *testing.T) {
+	unavailable, err := json.Marshal(Report{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(unavailable), `"load":null`) {
+		t.Fatalf("payload = %s, want \"load\":null", unavailable)
+	}
+
+	value := 1.25
+	available, err := json.Marshal(Report{Load: &value})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(available), `"load":1.25`) {
+		t.Fatalf("payload = %s, want \"load\":1.25", available)
+	}
+}
+
+func writeFileTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+}
+
+// 回归锁（扫源码）：采集点必须把同一个网卡集合同时喂给累计流量和实时速率。
+
 // 纯逻辑测试挡不住这个回归——两个函数各自都对，只要调用点分别过滤一次，
 // 就会重新出现「速率按一套网卡算、总量按另一套算」的自相矛盾，而所有单元测试仍全绿。
 // 上一批修网速尖刺时只改了速率那条路径，总量仍走标量汇总，正是这个坑。

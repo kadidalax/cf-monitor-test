@@ -66,7 +66,8 @@ export interface MonitorRecord {
   ram_total: number;
   swap: number;
   swap_total: number;
-  load: number;
+  // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
+  load: number | null;
   temp: number;
   disk: number;
   disk_total: number;

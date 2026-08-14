@@ -166,13 +166,16 @@ type BasicInfo struct {
 }
 
 type Report struct {
-	CPU                 float64              `json:"cpu"`
-	GPU                 float64              `json:"gpu"`
-	RAM                 int64                `json:"ram"`
-	RAMTotal            int64                `json:"ram_total"`
-	Swap                int64                `json:"swap"`
-	SwapTotal           int64                `json:"swap_total"`
-	Load                float64              `json:"load"`
+	CPU       float64 `json:"cpu"`
+	GPU       float64 `json:"gpu"`
+	RAM       int64   `json:"ram"`
+	RAMTotal  int64   `json:"ram_total"`
+	Swap      int64   `json:"swap"`
+	SwapTotal int64   `json:"swap_total"`
+	// Load 为空指针表示「本机负载不可取信」（例如 lxcfs 未虚拟化 loadavg 的 LXC
+	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
+	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
+	Load                *float64             `json:"load"`
 	Temp                float64              `json:"temp"`
 	Disk                int64                `json:"disk"`
 	DiskTotal           int64                `json:"disk_total"`
@@ -404,13 +407,13 @@ type serverMessage struct {
 type agentPolicy = serverMessage
 
 type reportPreparer struct {
-	lastNetUp          int64
-	lastNetDown        int64
-	lastNetCountersRaw bool
+	lastNetUp           int64
+	lastNetDown         int64
+	lastNetCountersRaw  bool
 	lastNetPerInterface map[string]interfaceCounters
-	lastTimestampMs    int64
-	lastBasicInfoAt    time.Time
-	ready              bool
+	lastTimestampMs     int64
+	lastBasicInfoAt     time.Time
+	ready               bool
 }
 
 type pingReportState struct {
@@ -2424,6 +2427,158 @@ func networkDelta(previous, current map[string]interfaceCounters) (int64, int64)
 	return up, down
 }
 
+// ===== 负载可信度判定 =====
+//
+// LXC 容器上 lxcfs 若没开 lxcfs.loadavg=1，/proc/loadavg 会**直接透传宿主机数值**。
+// test2-LXC 实测：1 核容器上报负载 9.29，而容器内 CPU 只有 26%、进程数 17，
+// loadavg 的任务总数却是 9500——这个数字只可能来自宿主机。
+// 后果是任何「负载 > N」的告警规则在这类容器上长期处于触发态。
+//
+// 判定只在**容器里**做，物理机 / KVM 一律直接信任 /proc/loadavg，
+// 从结构上保证非容器环境零回归。
+
+// 任务总数超过本机可见线程数这么多倍，且绝对差额也够大，才判为宿主机穿透。
+// 用线程数而不是进程数比较：容器内跑多线程应用（17 进程 500 线程）时，
+// 拿进程数做分母会把正常值误判成穿透。
+const loadAverageTaskRatioLimit = 4
+const loadAverageTaskAbsoluteGap = 100
+const loadAverageTrustCacheTTL = 5 * time.Minute
+
+var (
+	loadAverageTrustMu     sync.Mutex
+	loadAverageTrustValue  = true
+	loadAverageTrustStamp  time.Time
+	loadAverageTrustLogged bool
+)
+
+// containerRuntimeName 检测容器环境，返回运行时名称，空字符串表示不是容器。
+// 只用世界可读的信号：agent 以非 root 用户运行，/proc/1/environ 读不到。
+func containerRuntimeName(root string) string {
+	if data, err := os.ReadFile(filepath.Join(root, "run", "systemd", "container")); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			return name
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".dockerenv")); err == nil {
+		return "docker"
+	}
+	if _, err := os.Stat(filepath.Join(root, "run", ".containerenv")); err == nil {
+		return "podman"
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "proc", "mounts")); err == nil {
+		if strings.Contains(string(data), "lxcfs") {
+			return "lxc"
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "proc", "1", "cgroup")); err == nil {
+		content := string(data)
+		for _, marker := range []string{"/docker/", "/lxc/", "/kubepods", "/podman"} {
+			if strings.Contains(content, marker) {
+				return strings.Trim(marker, "/")
+			}
+		}
+	}
+	return ""
+}
+
+// parseLoadAverageTaskTotal 取 /proc/loadavg 第四字段 running/total 里的 total。
+func parseLoadAverageTaskTotal(line string) int {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return 0
+	}
+	parts := strings.SplitN(fields[3], "/", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	total, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || total < 0 {
+		return 0
+	}
+	return total
+}
+
+// countVisibleThreads 统计本 PID 命名空间里可见的线程数（/proc/<pid>/task 的条目数）。
+func countVisibleThreads(root string) int {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, entry := range entries {
+		if _, err := strconv.ParseInt(entry.Name(), 10, 64); err != nil {
+			continue
+		}
+		tasks, err := os.ReadDir(filepath.Join(root, entry.Name(), "task"))
+		if err != nil {
+			// 进程可能在扫描过程中退出；至少按一个线程计。
+			total++
+			continue
+		}
+		total += len(tasks)
+	}
+	return total
+}
+
+// loadAverageTrustworthy 判断 /proc/loadavg 是否反映本机（而非宿主机）。
+func loadAverageTrustworthy(taskTotal int, visibleThreads int, inContainer bool) bool {
+	if !inContainer {
+		return true
+	}
+	// 数据不足时按可信处理：宁可保留一个可能不准的值，也不要凭猜测把好节点的负载抹掉。
+	if taskTotal <= 0 || visibleThreads <= 0 {
+		return true
+	}
+	if taskTotal <= visibleThreads*loadAverageTaskRatioLimit {
+		return true
+	}
+	return taskTotal-visibleThreads <= loadAverageTaskAbsoluteGap
+}
+
+func evaluateLoadAverageTrust(root string) (bool, string) {
+	runtimeName := containerRuntimeName(root)
+	if runtimeName == "" {
+		return true, ""
+	}
+	data, err := os.ReadFile(filepath.Join(root, "proc", "loadavg"))
+	if err != nil {
+		return true, runtimeName
+	}
+	taskTotal := parseLoadAverageTaskTotal(string(data))
+	visibleThreads := countVisibleThreads(filepath.Join(root, "proc"))
+	if loadAverageTrustworthy(taskTotal, visibleThreads, true) {
+		return true, runtimeName
+	}
+	return false, fmt.Sprintf("%s container, loadavg reports %d tasks but only %d threads are visible here",
+		runtimeName, taskTotal, visibleThreads)
+}
+
+// loadAverageReportable 决定本轮是否上报负载。判定结果缓存，避免每个采样周期都扫 /proc。
+func loadAverageReportable() bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+
+	loadAverageTrustMu.Lock()
+	defer loadAverageTrustMu.Unlock()
+
+	if !loadAverageTrustStamp.IsZero() && time.Since(loadAverageTrustStamp) < loadAverageTrustCacheTTL {
+		return loadAverageTrustValue
+	}
+
+	trusted, detail := evaluateLoadAverageTrust("/")
+	loadAverageTrustValue = trusted
+	loadAverageTrustStamp = time.Now()
+	if !trusted && !loadAverageTrustLogged {
+		loadAverageTrustLogged = true
+		log.Printf("load average is not container-local (%s); reporting load as unavailable", detail)
+	}
+	if trusted {
+		loadAverageTrustLogged = false
+	}
+	return trusted
+}
+
 func processCount() int {
 	if runtime.GOOS == "linux" {
 		if count := processCountFromProc("/proc"); count > 0 {
@@ -2828,8 +2983,9 @@ func collectReportWithInterval(intervalSec int) Report {
 			r.SwapTotal = int64(memory.swapTotal)
 		}
 	}
-	if loadInfo, err := load.Avg(); err == nil {
-		r.Load = loadInfo.Load1
+	if loadInfo, err := load.Avg(); err == nil && loadAverageReportable() {
+		value := loadInfo.Load1
+		r.Load = &value
 	}
 	r.Disk, r.DiskTotal = diskUsageTotals()
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {

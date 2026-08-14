@@ -9,7 +9,7 @@ export type MonitorReportPayload = JsonObject & {
   ram_total: number;
   swap: number;
   swap_total: number;
-  load: number;
+  load: number | null;
   temp: number;
   disk: number;
   disk_total: number;
@@ -67,6 +67,14 @@ function boundedInteger(min: number, max: number, ...values: unknown[]): number 
   return Math.trunc(boundedNumber(min, max, ...values));
 }
 
+// 负载是唯一允许「不可用」的指标：探针在 lxcfs 未虚拟化 loadavg 的容器里读到的是
+// 宿主机负载，与其报一个错值或 0（会被读成空闲），不如显式报 null。
+// 只有探针**显式送了 null** 才算不可用；字段缺失仍按 0 处理，老探针行为不变。
+function boundedNullableNumber(min: number, max: number, primary: unknown, ...fallbacks: unknown[]): number | null {
+  if (primary === null) return null;
+  return boundedNumber(min, max, primary, ...fallbacks);
+}
+
 function boundedString(value: unknown, maxLength: number): string {
   return String(value || '').trim().slice(0, maxLength);
 }
@@ -113,7 +121,7 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     ram_total: boundedNumber(0, MAX_COUNTER_VALUE, report.ram_total, ram.total),
     swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
-    load: boundedNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
+    load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
     temp: boundedNumber(0, MAX_TEMPERATURE_C, report.temp, gpuData.temperature),
     disk: boundedNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
     disk_total: boundedNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
@@ -142,7 +150,7 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     ram_total: report.ram_total || 0,
     swap: report.swap || 0,
     swap_total: report.swap_total || 0,
-    load: report.load || 0,
+    load: report.load ?? null,
     temp: report.temp || 0,
     disk: report.disk || 0,
     disk_total: report.disk_total || 0,
