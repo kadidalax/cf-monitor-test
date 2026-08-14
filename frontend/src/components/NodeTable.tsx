@@ -172,7 +172,7 @@ function ExpandedNodeDetails({
               value={`↑ ${formatSpeed(live?.net_out || 0)} ↓ ${formatSpeed(live?.net_in || 0)}`}
             />
             <DetailRow
-              label="总流量"
+              label="流量"
               value={`↑ ${formatBytes(live?.net_total_up || 0)} ↓ ${formatBytes(live?.net_total_down || 0)}`}
             />
             <DetailRow label="IPv4" value={formatSupport(node.has_ipv4, node.ipv4)} />

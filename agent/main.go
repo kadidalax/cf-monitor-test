@@ -44,6 +44,15 @@ const publicIPProbeTimeout = 3 * time.Second
 const publicIPProbeBodyLimit = 4096
 const maxReasonableCgroupLimit = uint64(1 << 60)
 
+// defaultExcludedNetworkInterfacePrefixes 是默认不计入流量/速率的网卡前缀。
+//
+// 两类：
+//   - 桥接、容器、虚拟交换机（br/docker/veth/...）——本机内部转发，不是进出 VPS 的流量。
+//   - 隧道与 VPN（wg/tun/tailscale/warp/...）——**与物理网卡承载同一份流量**，
+//     同时统计会把同一份流量数两遍，正是面板远高于商家计量的原因。
+//
+// ⚠️ 常见的反向直觉是「不统计隧道会漏算」，方向是反的：数据要离开本机必然经过
+// 物理网卡，那里已经算过一遍；隧道口上再算一遍才是多算。
 var defaultExcludedNetworkInterfacePrefixes = []string{
 	"br",
 	"cni",
@@ -57,6 +66,30 @@ var defaultExcludedNetworkInterfacePrefixes = []string{
 	"tap",
 	"fwbr",
 	"fwpr",
+	// 隧道 / VPN / 叠加网络
+	"wg",
+	"tun",
+	"utun",
+	"tailscale",
+	"warp",
+	"zt",
+	"nordlynx",
+	"proton",
+	"mullvad",
+	"gre",
+	"ipip",
+	"sit",
+	"ip6tnl",
+	"vxlan",
+	"geneve",
+	"nebula",
+	"gif",
+	"stf",
+	"awdl",
+	"llw",
+	// 纯本地/测试用虚拟设备
+	"dummy",
+	"ifb",
 }
 
 var (
@@ -2089,12 +2122,261 @@ func includeNetworkInterface(name string, includeFilters []string, excludeFilter
 	return !interfaceMatchesFilter(name, excludeFilters)
 }
 
-func sumNetworkCounters(counters []gnet.IOCountersStat, include string, exclude string) (int64, int64) {
+// selectTrafficInterfaces 决定参与统计的网卡集合。
+//
+// **累计流量与实时速率必须共用同一个集合**，否则两个数字会互相矛盾（曾出现过：
+// 速率按网卡独立基线算、流量按标量汇总算，同一台机器上速率正常而总量翻倍）。
+// 因此这里只算一次，两条路径都吃这份结果。
+//
+// 规则（优先级由上到下）：
+//  1. 显式 --nic-include：完全听用户的，只在其中再应用 --nic-exclude。
+//     多公网口分走不同线路的机器要靠这个。
+//  2. 否则先剔除虚拟/隧道网卡（见 defaultExcludedNetworkInterfacePrefixes）。
+//  3. 若剩下的网卡里有承载默认路由的，只统计它们——这正是商家计量的那个口，
+//     也能避开内网网卡把内部流量算进去。
+//  4. 若默认路由落在被剔除的隧道上（全流量走 VPN 的机器），第 3 步会得到空集，
+//     此时退回第 2 步的全部物理网卡：流量终究要从物理口出去，仍是单份计量。
+//  5. 最后应用 --nic-exclude。
+func selectTrafficInterfaces(names []string, include string, exclude string, defaultRouteNames []string) map[string]bool {
 	includeFilters := parseFilterList(include)
 	excludeFilters := parseFilterList(exclude)
+	selected := make(map[string]bool, len(names))
+
+	if len(includeFilters) > 0 {
+		for _, name := range names {
+			if includeNetworkInterface(name, includeFilters, excludeFilters) {
+				selected[name] = true
+			}
+		}
+		return selected
+	}
+
+	candidates := make([]string, 0, len(names))
+	for _, name := range names {
+		if isDefaultExcludedNetworkInterface(name) {
+			continue
+		}
+		candidates = append(candidates, name)
+	}
+
+	if len(defaultRouteNames) > 0 {
+		routeSet := make(map[string]bool, len(defaultRouteNames))
+		for _, name := range defaultRouteNames {
+			if trimmed := strings.ToLower(strings.TrimSpace(name)); trimmed != "" {
+				routeSet[trimmed] = true
+			}
+		}
+		preferred := make([]string, 0, len(candidates))
+		for _, name := range candidates {
+			if routeSet[strings.ToLower(name)] {
+				preferred = append(preferred, name)
+			}
+		}
+		if len(preferred) > 0 {
+			candidates = preferred
+		}
+	}
+
+	for _, name := range candidates {
+		if interfaceMatchesFilter(name, excludeFilters) {
+			continue
+		}
+		selected[name] = true
+	}
+	return selected
+}
+
+// parseIPv4DefaultRouteInterfaces 从 /proc/net/route 的内容里取出承载默认路由的网卡名。
+// 字段序：Iface Destination Gateway Flags RefCnt Use Metric Mask ...
+// 默认路由即目标与掩码都是 0.0.0.0。
+func parseIPv4DefaultRouteInterfaces(data string) []string {
+	var names []string
+	for index, line := range strings.Split(data, "\n") {
+		if index == 0 {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			continue
+		}
+		if !isZeroHexField(fields[1]) || !isZeroHexField(fields[7]) {
+			continue
+		}
+		names = appendUniqueInterfaceName(names, fields[0])
+	}
+	return names
+}
+
+// parseIPv6DefaultRouteInterfaces 从 /proc/net/ipv6_route 的内容里取出承载默认路由的网卡名。
+// 字段序：dest dest_prefixlen src src_prefixlen next_hop metric refcnt use flags dev
+// 默认路由即目标地址全零且前缀长度为 0。
+func parseIPv6DefaultRouteInterfaces(data string) []string {
+	var names []string
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			continue
+		}
+		if !isZeroHexField(fields[0]) || !isZeroHexField(fields[1]) {
+			continue
+		}
+		names = appendUniqueInterfaceName(names, fields[9])
+	}
+	return names
+}
+
+func isZeroHexField(field string) bool {
+	if field == "" {
+		return false
+	}
+	return strings.Trim(field, "0") == ""
+}
+
+func appendUniqueInterfaceName(names []string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" || strings.EqualFold(candidate, "lo") {
+		return names
+	}
+	for _, existing := range names {
+		if strings.EqualFold(existing, candidate) {
+			return names
+		}
+	}
+	return append(names, candidate)
+}
+
+func procDefaultRouteInterfaces(root string) []string {
+	names := []string{}
+	if data, err := os.ReadFile(filepath.Join(root, "net", "route")); err == nil {
+		for _, name := range parseIPv4DefaultRouteInterfaces(string(data)) {
+			names = appendUniqueInterfaceName(names, name)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "net", "ipv6_route")); err == nil {
+		for _, name := range parseIPv6DefaultRouteInterfaces(string(data)) {
+			names = appendUniqueInterfaceName(names, name)
+		}
+	}
+	return names
+}
+
+// outboundRouteInterfaces 是非 Linux 平台的默认路由探测：向公网地址建一个 UDP
+// “连接”（不发包）拿到内核选出的源地址，再反查这个地址属于哪块网卡。
+func outboundRouteInterfaces() []string {
+	names := []string{}
+	for _, probe := range []struct{ network, address string }{
+		{"udp4", "8.8.8.8:53"},
+		{"udp6", "[2001:4860:4860::8888]:53"},
+	} {
+		ip := outboundIP(probe.network, probe.address)
+		if ip == "" {
+			continue
+		}
+		if name := interfaceNameForIP(ip); name != "" {
+			names = appendUniqueInterfaceName(names, name)
+		}
+	}
+	return names
+}
+
+func interfaceNameForIP(target string) string {
+	parsed := net.ParseIP(target)
+	if parsed == nil {
+		return ""
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip != nil && ip.Equal(parsed) {
+				return iface.Name
+			}
+		}
+	}
+	return ""
+}
+
+const defaultRouteInterfaceCacheTTL = time.Minute
+
+var (
+	defaultRouteInterfaceMu     sync.Mutex
+	defaultRouteInterfaceCache  []string
+	defaultRouteInterfaceStamp  time.Time
+	trafficInterfaceSelectionMu sync.Mutex
+	trafficInterfaceSelectionID string
+)
+
+// cachedDefaultRouteInterfaces 缓存默认路由网卡，避免每个采样周期都读 /proc 或建探测连接。
+// 路由变化（切线路、隧道起落）最迟一分钟后被采纳。
+func cachedDefaultRouteInterfaces() []string {
+	defaultRouteInterfaceMu.Lock()
+	defer defaultRouteInterfaceMu.Unlock()
+
+	if !defaultRouteInterfaceStamp.IsZero() && time.Since(defaultRouteInterfaceStamp) < defaultRouteInterfaceCacheTTL {
+		return defaultRouteInterfaceCache
+	}
+
+	names := []string{}
+	if runtime.GOOS == "linux" {
+		names = procDefaultRouteInterfaces("/proc")
+	}
+	if len(names) == 0 {
+		names = outboundRouteInterfaces()
+	}
+
+	defaultRouteInterfaceCache = names
+	defaultRouteInterfaceStamp = time.Now()
+	return names
+}
+
+// trafficInterfaceSelection 算出本轮采样参与统计的网卡集合，并在集合变化时打一条日志。
+// 「面板上的流量到底算了哪些网卡」是排查口径问题的第一个问题，日志里必须能查到。
+func trafficInterfaceSelection(counters []gnet.IOCountersStat) map[string]bool {
+	names := make([]string, 0, len(counters))
+	for _, counter := range counters {
+		names = append(names, counter.Name)
+	}
+	selected := selectTrafficInterfaces(names, nicInclude, nicExclude, cachedDefaultRouteInterfaces())
+
+	sorted := make([]string, 0, len(selected))
+	for name := range selected {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	fingerprint := strings.Join(sorted, ",")
+
+	trafficInterfaceSelectionMu.Lock()
+	changed := fingerprint != trafficInterfaceSelectionID
+	trafficInterfaceSelectionID = fingerprint
+	trafficInterfaceSelectionMu.Unlock()
+
+	if changed {
+		if fingerprint == "" {
+			log.Printf("traffic interfaces: none matched (check --nic-include/--nic-exclude)")
+		} else {
+			log.Printf("traffic interfaces: %s", fingerprint)
+		}
+	}
+	return selected
+}
+
+func sumNetworkCounters(counters []gnet.IOCountersStat, selected map[string]bool) (int64, int64) {
 	var sent, received int64
 	for _, counter := range counters {
-		if !includeNetworkInterface(counter.Name, includeFilters, excludeFilters) {
+		if !selected[counter.Name] {
 			continue
 		}
 		sent += int64(counter.BytesSent)
@@ -2106,12 +2388,10 @@ func sumNetworkCounters(counters []gnet.IOCountersStat, include string, exclude 
 // collectPerInterfaceCounters 按接口名返回参与统计的网卡累计计数。
 // 速率计算需要它来做「按接口独立基线」，避免接口集合变化时把某块网卡的
 // 历史累计流量误算成一个采样周期内的增量。
-func collectPerInterfaceCounters(counters []gnet.IOCountersStat, include string, exclude string) map[string]interfaceCounters {
-	includeFilters := parseFilterList(include)
-	excludeFilters := parseFilterList(exclude)
+func collectPerInterfaceCounters(counters []gnet.IOCountersStat, selected map[string]bool) map[string]interfaceCounters {
 	perInterface := make(map[string]interfaceCounters, len(counters))
 	for _, counter := range counters {
-		if !includeNetworkInterface(counter.Name, includeFilters, excludeFilters) {
+		if !selected[counter.Name] {
 			continue
 		}
 		perInterface[counter.Name] = interfaceCounters{
@@ -2553,11 +2833,13 @@ func collectReportWithInterval(intervalSec int) Report {
 	}
 	r.Disk, r.DiskTotal = diskUsageTotals()
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
-		rawUp, rawDown := sumNetworkCounters(netIO, nicInclude, nicExclude)
+		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
+		selected := trafficInterfaceSelection(netIO)
+		rawUp, rawDown := sumNetworkCounters(netIO, selected)
 		r.hasRawNetTotals = true
 		r.rawNetTotalUp = rawUp
 		r.rawNetTotalDown = rawDown
-		r.netPerInterface = collectPerInterfaceCounters(netIO, nicInclude, nicExclude)
+		r.netPerInterface = collectPerInterfaceCounters(netIO, selected)
 		if trafficTracker != nil {
 			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjust(rawUp, rawDown, now)
 		} else {

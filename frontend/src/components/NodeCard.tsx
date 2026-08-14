@@ -145,7 +145,7 @@ function NetworkSummary({
       <div className="node-network-summary-row" data-monitor-role="network-speed-summary">
         <Text className="node-network-summary-label" size="1" weight="bold">
           <Activity size={14} />
-          网络速率
+          网速
         </Text>
         <div className="node-network-summary-values">
           <span className="node-network-value is-up" aria-label="上传速率">
@@ -162,7 +162,7 @@ function NetworkSummary({
       <div className="node-network-summary-row" data-monitor-role="network-traffic-summary">
         <Text className="node-network-summary-label" size="1" weight="bold">
           <BarChart3 size={14} />
-          总流量
+          流量
         </Text>
         <div className="node-network-summary-values">
           <span className="node-network-value is-up" aria-label="上传总量">

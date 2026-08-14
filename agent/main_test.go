@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -639,6 +640,14 @@ func TestTrafficResetTrackerDropsPreviousMonthlyPeriod(t *testing.T) {
 	}
 }
 
+func selectionForTest(counters []gnet.IOCountersStat, include, exclude string, defaultRoute []string) map[string]bool {
+	names := make([]string, 0, len(counters))
+	for _, counter := range counters {
+		names = append(names, counter.Name)
+	}
+	return selectTrafficInterfaces(names, include, exclude, defaultRoute)
+}
+
 func TestSumNetworkCountersExcludesCommonVirtualInterfacesByDefault(t *testing.T) {
 	counters := []gnet.IOCountersStat{
 		{Name: "eth0", BytesSent: 100, BytesRecv: 200},
@@ -648,9 +657,242 @@ func TestSumNetworkCountersExcludesCommonVirtualInterfacesByDefault(t *testing.T
 		{Name: "vethabc", BytesSent: 5000, BytesRecv: 6000},
 	}
 
-	up, down := sumNetworkCounters(counters, "", "")
+	up, down := sumNetworkCounters(counters, selectionForTest(counters, "", "", nil))
 	if up != 100 || down != 200 {
 		t.Fatalf("network totals = %d/%d, want physical interface totals 100/200", up, down)
+	}
+}
+
+// 隧道网卡与物理网卡承载同一份流量，同时统计会把同一份流量数两遍。
+// demo 上日均 10~184 GiB 的离谱数值即由此而来。
+func TestSumNetworkCountersExcludesTunnelInterfaces(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+		{Name: "tun0", BytesSent: 800, BytesRecv: 1800},
+		{Name: "tailscale0", BytesSent: 700, BytesRecv: 1700},
+		{Name: "warp0", BytesSent: 600, BytesRecv: 1600},
+		{Name: "zt0abcdef", BytesSent: 500, BytesRecv: 1500},
+	}
+
+	up, down := sumNetworkCounters(counters, selectionForTest(counters, "", "", nil))
+	if up != 1000 || down != 2000 {
+		t.Fatalf("network totals = %d/%d, want physical-only 1000/2000 (tunnels double-count)", up, down)
+	}
+}
+
+// 默认路由所在网卡才是商家计量的口；内网网卡上的内部流量不该计入。
+func TestSelectTrafficInterfacesPrefersDefaultRouteInterface(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"eth0"})
+	if !selected["eth0"] || selected["eth1"] || len(selected) != 1 {
+		t.Fatalf("selected = %v, want only eth0", selected)
+	}
+
+	up, down := sumNetworkCounters(counters, selected)
+	if up != 1000 || down != 2000 {
+		t.Fatalf("network totals = %d/%d, want default-route interface totals 1000/2000", up, down)
+	}
+}
+
+// 全流量走 VPN 的机器：默认路由落在被剔除的隧道上，此时不能得到空集，
+// 必须退回物理网卡——流量终究要从物理口出去，那里仍是单份计量。
+func TestSelectTrafficInterfacesFallsBackWhenDefaultRouteIsTunnel(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"wg0"})
+	if !selected["eth0"] || selected["wg0"] || len(selected) != 1 {
+		t.Fatalf("selected = %v, want fallback to eth0 only", selected)
+	}
+}
+
+// 手动 --nic-include 必须完全压过默认路由与内置排除表，
+// 多公网口分走不同线路的机器要靠它。
+func TestSelectTrafficInterfacesHonorsManualInclude(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+	}
+
+	selected := selectionForTest(counters, "eth*", "", []string{"eth0"})
+	if !selected["eth0"] || !selected["eth1"] || selected["wg0"] || len(selected) != 2 {
+		t.Fatalf("selected = %v, want eth0+eth1", selected)
+	}
+
+	if tunnel := selectionForTest(counters, "wg*", "", []string{"eth0"}); !tunnel["wg0"] || len(tunnel) != 1 {
+		t.Fatalf("selected = %v, want explicit include to override the built-in tunnel exclusion", tunnel)
+	}
+}
+
+func TestSelectTrafficInterfacesAppliesExcludeLast(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+	}
+
+	if selected := selectionForTest(counters, "", "eth0", []string{"eth0"}); len(selected) != 0 {
+		t.Fatalf("selected = %v, want empty after excluding the default-route interface", selected)
+	}
+	if selected := selectionForTest(counters, "eth*", "eth1", nil); !selected["eth0"] || selected["eth1"] {
+		t.Fatalf("selected = %v, want include minus exclude", selected)
+	}
+}
+
+// 回归锁：累计流量与实时速率必须基于同一个网卡集合。
+// 两条路径若各自过滤，同一台机器上会出现「速率正常、总量翻倍」的自相矛盾。
+func TestTrafficAndRateShareTheSameInterfaceSet(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+		{Name: "docker0", BytesSent: 300, BytesRecv: 400},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"eth0"})
+	up, down := sumNetworkCounters(counters, selected)
+	perInterface := collectPerInterfaceCounters(counters, selected)
+
+	if len(perInterface) != len(selected) {
+		t.Fatalf("per-interface set = %v, selected = %v", perInterface, selected)
+	}
+	var perUp, perDown int64
+	for name, counter := range perInterface {
+		if !selected[name] {
+			t.Fatalf("per-interface set contains %s outside the selection", name)
+		}
+		perUp += int64(counter.sent)
+		perDown += int64(counter.recv)
+	}
+	if perUp != up || perDown != down {
+		t.Fatalf("rate basis %d/%d != traffic basis %d/%d", perUp, perDown, up, down)
+	}
+}
+
+func TestParseIPv4DefaultRouteInterfaces(t *testing.T) {
+	data := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t0102030A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n" +
+		"eth0\t0002030A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n" +
+		"wg0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\t0\t0\t0\n"
+
+	names := parseIPv4DefaultRouteInterfaces(data)
+	if len(names) != 2 || names[0] != "eth0" || names[1] != "wg0" {
+		t.Fatalf("default route interfaces = %v, want [eth0 wg0]", names)
+	}
+}
+
+func TestParseIPv6DefaultRouteInterfaces(t *testing.T) {
+	data := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"fe800000000000000000000000000001 00000400 00000000 00000000 00000003 eth0\n" +
+		"20010db8000000000000000000000000 40 00000000000000000000000000000000 00 " +
+		"00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth0\n" +
+		"00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n"
+
+	names := parseIPv6DefaultRouteInterfaces(data)
+	if len(names) != 1 || names[0] != "eth0" {
+		t.Fatalf("default route interfaces = %v, want [eth0] (lo must be dropped)", names)
+	}
+}
+
+func TestProcDefaultRouteInterfacesReadsBothFamilies(t *testing.T) {
+	root := t.TempDir()
+	netDir := filepath.Join(root, "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	ipv4 := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t0102030A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+	ipv6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"fe800000000000000000000000000001 00000400 00000000 00000000 00000003 ens3\n"
+	if err := os.WriteFile(filepath.Join(netDir, "route"), []byte(ipv4), 0o644); err != nil {
+		t.Fatalf("write route: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(netDir, "ipv6_route"), []byte(ipv6), 0o644); err != nil {
+		t.Fatalf("write ipv6_route: %v", err)
+	}
+
+	names := procDefaultRouteInterfaces(root)
+	if len(names) != 2 || names[0] != "eth0" || names[1] != "ens3" {
+		t.Fatalf("default route interfaces = %v, want [eth0 ens3]", names)
+	}
+}
+
+func TestProcDefaultRouteInterfacesMissingFilesIsEmpty(t *testing.T) {
+	if names := procDefaultRouteInterfaces(t.TempDir()); len(names) != 0 {
+		t.Fatalf("default route interfaces = %v, want empty", names)
+	}
+}
+
+// 回归锁（扫源码）：采集点必须把同一个网卡集合同时喂给累计流量和实时速率。
+//
+// 纯逻辑测试挡不住这个回归——两个函数各自都对，只要调用点分别过滤一次，
+// 就会重新出现「速率按一套网卡算、总量按另一套算」的自相矛盾，而所有单元测试仍全绿。
+// 上一批修网速尖刺时只改了速率那条路径，总量仍走标量汇总，正是这个坑。
+func TestTrafficAndRateCallSitesUseOneSelection(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	secondArg := func(fn string) string {
+		pattern := regexp.MustCompile(`\b` + fn + `\(`)
+		for _, line := range strings.Split(string(source), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "func ") {
+				continue
+			}
+			loc := pattern.FindStringIndex(trimmed)
+			if loc == nil {
+				continue
+			}
+			// 手工扫到配对的右括号并按顶层逗号切分，避免嵌套调用把参数切错。
+			depth := 0
+			args := []string{""}
+			for _, char := range trimmed[loc[1]-1:] {
+				switch char {
+				case '(':
+					depth++
+					if depth == 1 {
+						continue
+					}
+				case ')':
+					depth--
+					if depth == 0 {
+						goto done
+					}
+				case ',':
+					if depth == 1 {
+						args = append(args, "")
+						continue
+					}
+				}
+				args[len(args)-1] += string(char)
+			}
+		done:
+			if len(args) < 2 {
+				t.Fatalf("%s called with %d args at %q", fn, len(args), trimmed)
+			}
+			return strings.TrimSpace(args[1])
+		}
+		t.Fatalf("no call site found for %s", fn)
+		return ""
+	}
+
+	trafficArg := secondArg("sumNetworkCounters")
+	rateArg := secondArg("collectPerInterfaceCounters")
+	if trafficArg != rateArg {
+		t.Fatalf("traffic uses %q while rate uses %q; both must consume one selection", trafficArg, rateArg)
+	}
+	if trafficArg == "nicInclude" || trafficArg == "nicExclude" {
+		t.Fatalf("call sites re-filter from %q instead of a shared selection", trafficArg)
 	}
 }
 
