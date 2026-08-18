@@ -337,7 +337,7 @@ insert into settings (key, value) values
   ('ping_record_preserve_time', '72'),
   ('record_persist_interval_sec', '120'),
   ('ping_record_persist_interval_sec', '120'),
-  ('record_high_watermark_rows', '450000'),
+  ('record_high_watermark_rows', '700000'),
   ('record_high_watermark_bytes', '419430400'),
   ('capacity_daily_view_minutes', '60'),
   ('audit_log_preserve_time', '2160'),

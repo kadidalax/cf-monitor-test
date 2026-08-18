@@ -56,4 +56,30 @@ assert.ok(
   '负载告警不得把 null 当成 0 参与统计',
 );
 
+// ── 写入路径（这一环最容易漏，漏了上面四条全绿但功能是废的）──
+// 落库 RPC 若照抄其它字段的 coalesce(..., 0)，探针报的 null 会在写入时被补成 0，
+// 库里永远不会出现 null：可空列白改、is not null 过滤永远筛不到、前端解析永远走不到。
+assert.ok(
+  !/coalesce\(\(input_record->>'load'\)::double precision, 0\),/.test(rpc),
+  '落库 RPC 不得把 load 无条件 coalesce 成 0（会把「不可用」写成「空闲」）',
+);
+assert.ok(
+  /jsonb_typeof\(input_record->'load'\) = 'null'/.test(rpc),
+  '落库 RPC 必须区分「显式 null」与「字段缺失」：前者写 null，后者仍写 0',
+);
+
+// ── 读取路径：游标翻页不能把 null 键吃掉 ──
+// jsonb_strip_nulls 是递归的，套在整个响应外面会连 data 数组里 load 为 null 的键
+// 一起删掉，而前端把「键不存在」当作 0。公开历史续读走的正是这个 RPC。
+const cursorBody = rpc.slice(rpc.indexOf('function public.cfm_records_range_cursor'));
+const cursorSelect = cursorBody.slice(0, cursorBody.indexOf('$$;'));
+assert.ok(
+  !/jsonb_strip_nulls\(jsonb_build_object\(\s*\n\s*'data',/.test(cursorSelect),
+  'records 游标 RPC 不得把 data 数组包进 jsonb_strip_nulls',
+);
+assert.ok(
+  /\|\| jsonb_build_object\(\s*\n\s*'data',/.test(cursorSelect),
+  'data 必须以未剥离 null 的形式合并进响应',
+);
+
 console.log('ok - 负载 null 的数据库约束');

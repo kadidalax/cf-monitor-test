@@ -1465,6 +1465,13 @@ alter table offline_notifications alter column grace_period set default 360;
 alter table records alter column load drop not null;
 alter table records alter column load drop default;
 
+-- 行数熔断降级为次要边界后，旧默认值 450000 会先于 400 MiB 的字节熔断跳闸，
+-- 使「按真实字节量熔断」的改造失效。把仍停留在旧默认值的库抬到 700000。
+-- 只动 450000 这个确切值：用户手工调过的阈值是有意为之，不能覆盖。
+-- （1_core_schema.sql 的 seed 是 on conflict do nothing，只对全新库生效，够不到存量库。）
+update settings set value = '700000'
+where key = 'record_high_watermark_rows' and value = '450000';
+
 alter table website_monitors add column if not exists agent_probe_mode text not null default 'off';
 alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
 alter table website_monitors add column if not exists agent_probe_limit integer not null default 3;
@@ -1686,7 +1693,14 @@ begin
     coalesce((input_record->>'ram_total')::double precision, 0),
     coalesce((input_record->>'swap')::double precision, 0),
     coalesce((input_record->>'swap_total')::double precision, 0),
-    coalesce((input_record->>'load')::double precision, 0),
+    -- load 是唯一允许「不可用」的指标，必须区分「显式 null」与「字段缺失」：
+    -- 显式 null（容器内 loadavg 透传宿主机）落库为 null；老探针不带该字段仍按 0。
+    -- 这里若照抄其它字段的 coalesce(..., 0)，null 会在写入时被悄悄补成 0，
+    -- 可空列、告警 RPC 的 is not null 过滤、前端解析就全都读不到「不可用」。
+    case
+      when jsonb_typeof(input_record->'load') = 'null' then null
+      else coalesce((input_record->>'load')::double precision, 0)
+    end,
     coalesce((input_record->>'temp')::double precision, 0),
     coalesce((input_record->>'disk')::double precision, 0),
     coalesce((input_record->>'disk_total')::double precision, 0),
@@ -1919,14 +1933,19 @@ begin
       from numbered, params
       where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
     )
+  -- jsonb_strip_nulls 只能作用在标量字段上：它是**递归**的，套在整个响应外面会连
+  -- data 数组里 load 为 null 的键一起删掉，而前端把「键不存在」当作 0，
+  -- 「负载不可用」就被读成「空闲」。先剥标量字段的 null，再合并未经剥离的 data。
+  -- （gpu / ping 的同款游标 RPC 没有可空列，那两处保持原样。）
   select jsonb_strip_nulls(jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb),
     'total', (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', 1,
     'limit', params.limit_value,
     'has_more', (select count(*) from raw_rows) > params.limit_value,
     'next_cursor', case when (select count(*) from raw_rows) > params.limit_value then (select min(time) from data_rows) else null end
-  ))
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb)
+  )
   from params
   );
 end;
@@ -3644,7 +3663,7 @@ begin
         name, cpu_name, virtualization, arch, cpu_cores, os, kernel_version, gpu_name,
         ipv4, ipv6, region, remark, public_remark, mem_total, swap_total, disk_total,
         version, price, billing_cycle, auto_renewal, currency, expired_at, "group", tags,
-        hidden, traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
+        hidden, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
       )
       values (
         item->>'uuid',
@@ -3679,7 +3698,11 @@ begin
         coalesce(item->>'tags', ''),
         case when coalesce((item->>'hidden')::boolean, false) then 1 else 0 end,
         coalesce((item->>'traffic_limit')::bigint, 0),
-        coalesce(item->>'traffic_limit_type', 'max'),
+        -- 兜底值与 cfm_create_client / cfm_update_client 保持一致（'sum'）；
+        -- 还原路径漏改会让从旧备份恢复的节点静默回到 'max' 口径。
+        coalesce(nullif(item->>'traffic_limit_type', ''), 'sum'),
+        -- 缺省补 1 并钳到 1~31：列上有 check 约束，直接写 0 会让整个还原事务失败。
+        least(greatest(coalesce((item->>'traffic_reset_day')::smallint, 1), 1), 31),
         coalesce((item->>'sort_order')::integer, 0),
         coalesce(nullif(item->>'created_at', '')::timestamptz, now()),
         coalesce(nullif(item->>'updated_at', '')::timestamptz, now())
@@ -3717,6 +3740,7 @@ begin
         hidden = excluded.hidden,
         traffic_limit = excluded.traffic_limit,
         traffic_limit_type = excluded.traffic_limit_type,
+        traffic_reset_day = excluded.traffic_reset_day,
         sort_order = excluded.sort_order,
         updated_at = now();
     end loop;

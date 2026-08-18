@@ -1622,3 +1622,35 @@ func TestChangingResetDayRestartsPeriod(t *testing.T) {
 		t.Fatal("重复设置同一个值不应报告变化")
 	}
 }
+
+// 统计口径的版本必须进 scope 哈希。
+// scope 是 traffic-state.json 里判定「旧基线是否还有效」的唯一依据：口径变了而 scope 没变，
+// 升级后 raw 骤降会被 adjust 当成计数器回绕，把整块计数再加一遍到当期累计上。
+func TestTrafficCounterScopeIncludesBasisVersion(t *testing.T) {
+	legacy := shortHash(strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
+	if trafficCounterScope() == legacy {
+		t.Fatal("trafficCounterScope 不得退回「只哈希 include/exclude」的旧公式——" +
+			"内置排除表或默认路由收敛逻辑变更时它必须跟着变")
+	}
+}
+
+// 口径变更后必须走重建分支，而不是把旧基线的负 delta 当成计数器回绕。
+// 这条锁的是真实升级路径：旧 agent 把 eth0 与隧道一起算，新 agent 只算默认路由网卡，
+// raw 因此骤降；开机时间落在本期内（rawCoversPeriod 为真）是会触发虚增的那条分支。
+func TestCounterBasisChangeRebaselinesInsteadOfInflating(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	booted := time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC)
+
+	previous := newTrafficResetTracker(1, "token", "basis-v1")
+	previous.adjustSinceBoot(20_000_000, 21_000_000, now, booted)
+
+	upgraded := newTrafficResetTracker(1, "token", "basis-v2")
+	up, down := upgraded.adjustSinceBoot(11_000_000, 11_500_000, now.Add(time.Minute), booted)
+
+	if up > 11_000_000 || down > 11_500_000 {
+		t.Fatalf("period totals = %d/%d, 口径变更后当期累计不得超过新口径的 raw 计数（这就是一次性虚增）", up, down)
+	}
+}

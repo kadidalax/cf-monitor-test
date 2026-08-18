@@ -61,3 +61,6 @@ docs/
 # 配套 .trellis/config.yaml 里的 session_auto_commit: false
 .trellis/
 AGENTS.md
+
+# Local AI knowledge base (never commit)
+.ai-knowledge/

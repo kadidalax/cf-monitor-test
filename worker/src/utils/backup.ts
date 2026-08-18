@@ -338,6 +338,17 @@ function validateClients(items: unknown[], errors: string[]): Partial<Client>[] 
     for (const field of booleanFields) {
       client[field] = booleanField(item[field]);
     }
+    // traffic_reset_day 不能并进 numberFields：那条循环的 fallback/min 都是 0，
+    // 而该列的合法域是 1~31 且带 check 约束——旧备份不含该字段时会写出 0，
+    // 整个还原事务直接失败。缺省补 1，与列默认值一致。
+    client.traffic_reset_day = numberField(
+      item.traffic_reset_day,
+      `clients[${index}].traffic_reset_day`,
+      errors,
+      1,
+      1,
+      31,
+    );
 
     const uuid = String(client.uuid || '');
     const token = String(client.token || '');

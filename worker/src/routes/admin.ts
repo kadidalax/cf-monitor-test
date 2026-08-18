@@ -113,6 +113,7 @@ const CAPACITY_ESTIMATE_SETTING_KEYS = [
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
+  'record_high_watermark_bytes',
   'audit_log_preserve_time',
   'capacity_daily_view_minutes',
 ];
@@ -1048,6 +1049,10 @@ function estimateCapacityCountCheckIntervalSec(estimatedRows: number, highWaterm
 type CapacityRowCountSnapshot = {
   bounded_row_counts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null;
   expired_row_counts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null;
+  // 历史表的真实磁盘占用（含索引与 TOAST）。字节是主熔断线，行数只是次要边界，
+  // 后台必须能看到它——否则管理员设了 400 MiB 上限却无从判断离跳闸还有多远，
+  // 熔断真跳时唯一的信号是一条审计日志。
+  history_byte_sizes: Awaited<ReturnType<typeof db.getHistoryStorageBytes>> | null;
   checked_at: string;
   cache_key: string;
 };
@@ -1081,10 +1086,17 @@ async function getCapacityRowCounts(
 
   let boundedRowCounts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null = null;
   let expiredRowCounts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null = null;
+  let historyByteSizes: Awaited<ReturnType<typeof db.getHistoryStorageBytes>> | null = null;
   try {
     boundedRowCounts = await db.getBoundedStorageRowCounts(database, CAPACITY_ROW_COUNT_LIMIT);
   } catch {
     boundedRowCounts = null;
+  }
+  try {
+    historyByteSizes = await db.getHistoryStorageBytes(database);
+  } catch {
+    // 与其它两项一致地降级：拿不到字节数只让面板少一个读数，不能让整个容量估算 500。
+    historyByteSizes = null;
   }
   try {
     expiredRowCounts = await db.getExpiredRowCounts(database, {
@@ -1099,6 +1111,7 @@ async function getCapacityRowCounts(
   const value = {
     bounded_row_counts: boundedRowCounts,
     expired_row_counts: expiredRowCounts,
+    history_byte_sizes: historyByteSizes,
     checked_at: new Date(nowMs).toISOString(),
     cache_key: cacheKey,
   };
@@ -1137,7 +1150,10 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     MAX_UNIFIED_PING_INTERVAL_SEC,
     Math.max(MIN_UNIFIED_PING_INTERVAL_SEC, parsePositiveNumber(settings.ping_record_persist_interval_sec, DEFAULT_UNIFIED_PING_INTERVAL_SEC)),
   );
-  const highWatermarkRows = Math.min(10_000_000, Math.max(1_000, parsePositiveNumber(settings.record_high_watermark_rows, 450_000)));
+  const highWatermarkRows = Math.min(10_000_000, Math.max(1_000, parsePositiveNumber(settings.record_high_watermark_rows, 700_000)));
+  // 字节熔断线：与 DO 侧 RECORD_HIGH_WATERMARK_{MIN,MAX}_BYTES 用同一组边界，
+  // 面板显示的阈值必须等于真正生效的那个值，否则用户照着面板调也调不到点上。
+  const highWatermarkBytes = Math.min(549_755_813_888, Math.max(16_777_216, parsePositiveNumber(settings.record_high_watermark_bytes, 419_430_400)));
   const auditPreserveHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
   const effectiveActiveIntervalSec = Math.max(sampleIntervalSec, persistIntervalSec);
   const effectiveIdleIntervalSec = Math.max(idleIntervalSec, persistIntervalSec);
@@ -1228,6 +1244,7 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     record_persist_interval_sec: persistIntervalSec,
     ping_record_persist_interval_sec: unifiedPingIntervalSec,
     record_high_watermark_rows: highWatermarkRows,
+    record_high_watermark_bytes: highWatermarkBytes,
     capacity_daily_view_minutes: dailyViewMinutes,
     active_seconds_per_day: activeSecondsPerDay,
     idle_seconds_per_day: idleSecondsPerDay,
@@ -1266,6 +1283,10 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     row_counts_capped: rowCounts?.bounded_row_counts?.capped ?? null,
     row_counts_limit: rowCounts?.bounded_row_counts?.limit ?? null,
     expired_row_counts: rowCounts?.expired_row_counts ?? null,
+    // 历史表真实占用：这是主熔断线的量纲，必须和 record_high_watermark_bytes 一起下发，
+    // 否则后台只有一个可填的上限、没有对应的当前值，用户无从判断离跳闸还有多远。
+    history_byte_sizes: rowCounts?.history_byte_sizes ?? null,
+    history_total_bytes: rowCounts?.history_byte_sizes?.total ?? null,
     row_counts_checked_at: rowCounts?.checked_at ?? null,
     row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
     row_counts_cache_key: rowCounts?.cache_key ?? null,

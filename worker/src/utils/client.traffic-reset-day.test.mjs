@@ -76,4 +76,31 @@ assert.ok(
   'policy 必须按 clientId 取该节点自己的重置日',
 );
 
+// ── 6) 备份还原：新增列的第三个必经之处 ──
+// 读 RPC、写 RPC 都补了，还原路径漏掉的表现是「备份恢复后所有节点重置日回落到 1」，
+// 而按 CHANGELOG 的说明这会连带清零每台机器的当期累计——比丢配置更糟。
+// 这里锁两层：SQL 的 insert/upsert 列清单，以及 backup.ts 的字段白名单。
+assert.ok(
+  /hidden, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at/.test(rpc),
+  'cfm_restore_backup_data 的 insert 列清单必须包含 traffic_reset_day',
+);
+assert.ok(
+  /traffic_reset_day = excluded\.traffic_reset_day/.test(rpc),
+  '还原的 on conflict do update 也必须覆盖 traffic_reset_day，否则覆盖式恢复丢配置',
+);
+assert.ok(
+  !/coalesce\(item->>'traffic_limit_type', 'max'\)/.test(rpc),
+  "还原路径的口径兜底不得停留在旧的 'max'（其余两处已是 'sum'）",
+);
+
+const backup = readFileSync(new URL('./backup.ts', import.meta.url), 'utf8');
+assert.ok(
+  /client\.traffic_reset_day = numberField\(/.test(backup),
+  'backup.ts 的字段白名单必须收录 traffic_reset_day，否则导入时被静默丢弃',
+);
+assert.ok(
+  /`clients\[\$\{index\}\]\.traffic_reset_day`,\s*\n\s*errors,\s*\n\s*1,\s*\n\s*1,\s*\n\s*31,/.test(backup),
+  'traffic_reset_day 的缺省值与下界必须是 1——沿用 numberFields 的 0 会违反 check 约束、整个还原失败',
+);
+
 console.log('ok - 流量重置日的接口、RPC 列清单与 policy 下发');

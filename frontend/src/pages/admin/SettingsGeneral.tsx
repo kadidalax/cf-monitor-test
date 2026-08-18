@@ -18,6 +18,9 @@ interface CapacityEstimate {
   record_persist_interval_sec?: number;
   ping_record_persist_interval_sec?: number;
   record_high_watermark_rows?: number;
+  record_high_watermark_bytes?: number;
+  // 历史五表的真实磁盘占用合计（含索引与 TOAST），服务端实测值，非推算。
+  history_total_bytes?: number | null;
   active_monitor_records_per_day?: number;
   idle_monitor_records_per_day?: number;
   monitor_records_per_day?: number;
@@ -96,7 +99,7 @@ const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
 const DEFAULT_VIEWER_TTL_SEC = 120;
-const DEFAULT_RECORD_PERSIST_SEC = 30;
+const DEFAULT_RECORD_PERSIST_SEC = 120;
 const DEFAULT_PING_RECORD_PERSIST_SEC = 120;
 const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 700_000;
 const DEFAULT_RECORD_HIGH_WATERMARK_BYTES = 419_430_400;
@@ -378,6 +381,17 @@ export default function SettingsGeneral() {
       1000,
       10_000_000,
     );
+    const recordHighWatermarkBytes = clampInteger(
+      settings.record_high_watermark_bytes,
+      Number(capacity?.record_high_watermark_bytes || DEFAULT_RECORD_HIGH_WATERMARK_BYTES),
+      16_777_216,
+      549_755_813_888,
+    );
+    // 字节熔断用的是服务端实测的真实占用（pg_total_relation_size，含索引与 TOAST），
+    // 不是上面那个按行数推算的 estimatedStorageBytes——熔断判的是前者，面板也必须显示前者，
+    // 否则用户照着推算值判断「还早着呢」，实际已经在跳闸边缘。
+    const historyTotalBytes = Number(capacity?.history_total_bytes ?? 0);
+    const hasHistoryBytes = Number.isFinite(historyTotalBytes) && historyTotalBytes > 0;
     const dailyViewMinutes = clampInteger(
       settings.capacity_daily_view_minutes,
       Number(capacity?.capacity_daily_view_minutes || DEFAULT_DAILY_VIEW_MINUTES),
@@ -540,6 +554,12 @@ export default function SettingsGeneral() {
       estimatedRowsRetained,
       estimatedStorageBytes,
       highWatermarkPercent: estimatedRowsRetained / recordHighWatermarkRows * 100,
+      recordHighWatermarkBytes,
+      historyTotalBytes,
+      hasHistoryBytes,
+      highWatermarkBytesPercent: hasHistoryBytes
+        ? historyTotalBytes / recordHighWatermarkBytes * 100
+        : 0,
       storagePercent: estimatedStorageBytes / freeStorageBytes * 100,
       freeStorageBytes,
       supabaseProStorageReferenceBytes,
@@ -793,10 +813,21 @@ export default function SettingsGeneral() {
                   icon={<Database size={15} />}
                 />
                 <QuotaBar
+                  label="历史容量熔断"
+                  value={derived.hasHistoryBytes
+                    ? `${formatBytes(derived.historyTotalBytes)} / ${formatBytes(derived.recordHighWatermarkBytes)}`
+                    : `— / ${formatBytes(derived.recordHighWatermarkBytes)}`}
+                  percent={derived.highWatermarkBytesPercent}
+                  caption={derived.hasHistoryBytes
+                    ? '历史表真实磁盘占用（含索引），主熔断线；达到后暂停写入历史，实时展示继续工作'
+                    : '暂时读不到真实占用，稍后刷新；阈值仍然生效'}
+                  icon={<Database size={15} />}
+                />
+                <QuotaBar
                   label="历史高水位"
                   value={`${formatInteger(derived.estimatedRowsRetained)} / ${formatInteger(derived.recordHighWatermarkRows)}`}
                   percent={derived.highWatermarkPercent}
-                  caption="接近高水位会暂停历史写入，实时展示继续工作"
+                  caption="次要熔断线，与容量熔断谁先到谁生效"
                   icon={<HardDrive size={15} />}
                 />
                 <QuotaBar

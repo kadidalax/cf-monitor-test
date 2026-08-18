@@ -2752,7 +2752,16 @@ func applyTrafficResetDayPolicy(policy agentPolicy) {
 }
 
 func trafficCounterScope() string {
-	return shortHash(strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
+	// 统计口径的版本号。scope 一变，adjust 会走「重建」分支重新起基线；
+	// 不变则旧的 traffic-state.json 基线继续有效。
+	//
+	// 因此**只要参与统计的网卡集合的算法变了，这里就必须跟着变**——
+	// 不只是用户传的 --nic-include/--nic-exclude。v2 收敛到默认路由网卡、
+	// 并把 wg/tun/ipip/warp 等隧道前缀加进内置排除表，raw 计数因此骤降；
+	// 若沿用 v1 的 scope，旧基线会被当成有效值，负 delta 被当作计数器回绕处理，
+	// 把整个物理网卡计数器再加一遍到当期累计上（一次性虚增）。
+	const counterBasisVersion = "v2-default-route"
+	return shortHash(counterBasisVersion + "\n" + strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
 }
 
 func trafficResetStatePath(_ string) string {
