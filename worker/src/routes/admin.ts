@@ -1049,10 +1049,6 @@ function estimateCapacityCountCheckIntervalSec(estimatedRows: number, highWaterm
 type CapacityRowCountSnapshot = {
   bounded_row_counts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null;
   expired_row_counts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null;
-  // 历史表的真实磁盘占用（含索引与 TOAST）。字节是主熔断线，行数只是次要边界，
-  // 后台必须能看到它——否则管理员设了 400 MiB 上限却无从判断离跳闸还有多远，
-  // 熔断真跳时唯一的信号是一条审计日志。
-  history_byte_sizes: Awaited<ReturnType<typeof db.getHistoryStorageBytes>> | null;
   checked_at: string;
   cache_key: string;
 };
@@ -1086,17 +1082,10 @@ async function getCapacityRowCounts(
 
   let boundedRowCounts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null = null;
   let expiredRowCounts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null = null;
-  let historyByteSizes: Awaited<ReturnType<typeof db.getHistoryStorageBytes>> | null = null;
   try {
     boundedRowCounts = await db.getBoundedStorageRowCounts(database, CAPACITY_ROW_COUNT_LIMIT);
   } catch {
     boundedRowCounts = null;
-  }
-  try {
-    historyByteSizes = await db.getHistoryStorageBytes(database);
-  } catch {
-    // 与其它两项一致地降级：拿不到字节数只让面板少一个读数，不能让整个容量估算 500。
-    historyByteSizes = null;
   }
   try {
     expiredRowCounts = await db.getExpiredRowCounts(database, {
@@ -1111,7 +1100,6 @@ async function getCapacityRowCounts(
   const value = {
     bounded_row_counts: boundedRowCounts,
     expired_row_counts: expiredRowCounts,
-    history_byte_sizes: historyByteSizes,
     checked_at: new Date(nowMs).toISOString(),
     cache_key: cacheKey,
   };
@@ -1132,10 +1120,16 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     };
   }
 
-  const [clientCapacityCounts, rawSettings, pingTasks] = await Promise.all([
+  const [clientCapacityCounts, rawSettings, pingTasks, historyByteSizes] = await Promise.all([
     db.countClientCapacityTargets(database),
     db.getSettingsByKeys(database, CAPACITY_ESTIMATE_SETTING_KEYS),
     db.listPingTaskEstimateRows(database),
+    // 历史表真实占用：主熔断线的量纲，必须随每次估算一起下发。
+    // 刻意**不**放进 getCapacityRowCounts——那份快照被 refresh_counts 挡着，
+    // 只有管理员点「刷新实际行数」才取；跟着它走会让首屏的容量进度条恒为空，
+    // 而字节数是 pg_total_relation_size 读元数据，和 count(*) 的全表扫描不是一个量级，
+    // 本来就不需要被那道闸门挡住。整份估算已有 30 秒缓存，这里最多每 30 秒一次 RPC。
+    db.getHistoryStorageBytes(database).catch(() => null),
   ]);
   const clientCount = clientCapacityCounts.clients;
   const gpuClientCount = clientCapacityCounts.gpu_clients;
@@ -1285,8 +1279,9 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     expired_row_counts: rowCounts?.expired_row_counts ?? null,
     // 历史表真实占用：这是主熔断线的量纲，必须和 record_high_watermark_bytes 一起下发，
     // 否则后台只有一个可填的上限、没有对应的当前值，用户无从判断离跳闸还有多远。
-    history_byte_sizes: rowCounts?.history_byte_sizes ?? null,
-    history_total_bytes: rowCounts?.history_byte_sizes?.total ?? null,
+    // 与 rowCounts 无关，首屏即有值。
+    history_byte_sizes: historyByteSizes ?? null,
+    history_total_bytes: historyByteSizes?.total ?? null,
     row_counts_checked_at: rowCounts?.checked_at ?? null,
     row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
     row_counts_cache_key: rowCounts?.cache_key ?? null,

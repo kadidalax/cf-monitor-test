@@ -820,7 +820,7 @@ export default function SettingsGeneral() {
                   percent={derived.highWatermarkBytesPercent}
                   caption={derived.hasHistoryBytes
                     ? '历史表真实磁盘占用（含索引），主熔断线；达到后暂停写入历史，实时展示继续工作'
-                    : '暂时读不到真实占用，稍后刷新；阈值仍然生效'}
+                    : '读取真实占用失败，稍后重试；阈值仍然生效'}
                   icon={<Database size={15} />}
                 />
                 <QuotaBar
