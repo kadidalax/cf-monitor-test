@@ -585,6 +585,10 @@ export async function getHistoryStorageRowCounts(database: QueryDatabase): Promi
   return sba.getSupabaseHistoryStorageRowCounts(database.env);
 }
 
+export async function getHistoryStorageBytes(database: QueryDatabase): Promise<t.HistoryTableByteSizes> {
+  return sba.getSupabaseHistoryStorageBytes(database.env);
+}
+
 export async function getExpiredRowCounts(
   database: QueryDatabase,
   beforeTimes: { records: string; ping_records: string; audit_logs: string },

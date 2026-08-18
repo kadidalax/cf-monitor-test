@@ -338,6 +338,7 @@ insert into settings (key, value) values
   ('record_persist_interval_sec', '120'),
   ('ping_record_persist_interval_sec', '120'),
   ('record_high_watermark_rows', '450000'),
+  ('record_high_watermark_bytes', '419430400'),
   ('capacity_daily_view_minutes', '60'),
   ('audit_log_preserve_time', '2160'),
   ('live_poll_active_interval_sec', '3'),

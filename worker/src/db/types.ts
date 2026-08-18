@@ -400,6 +400,9 @@ export interface TableRowCounts {
 
 export type HistoryTableRowCounts = Omit<TableRowCounts, 'audit_logs'>;
 
+// 历史表的真实磁盘占用（含索引与 TOAST），字节。
+export type HistoryTableByteSizes = HistoryTableRowCounts & { total: number };
+
 export interface BoundedTableRowCounts {
   counts: TableRowCounts;
   capped: Partial<Record<keyof TableRowCounts, boolean>>;

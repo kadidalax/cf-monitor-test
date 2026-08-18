@@ -99,6 +99,7 @@ const DEFAULT_VIEWER_TTL_SEC = 120;
 const DEFAULT_RECORD_PERSIST_SEC = 30;
 const DEFAULT_PING_RECORD_PERSIST_SEC = 120;
 const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 700_000;
+const DEFAULT_RECORD_HIGH_WATERMARK_BYTES = 419_430_400;
 const DEFAULT_DAILY_VIEW_MINUTES = 60;
 const DEFAULT_OFFLINE_CONFIRM_ROUNDS = 3;
 const SUPABASE_FREE_DATABASE_STORAGE_REFERENCE_BYTES = 500 * 1024 * 1024;
@@ -318,6 +319,7 @@ export default function SettingsGeneral() {
       'record_persist_interval_sec',
       'ping_record_persist_interval_sec',
       'record_high_watermark_rows',
+      'record_high_watermark_bytes',
       'capacity_daily_view_minutes',
     ].some((key) => settings[key] !== originalSettings[key]);
     const clients = Math.max(0, Number(capacity?.clients || 0));
@@ -729,8 +731,17 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
+                label="历史写入熔断容量（字节）"
+                description="五张历史表的真实磁盘占用（含索引）达到该值后暂停写入历史，实时展示不受影响。这是主熔断线——数据库卡的是字节，同样行数可能占 72MB 也可能 189MB。默认 400MiB，给非历史表留余量"
+                value={getSettingValue(settings, 'record_high_watermark_bytes', String(DEFAULT_RECORD_HIGH_WATERMARK_BYTES))}
+                onChange={(value) => updateSetting('record_high_watermark_bytes', value)}
+                type="number"
+                placeholder="419430400"
+                width="100%"
+              />
+              <SettingInput
                 label="历史写入熔断行数（行）"
-                description="五张历史表总行数达到该值后暂停写入历史，实时展示不受影响。这是防止撑爆数据库的保险丝——它数的是行数，不是字节，需按你的落库间隔换算"
+                description="次要熔断线，与容量熔断谁先到谁生效。行数只是容量的粗糙代理且不含索引开销，一般不需要改动"
                 value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
                 onChange={(value) => updateSetting('record_high_watermark_rows', value)}
                 type="number"

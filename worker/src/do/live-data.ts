@@ -43,6 +43,12 @@ const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
 const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 700_000;
 const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
 const RECORD_HIGH_WATERMARK_MAX_ROWS = 10_000_000;
+// 字节熔断线：Supabase 卡的是磁盘字节，行数只是它的粗糙代理
+//（同样行数可能对应 72MB 也可能 189MB，且行数完全不含索引开销）。
+// 行数熔断保留为次要边界，两者谁先到就熔断谁。
+const RECORD_HIGH_WATERMARK_DEFAULT_BYTES = 419_430_400;
+const RECORD_HIGH_WATERMARK_MIN_BYTES = 16_777_216;
+const RECORD_HIGH_WATERMARK_MAX_BYTES = 549_755_813_888;
 const RECORD_CAPACITY_CACHE_FAR_MS = 6 * 60 * 60_000;
 const RECORD_CAPACITY_CACHE_NEAR_MS = 10 * 60_000;
 const RECORD_CAPACITY_CACHE_CRITICAL_MS = 60_000;
@@ -64,6 +70,7 @@ const RECORD_PERSISTENCE_SETTING_KEYS = [
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
+  'record_high_watermark_bytes',
 ];
 const HTTP_CLIENT_MIN_TTL_MS = 30_000;
 const HTTP_CLIENT_MAX_TTL_MS = 24 * 60 * 60 * 1000;
@@ -296,10 +303,12 @@ interface GPUSnapshotMeta {
 
 interface RecordCapacitySnapshot {
   rows: number;
+  bytes: number;
   blocked: boolean;
   checkedAt: number;
   nextCheckAt: number;
   highWatermarkRows: number;
+  highWatermarkBytes: number;
 }
 
 interface AdminClientsSnapshot {
@@ -385,6 +394,8 @@ export class LiveDataDO {
   private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
   private recordPersistenceCheckedAt: number = 0;
   private recordHighWatermarkRows: number = RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
+  private recordHighWatermarkBytes: number = RECORD_HIGH_WATERMARK_DEFAULT_BYTES;
+  private recordCapacityBytes: number = 0;
   private recordCapacityNextCheckAt: number = 0;
   private recordCapacityRows: number = 0;
   private recordCapacityBlocked: boolean = false;
@@ -2051,6 +2062,13 @@ export class LiveDataDO {
           RECORD_HIGH_WATERMARK_MAX_ROWS,
         )
         : RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
+      const highWatermarkBytes = Number(settings.record_high_watermark_bytes);
+      this.recordHighWatermarkBytes = Number.isFinite(highWatermarkBytes)
+        ? Math.min(
+          Math.max(Math.floor(highWatermarkBytes), RECORD_HIGH_WATERMARK_MIN_BYTES),
+          RECORD_HIGH_WATERMARK_MAX_BYTES,
+        )
+        : RECORD_HIGH_WATERMARK_DEFAULT_BYTES;
       this.recordPersistenceCheckedAt = now;
     } catch (error) {
       await bestEffortRecordHealthEvent(
@@ -2068,8 +2086,12 @@ export class LiveDataDO {
 
   private capacityCheckDelayMs(): number {
     if (this.recordCapacityBlocked) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
-    if (this.recordHighWatermarkRows <= 0) return RECORD_CAPACITY_CACHE_NEAR_MS;
-    const ratio = this.recordCapacityRows / this.recordHighWatermarkRows;
+    if (this.recordHighWatermarkRows <= 0 || this.recordHighWatermarkBytes <= 0) return RECORD_CAPACITY_CACHE_NEAR_MS;
+    // 两条熔断线取更紧张的那个比例：离任一条线近了都该查得更勤。
+    const ratio = Math.max(
+      this.recordCapacityRows / this.recordHighWatermarkRows,
+      this.recordCapacityBytes / this.recordHighWatermarkBytes,
+    );
     if (ratio >= 0.95) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
     if (ratio >= 0.8) return RECORD_CAPACITY_CACHE_NEAR_MS;
     return RECORD_CAPACITY_CACHE_FAR_MS;
@@ -2077,6 +2099,7 @@ export class LiveDataDO {
 
   private applyRecordCapacitySnapshot(snapshot: RecordCapacitySnapshot): void {
     this.recordCapacityRows = snapshot.rows;
+    this.recordCapacityBytes = snapshot.bytes;
     this.recordCapacityBlocked = snapshot.blocked;
     this.recordCapacityNextCheckAt = snapshot.nextCheckAt;
   }
@@ -2085,12 +2108,19 @@ export class LiveDataDO {
     if (!raw || typeof raw !== 'object') return null;
     const value = raw as Partial<RecordCapacitySnapshot>;
     const rows = Number(value.rows);
+    const bytes = Number(value.bytes);
     const checkedAt = Number(value.checkedAt);
     const nextCheckAt = Number(value.nextCheckAt);
     const highWatermarkRows = Number(value.highWatermarkRows);
+    const highWatermarkBytes = Number(value.highWatermarkBytes);
     if (
       !Number.isFinite(rows) ||
       rows < 0 ||
+      !Number.isFinite(bytes) ||
+      bytes < 0 ||
+      !Number.isFinite(highWatermarkBytes) ||
+      highWatermarkBytes < RECORD_HIGH_WATERMARK_MIN_BYTES ||
+      highWatermarkBytes > RECORD_HIGH_WATERMARK_MAX_BYTES ||
       !Number.isFinite(checkedAt) ||
       checkedAt <= 0 ||
       !Number.isFinite(nextCheckAt) ||
@@ -2103,15 +2133,19 @@ export class LiveDataDO {
     }
     return {
       rows,
+      bytes,
       blocked: Boolean(value.blocked),
       checkedAt,
       nextCheckAt,
       highWatermarkRows,
+      highWatermarkBytes,
     };
   }
 
   private isReusableRecordCapacitySnapshot(snapshot: RecordCapacitySnapshot, now: number): boolean {
-    return snapshot.highWatermarkRows === this.recordHighWatermarkRows && snapshot.nextCheckAt > now;
+    return snapshot.highWatermarkRows === this.recordHighWatermarkRows
+      && snapshot.highWatermarkBytes === this.recordHighWatermarkBytes
+      && snapshot.nextCheckAt > now;
   }
 
   private async readReusableRecordCapacitySnapshot(now: number): Promise<RecordCapacitySnapshot | null> {
@@ -2137,6 +2171,7 @@ export class LiveDataDO {
   private invalidateRecordCapacityMemorySnapshot(): void {
     this.recordCapacityNextCheckAt = 0;
     this.recordCapacityRows = 0;
+    this.recordCapacityBytes = 0;
     this.recordCapacityBlocked = false;
   }
 
@@ -2154,24 +2189,38 @@ export class LiveDataDO {
     }
 
     try {
-      const counts = await db.getHistoryStorageRowCounts(database);
+      // 字节是主熔断线（Supabase 卡的就是磁盘字节），行数保留为次要边界，谁先到谁熔断。
+      const [counts, sizes] = await Promise.all([
+        db.getHistoryStorageRowCounts(database),
+        db.getHistoryStorageBytes(database),
+      ]);
       this.recordCapacityRows = counts.records + counts.gpu_records + counts.gpu_snapshots + counts.ping_records + counts.ping_snapshots;
-      this.recordCapacityBlocked = this.recordCapacityRows >= this.recordHighWatermarkRows;
+      this.recordCapacityBytes = Number(sizes.total) || 0;
+      const bytesBlocked = this.recordCapacityBytes >= this.recordHighWatermarkBytes;
+      const rowsBlocked = this.recordCapacityRows >= this.recordHighWatermarkRows;
+      this.recordCapacityBlocked = bytesBlocked || rowsBlocked;
       this.recordCapacityNextCheckAt = now + this.capacityCheckDelayMs();
       await this.writeRecordCapacitySnapshot({
         rows: this.recordCapacityRows,
+        bytes: this.recordCapacityBytes,
         blocked: this.recordCapacityBlocked,
         checkedAt: now,
         nextCheckAt: this.recordCapacityNextCheckAt,
         highWatermarkRows: this.recordHighWatermarkRows,
+        highWatermarkBytes: this.recordHighWatermarkBytes,
       });
       if (this.recordCapacityBlocked && now - this.recordCapacityLastAuditAt >= RECORD_CAPACITY_AUDIT_THROTTLE_MS) {
         this.recordCapacityLastAuditAt = now;
+        // 写清楚是哪条线跳的：只报一个总数会让人对着错的旋钮调半天。
+        const trigger = bytesBlocked ? 'size' : 'row count';
         await bestEffortRecordHealthEvent(
           database,
           'do_record_persistence',
           'error',
-          `record persistence paused at ${this.recordCapacityRows}/${this.recordHighWatermarkRows} rows; live data continues without history writes`,
+          `record persistence paused by history ${trigger}: `
+          + `${this.recordCapacityBytes}/${this.recordHighWatermarkBytes} bytes, `
+          + `${this.recordCapacityRows}/${this.recordHighWatermarkRows} rows; `
+          + 'live data continues without history writes',
           { auditAction: 'do_record_capacity_high_watermark' },
         );
       }

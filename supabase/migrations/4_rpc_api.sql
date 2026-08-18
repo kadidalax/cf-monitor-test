@@ -2324,6 +2324,29 @@ as $$
   );
 $$;
 
+-- 历史表的真实磁盘占用（含索引与 TOAST）。
+-- 熔断必须按字节量：Supabase 卡的是磁盘字节，而同样行数可能对应 72MB 也可能 189MB，
+-- 数行数还完全不含索引开销，熔断点落不到真正快满的地方。
+create or replace function public.cfm_history_storage_bytes()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select jsonb_build_object(
+    'records', pg_total_relation_size('public.records'),
+    'gpu_records', pg_total_relation_size('public.gpu_records'),
+    'gpu_snapshots', pg_total_relation_size('public.gpu_snapshots'),
+    'ping_records', pg_total_relation_size('public.ping_records'),
+    'ping_snapshots', pg_total_relation_size('public.ping_snapshots'),
+    'total', pg_total_relation_size('public.records')
+      + pg_total_relation_size('public.gpu_records')
+      + pg_total_relation_size('public.gpu_snapshots')
+      + pg_total_relation_size('public.ping_records')
+      + pg_total_relation_size('public.ping_snapshots')
+  );
+$$;
+
 create or replace function public.cfm_storage_row_counts()
 returns jsonb
 language sql
@@ -3240,6 +3263,10 @@ revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, t
 revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) from authenticated;
 grant execute on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) to service_role;
 
+revoke all on function public.cfm_history_storage_bytes() from public;
+revoke all on function public.cfm_history_storage_bytes() from anon;
+revoke all on function public.cfm_history_storage_bytes() from authenticated;
+grant execute on function public.cfm_history_storage_bytes() to service_role;
 revoke all on function public.cfm_history_storage_counts() from public;
 revoke all on function public.cfm_history_storage_counts() from anon;
 revoke all on function public.cfm_history_storage_counts() from authenticated;

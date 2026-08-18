@@ -102,6 +102,7 @@ const RECORD_PERSISTENCE_SETTING_KEYS = new Set([
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
+  'record_high_watermark_bytes',
 ]);
 const CAPACITY_ESTIMATE_SETTING_KEYS = [
   'record_enabled',
@@ -135,6 +136,7 @@ const SETTINGS_SCOPE_KEYS = {
     'record_persist_interval_sec',
     'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
+    'record_high_watermark_bytes',
     'capacity_daily_view_minutes',
     'offline_confirm_rounds',
   ],

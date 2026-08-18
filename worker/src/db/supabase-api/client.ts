@@ -1,4 +1,5 @@
-import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
+import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts,
+  HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
 import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
@@ -762,6 +763,10 @@ async function getSupabasePingRecordsForTaskSpecs(
 
 export function getSupabaseHistoryStorageRowCounts(env: SupabaseApiEnv): Promise<HistoryTableRowCounts> {
   return callSupabaseRpc<HistoryTableRowCounts>(env, 'cfm_history_storage_counts');
+}
+
+export function getSupabaseHistoryStorageBytes(env: SupabaseApiEnv): Promise<HistoryTableByteSizes> {
+  return callSupabaseRpc<HistoryTableByteSizes>(env, 'cfm_history_storage_bytes');
 }
 
 export function getSupabaseStorageRowCounts(env: SupabaseApiEnv): Promise<TableRowCounts> {

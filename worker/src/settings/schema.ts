@@ -125,6 +125,16 @@ export const SETTING_SCHEMA = {
     min: 1000,
     max: 10000000,
   },
+  // 历史表真实磁盘占用（含索引）的熔断线，字节。Supabase 免费库卡的是磁盘字节，
+  // 行数只是它的粗糙代理：同样行数可能对应 72MB 也可能 189MB。
+  // 默认 400 MiB，给非历史表与索引膨胀留出余量。
+  record_high_watermark_bytes: {
+    type: 'integer',
+    defaultValue: '419430400',
+    public: false,
+    min: 16777216,
+    max: 549755813888,
+  },
   capacity_daily_view_minutes: {
     type: 'integer',
     defaultValue: '60',
