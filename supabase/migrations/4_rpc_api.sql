@@ -1,6 +1,15 @@
 -- Source: 20260622010000_add_worker_data_api_phase1_rpc.sql
 set local search_path = public;
 
+-- ⚠️ 本文件里「新增列」的 DDL 必须排在任何引用该列的函数定义之前。
+-- language sql 的函数体在 CREATE 时就做完整语义校验，列不存在会当场报 42703；
+-- 存量库走的正是这条路径（全新库由 1_core_schema.sql 建列，本地怎么试都不复现）。
+-- 每月流量重置日：节点级配置，经 agent policy 下发。被 cfm_admin_clients 与
+-- cfm_create_client（均为 language sql）引用，故必须留在这里，不能放进下方 DDL 块。
+alter table clients add column if not exists traffic_reset_day smallint not null default 1;
+alter table clients drop constraint if exists clients_traffic_reset_day_check;
+alter table clients add constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+
 -- Phase 1 Worker Data API RPC. These functions are called only by the Worker
 -- with Supabase service_role; browsers still talk only to the Worker.
 
@@ -1452,10 +1461,7 @@ begin
 end;
 $$;
 
--- 每月流量重置日：节点级配置，经 agent policy 下发。
-alter table clients add column if not exists traffic_reset_day smallint not null default 1;
-alter table clients drop constraint if exists clients_traffic_reset_day_check;
-alter table clients add constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+-- 每月流量重置日的建列 DDL 已提到文件顶部（被 language sql 的函数体引用，必须更早执行）。
 -- 以下两个默认值此前靠应用层补丁绕开迁移，本批一并正规化（只影响新建行，存量配置不动）。
 alter table clients alter column traffic_limit_type set default 'sum';
 alter table offline_notifications alter column grace_period set default 360;
