@@ -34,7 +34,11 @@ assert.doesNotMatch(agentRoutesSql, /rotateClientToken\(/);
 assert.equal((allMigrationSql.match(/create or replace function public\.cfm_create_client\(/gi) || []).length, 1);
 assert.equal((allMigrationSql.match(/create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)/gi) || []).length, 1);
 assert.doesNotMatch(allMigrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token_hash text\)/i);
-assert.match(migrationSql, /insert into clients \(uuid, token, token_hash, token_rotated_at, name, sort_order\)[\s\S]*?input_client->>'token',[\s\S]*?input_client->>'token_hash'/i);
+// 建节点必须同时落库明文 token 与 token_hash——漏掉哪一个都会让新节点的
+// 安装 Token 读不回来（2026-07-12 的既有故障）。
+// 这里只锁「token/token_hash 进了 insert 列并被赋值」，不锁整张列清单：
+// 列清单会随功能增长（如 traffic_reset_day），锁死会让每次加字段都误报。
+assert.match(migrationSql, /insert into clients \([\s\S]*?\btoken\b[\s\S]*?\btoken_hash\b[\s\S]*?\)[\s\S]*?input_client->>'token',[\s\S]*?input_client->>'token_hash'/i);
 assert.match(migrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)[\s\S]*?set token = input_token,[\s\S]*?token_hash = input_token_hash/i);
 assert.doesNotMatch(featureSchemaSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 assert.doesNotMatch(runtimeDefaultsSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);

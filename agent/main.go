@@ -402,6 +402,9 @@ type serverMessage struct {
 	ViewerTTLSec      int                `json:"viewer_ttl_sec,omitempty"`
 	PolicyTTL         int                `json:"policy_ttl_sec,omitempty"`
 	IdlePolicyTTL     int                `json:"idle_policy_ttl_sec,omitempty"`
+	// 指针：字段缺席表示「后台没有这个节点的重置日」，此时保留本地取值，
+	// 不能被一个默认 1 悄悄改掉安装时指定的 --traffic-reset-day。
+	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
 }
 
 type agentPolicy = serverMessage
@@ -1228,6 +1231,7 @@ func runHTTPReporter() {
 				}
 				policyExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second)
 				pingState.applyPolicy(policy)
+				applyTrafficResetDayPolicy(policy)
 				nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
 				if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
 					currentSampleInterval = nextSampleInterval
@@ -1367,6 +1371,7 @@ func runWebSocketSession(
 				continue
 			}
 			pingState.applyPolicy(policy)
+			applyTrafficResetDayPolicy(policy)
 			nextInterval, nextUploadInterval := policyDurations(policy, currentInterval)
 			if nextInterval != currentInterval || nextUploadInterval != currentUploadInterval {
 				currentInterval = nextInterval
@@ -2707,6 +2712,42 @@ func newTrafficResetTracker(resetDay int, token string, scope string) *trafficRe
 		resetDay:  normalizeTrafficResetDay(resetDay),
 		scope:     scope,
 		statePath: trafficResetStatePath(token),
+	}
+}
+
+// setResetDay 更新重置日。改动会让下一次 adjust 因 period key 变化而走重建分支，
+// 当期累计从此刻重新起算——这是设计意图（周期定义变了，旧累计无法换算），
+// 所以后台表单上必须提示用户。
+func (t *trafficResetTracker) setResetDay(day int) bool {
+	if t == nil {
+		return false
+	}
+	day = normalizeTrafficResetDay(day)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.resetDay == day {
+		return false
+	}
+	t.resetDay = day
+	return true
+}
+
+// applyTrafficResetDayPolicy 应用后台下发的流量重置日。
+// 优先级：policy > --traffic-reset-day > 环境变量 > 默认 1。
+// 非法值一律忽略而不是钳到边界：服务端已校验 1~31，能到这里的越界值只可能是异常，
+// 钳成 1 会把用户的配置悄悄改掉。
+func applyTrafficResetDayPolicy(policy agentPolicy) {
+	if policy.TrafficResetDay == nil {
+		return
+	}
+	day := *policy.TrafficResetDay
+	if day < 1 || day > 31 || day == trafficResetDay {
+		return
+	}
+	previous := trafficResetDay
+	trafficResetDay = day
+	if trafficTracker.setResetDay(day) {
+		log.Printf("traffic reset day updated by server policy: %d -> %d (current period restarts)", previous, day)
 	}
 }
 

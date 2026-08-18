@@ -217,6 +217,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
     hidden: clientBooleanField(value, 'hidden'),
     traffic_limit: clientNumberField(value, 'traffic_limit'),
     traffic_limit_type: clientStringField(value, 'traffic_limit_type') || 'sum',
+    traffic_reset_day: clientNumberField(value, 'traffic_reset_day') || 1,
     sort_order: typeof value.sort_order === 'number' && Number.isFinite(value.sort_order) ? value.sort_order : undefined,
     created_at: clientStringField(value, 'created_at'),
     updated_at: clientStringField(value, 'updated_at'),

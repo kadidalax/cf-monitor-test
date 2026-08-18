@@ -34,7 +34,10 @@ create table if not exists clients (
   tags text not null default '',
   hidden smallint not null default 0,
   traffic_limit bigint not null default 0,
-  traffic_limit_type text not null default 'max',
+  -- 默认口径为「总计」（上行+下行），与后台新建节点的默认值一致。
+  traffic_limit_type text not null default 'sum',
+  -- 每月流量重置日（1~31）。探针按它切分统计周期，改这个值会清零当期累计。
+  traffic_reset_day smallint not null default 1,
   sort_order integer not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -260,7 +263,7 @@ create index if not exists idx_website_checks_monitor_source_time on website_che
 create table if not exists offline_notifications (
   client text primary key references clients(uuid) on delete cascade,
   enable smallint not null default 0,
-  grace_period integer not null default 180,
+  grace_period integer not null default 360,
   last_notified timestamptz
 );
 

@@ -132,6 +132,9 @@ interface AgentPolicyMessage {
   website_probe_tasks: db.WebsiteMonitor[];
   policy_ttl_sec: number;
   idle_policy_ttl_sec: number;
+  // 只有在后台确实存有该节点的重置日时才下发；缺省时探针保留自己的
+  // --traffic-reset-day / 环境变量取值，不会被一个「默认 1」悄悄改掉。
+  traffic_reset_day?: number;
   timestamp: number;
 }
 
@@ -403,6 +406,8 @@ export class LiveDataDO {
   private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
   private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
+  private trafficResetDays = new Map<string, number>();
+  private trafficResetDaysAt = 0;
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private basicInfoSignatures = new Map<string, string>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
@@ -940,6 +945,25 @@ export class LiveDataDO {
     return count;
   }
 
+  // 节点的流量重置日来自后台快照。返回 undefined 表示「后台没有这个节点的记录」，
+  // 此时不下发该字段，让探针保留安装时的取值。
+  private async trafficResetDayFor(clientId?: string): Promise<number | undefined> {
+    if (!clientId) return undefined;
+    const snapshotAt = this.adminClientsUpdatedAt || 0;
+    if (this.trafficResetDaysAt === 0 || snapshotAt > this.trafficResetDaysAt) {
+      const snapshot = await this.readAdminClientsSnapshot();
+      const next = new Map<string, number>();
+      for (const client of snapshot?.clients || []) {
+        const uuid = String(client.uuid || '');
+        const day = Number(client.traffic_reset_day);
+        if (uuid && Number.isFinite(day) && day >= 1 && day <= 31) next.set(uuid, Math.trunc(day));
+      }
+      this.trafficResetDays = next;
+      this.trafficResetDaysAt = Math.max(snapshotAt, Date.now());
+    }
+    return this.trafficResetDays.get(clientId);
+  }
+
   private async buildAgentPolicy(
     now: number,
     reportNow: boolean,
@@ -965,6 +989,7 @@ export class LiveDataDO {
       website_probe_tasks: websiteProbeTasks,
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
+      traffic_reset_day: await this.trafficResetDayFor(clientId),
       timestamp: now,
     };
   }

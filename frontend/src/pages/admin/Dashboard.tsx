@@ -75,6 +75,7 @@ interface AdminClient extends ClientInfo {
   updated_at: string;
   auto_renewal: boolean;
   traffic_limit_type: string;
+  traffic_reset_day?: number;
 }
 
 type CommandClient = Partial<AdminClient> & Pick<AdminClient, 'uuid' | 'name'> & { token?: string };
@@ -388,7 +389,12 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
   useEffect(() => {
     let cancelled = false;
     if (open) {
-      setInstallOptions({ ...defaultAgentInstallOptions });
+      // 重置日以后台记录为准：装机命令与节点配置从一开始就一致，
+      // 否则装完立刻会被 policy 改回后台的值，并连带清零当期累计。
+      setInstallOptions({
+        ...defaultAgentInstallOptions,
+        trafficResetDay: String(client.traffic_reset_day || 1),
+      });
       setAgentToken(client.token || '');
       fetchPublicSettings()
         .then(d => {
@@ -556,6 +562,7 @@ function FieldInput({
   placeholder,
   helper,
   min,
+  max,
   step,
 }: {
   label: string;
@@ -566,6 +573,7 @@ function FieldInput({
   placeholder?: string;
   helper?: string;
   min?: string | number;
+  max?: string | number;
   step?: string | number;
 }) {
   return (
@@ -581,6 +589,7 @@ function FieldInput({
             type={(type || 'text') as never}
             placeholder={placeholder}
             min={min as never}
+            max={max as never}
             step={step as never}
           />
         )
@@ -601,6 +610,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       group: client.group || '', tags: client.tags || '',
       price: client.price ?? 0, currency: client.currency || '¥', billing_cycle: client.billing_cycle || 30,
       traffic_limit_form: createTrafficLimitFormValue(client.traffic_limit, client.traffic_limit_type),
+      traffic_reset_day: client.traffic_reset_day || 1,
       expired_at: toDateInputValue(client.expired_at),
       hidden: client.hidden || false, auto_renewal: client.auto_renewal || false,
     });
@@ -626,6 +636,12 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       payload.traffic_limit = trafficLimit.traffic_limit;
       payload.traffic_limit_type = trafficLimit.traffic_limit_type;
       delete payload.traffic_limit_form;
+      const resetDay = parseInt(String(payload.traffic_reset_day ?? 1), 10);
+      if (!Number.isFinite(resetDay) || resetDay < 1 || resetDay > 31) {
+        toast.error('流量重置日必须是 1 到 31 之间的整数');
+        return;
+      }
+      payload.traffic_reset_day = resetDay;
       if (payload.expired_at === '') payload.expired_at = null;
       const result = await apiFetch('/admin/clients/' + client.uuid + '/edit', { method: 'POST', body: JSON.stringify(payload) });
       if (result.success || result.uuid) {
@@ -688,6 +704,21 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
               value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
               onChange={(value) => update('traffic_limit_form', value)}
             />
+            <Box>
+              <FieldInput
+                label="流量重置日"
+                value={String(form.traffic_reset_day ?? 1)}
+                onChange={v => update('traffic_reset_day', v)}
+                type="number"
+                min="1"
+                max="31"
+                step="1"
+              />
+              <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
+                每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。
+                <Text size="1" color="orange"> 改这个值会让当期已累计的流量从此刻重新起算。</Text>
+              </Text>
+            </Box>
             <Flex className="billing-switch-row" gap="3">
               <Flex className="billing-switch-item" align="center" justify="between">
                 <Text size="2">对游客隐藏</Text>

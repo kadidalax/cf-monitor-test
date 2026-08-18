@@ -1554,3 +1554,71 @@ func TestPrepareReportDoesNotSpikeOnInterfaceAppearance(t *testing.T) {
 		t.Fatalf("NetIn = %d, want 20 (2400 字节 / 120 秒)", out.NetIn)
 	}
 }
+
+// ===== 后台下发的流量重置日 =====
+
+func TestApplyTrafficResetDayPolicy(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	oldDay, oldTracker := trafficResetDay, trafficTracker
+	defer func() { trafficResetDay, trafficTracker = oldDay, oldTracker }()
+
+	trafficResetDay = 1
+	trafficTracker = newTrafficResetTracker(1, "token", "scope")
+
+	day := func(v int) *int { return &v }
+
+	// 后台没有这个节点的记录 → 字段缺席 → 保留安装时指定的值
+	trafficResetDay = 15
+	trafficTracker = newTrafficResetTracker(15, "token", "scope")
+	applyTrafficResetDayPolicy(agentPolicy{Type: "policy"})
+	if trafficResetDay != 15 {
+		t.Fatalf("reset day = %d, want 15 (policy 缺字段时不得改动本地取值)", trafficResetDay)
+	}
+
+	// 后台下发 → 覆盖本地取值（优先级 policy > flag > env > 默认）
+	applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(5)})
+	if trafficResetDay != 5 {
+		t.Fatalf("reset day = %d, want 5", trafficResetDay)
+	}
+	if got := trafficTracker.resetDay; got != 5 {
+		t.Fatalf("tracker reset day = %d, want 5", got)
+	}
+
+	// 非法值忽略而不是钳到边界：钳成 1 会把用户配置悄悄改掉
+	for _, invalid := range []int{0, -3, 32, 999} {
+		applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(invalid)})
+		if trafficResetDay != 5 {
+			t.Fatalf("invalid policy day %d changed reset day to %d", invalid, trafficResetDay)
+		}
+	}
+}
+
+// 改重置日必须让当期累计重新起算——周期定义变了，旧累计无法换算。
+// 后台表单上的提示语就是基于这个行为，行为若变了提示语就成了假话。
+func TestChangingResetDayRestartsPeriod(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	tracker := newTrafficResetTracker(1, "token", "scope")
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	booted := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	tracker.adjustSinceBoot(1_000, 2_000, now, booted)
+	up, down := tracker.adjustSinceBoot(5_000, 6_000, now.Add(time.Minute), booted)
+	if up != 5_000 || down != 6_000 {
+		t.Fatalf("period totals = %d/%d, want 5000/6000", up, down)
+	}
+
+	if !tracker.setResetDay(15) {
+		t.Fatal("setResetDay(15) 应报告发生了变化")
+	}
+	up, down = tracker.adjustSinceBoot(5_100, 6_100, now.Add(2*time.Minute), booted)
+	if up >= 5_000 || down >= 6_000 {
+		t.Fatalf("period totals = %d/%d, want a restarted period well below the old totals", up, down)
+	}
+
+	if tracker.setResetDay(15) {
+		t.Fatal("重复设置同一个值不应报告变化")
+	}
+}

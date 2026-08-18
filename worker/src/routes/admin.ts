@@ -86,12 +86,6 @@ const ADMIN_CLIENTS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
-/**
- * 新建节点默认的流量统计口径。
- * 数据库列默认值仍是 'max'，改迁移会迫使存量用户重新初始化数据库，
- * 因此在写入侧显式指定，只影响新建节点，存量节点不受影响。
- */
-const DEFAULT_TRAFFIC_LIMIT_TYPE = 'sum';
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
 const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
@@ -1501,21 +1495,6 @@ adminRoutes.post('/clients/add', async (c) => {
     } catch (error) {
       if (isClientUniqueConflict(error)) return c.json({ error: '客户端 UUID 或 Token 已存在' }, 409);
       throw error;
-    }
-    // 新建节点的流量统计口径默认「总计」。必须在建完之后单独写一次：
-    // RPC cfm_create_client 的 insert 列是写死的（uuid/token/token_hash/
-    // token_rotated_at/name/sort_order），传再多字段也不会进库，
-    // 于是该列只会取数据库默认值，而那个默认值仍是 'max'。
-    // 改迁移能一步到位，但会迫使所有存量用户重新初始化数据库，代价不成比例。
-    // 失败不影响建节点本身，用户仍可在编辑里改。
-    try {
-      const updated = await timed(metrics, 'db_default_traffic_type', () =>
-        db.updateClientAndReturn(database, createdClient.uuid, {
-          traffic_limit_type: DEFAULT_TRAFFIC_LIMIT_TYPE,
-        }));
-      if (updated) createdClient = updated;
-    } catch {
-      // 忽略：节点已创建成功，默认口径没落上不算失败
     }
     const safeClient = hideAdminClientToken(createdClient);
     invalidateAdminClientsCache();

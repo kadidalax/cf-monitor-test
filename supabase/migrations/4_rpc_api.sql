@@ -65,7 +65,7 @@ as $$
       kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
       mem_total, swap_total, disk_total, version, price, billing_cycle,
       auto_renewal, currency, expired_at, "group", tags, hidden,
-      traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
+      traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
     from clients
     order by sort_order asc, lower(name) asc, created_at asc
   ) row_data;
@@ -253,14 +253,19 @@ returns jsonb
 language sql
 set search_path = public
 as $$
-  insert into clients (uuid, token, token_hash, token_rotated_at, name, sort_order)
+  insert into clients (
+    uuid, token, token_hash, token_rotated_at, name, sort_order,
+    traffic_limit_type, traffic_reset_day
+  )
   values (
     coalesce(nullif(input_client->>'uuid', ''), gen_random_uuid()::text),
     input_client->>'token',
     input_client->>'token_hash',
     now(),
     coalesce(input_client->>'name', ''),
-    coalesce((input_client->>'sort_order')::integer, (select coalesce(max(sort_order), 0) + 1 from clients))
+    coalesce((input_client->>'sort_order')::integer, (select coalesce(max(sort_order), 0) + 1 from clients)),
+    coalesce(nullif(input_client->>'traffic_limit_type', ''), 'sum'),
+    least(greatest(coalesce((input_client->>'traffic_reset_day')::smallint, 1), 1), 31)
   )
   returning to_jsonb(clients);
 $$;
@@ -359,7 +364,10 @@ begin
     tags = case when input_patch ? 'tags' then coalesce(input_patch->>'tags', '') else tags end,
     hidden = case when input_patch ? 'hidden' then case when lower(coalesce(input_patch->>'hidden', '')) in ('true', '1') then 1 else 0 end else hidden end,
     traffic_limit = case when input_patch ? 'traffic_limit' then coalesce((input_patch->>'traffic_limit')::bigint, 0) else traffic_limit end,
-    traffic_limit_type = case when input_patch ? 'traffic_limit_type' then coalesce(input_patch->>'traffic_limit_type', 'max') else traffic_limit_type end,
+    traffic_limit_type = case when input_patch ? 'traffic_limit_type' then coalesce(input_patch->>'traffic_limit_type', 'sum') else traffic_limit_type end,
+    traffic_reset_day = case when input_patch ? 'traffic_reset_day'
+      then least(greatest(coalesce((input_patch->>'traffic_reset_day')::smallint, 1), 1), 31)
+      else traffic_reset_day end,
     sort_order = case when input_patch ? 'sort_order' then coalesce((input_patch->>'sort_order')::integer, 0) else sort_order end,
     updated_at = now()
   where uuid = input_uuid
@@ -1017,7 +1025,8 @@ as $$
     select distinct on (client)
       client,
       case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
-      coalesce(nullif(item->>'grace_period', '')::integer, 180) as grace_period,
+      -- 与前端 DEFAULT_GRACE_PERIOD_SEC 及列默认值一致（360）。
+      coalesce(nullif(item->>'grace_period', '')::integer, 360) as grace_period,
       ord
     from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
     cross join lateral (select trim(item->>'client') as client) normalized
@@ -1442,6 +1451,14 @@ begin
   );
 end;
 $$;
+
+-- 每月流量重置日：节点级配置，经 agent policy 下发。
+alter table clients add column if not exists traffic_reset_day smallint not null default 1;
+alter table clients drop constraint if exists clients_traffic_reset_day_check;
+alter table clients add constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+-- 以下两个默认值此前靠应用层补丁绕开迁移，本批一并正规化（只影响新建行，存量配置不动）。
+alter table clients alter column traffic_limit_type set default 'sum';
+alter table offline_notifications alter column grace_period set default 360;
 
 -- 负载「不可用」用 null 表示：lxcfs 未虚拟化 loadavg 的容器读到的是宿主机负载，
 -- 报 0 会被读成空闲。存量库的 records.load 建成了 not null default 0，这里幂等放开。
@@ -4892,7 +4909,8 @@ as $$
     select distinct on (client)
       client,
       case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
-      coalesce(nullif(item->>'grace_period', '')::integer, 180) as grace_period,
+      -- 与前端 DEFAULT_GRACE_PERIOD_SEC 及列默认值一致（360）。
+      coalesce(nullif(item->>'grace_period', '')::integer, 360) as grace_period,
       ord
     from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
     cross join lateral (select trim(item->>'client') as client) normalized

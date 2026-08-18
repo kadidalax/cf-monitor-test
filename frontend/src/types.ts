@@ -27,6 +27,7 @@ export interface ClientInfo {
   expired_at: string;
   traffic_limit: number;
   traffic_limit_type: string;
+  traffic_reset_day?: number;
   sort_order?: number;
   gpu_name?: string;
   version?: string;

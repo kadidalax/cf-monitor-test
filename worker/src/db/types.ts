@@ -32,6 +32,8 @@ export interface Client {
   hidden: boolean;
   traffic_limit: number;
   traffic_limit_type: string;
+  // 每月流量重置日（1~31）。经 agent policy 下发；改它会让探针重建当期统计。
+  traffic_reset_day: number;
   sort_order?: number;
   created_at: string;
   updated_at: string;
