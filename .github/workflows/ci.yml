@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Both packages type-check here: frontend runs `tsc --noEmit`,
+      # worker runs `wrangler types --check && tsc --noEmit`.
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      # `npm test` chains test:js (node --test, all 59 .test.mjs across the repo)
+      # and test:go. The gate is the exit code -- never the output line count:
+      # node --test prints per-file for top-level bare assertions and per-test for
+      # test() files, so counting lines silently misses whole files.
+      - name: Test
+        run: npm test
+
+      - name: Check migration drift
+        run: |
+          npm run build:migrations
+          git diff --exit-code -- supabase/ worker/src/generated/
