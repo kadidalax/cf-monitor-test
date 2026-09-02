@@ -12,7 +12,18 @@ export interface HealthEvent {
   last_success_at?: string;
   last_failure_at?: string;
   detail?: string;
+  /** 由 buildHealthCheck 现算并附加；不落盘，parseHealthEvent 不会读它。 */
+  stale?: boolean;
 }
+
+// 时效判定实现在 ./health-staleness.ts（无依赖，测试可直接加载）；这里转出去，
+// 调用方仍从 observability 一处取健康相关的东西。
+export {
+  HEALTH_STALE_AFTER_MS,
+  healthComponentsOk,
+  isHealthEventStale,
+  markStaleEvents,
+} from './health-staleness.ts';
 
 /**
  * 存储型健康组件：写入 `settings` 的 `health:<component>`，由 recordHealthEvent 落盘、

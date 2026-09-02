@@ -64,6 +64,8 @@ import { getDatabase, type AppDatabase } from '../db/provider';
 import {
   bestEffortRecordHealthEvent,
   errorDetail,
+  healthComponentsOk,
+  markStaleEvents,
   readHealthEvents,
   type HealthEvent,
 } from '../utils/observability';
@@ -928,7 +930,10 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
   const components: Record<string, HealthEvent | null> = {};
   const databaseProbe = healthEvent('database_connection_probe', 'ok', 'Supabase HTTP API/RPC configured', checkedAt);
   if (databaseProbe.status !== 'error') {
-    Object.assign(components, await readHealthEvents(database));
+    // 只给存储型事件标 stale：现算探针每次请求都是新鲜的，标了没有意义，
+    // 更不能让一个当场算出来的 error 被判成陈旧而漏报。所以标记必须在这里做完，
+    // 下面那些 probe 是标记之后才写进 components 的。
+    Object.assign(components, markStaleEvents(await readHealthEvents(database), Date.parse(checkedAt)));
   }
   components.database_connection_probe = databaseProbe;
 
@@ -942,8 +947,9 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
   components.do_binding_probe = await runDoProbe(c, checkedAt);
   components.rate_limit_probe = await runRateLimitProbe(c, checkedAt);
   components.secret_probe = runSecretProbe(c.env, checkedAt);
-  const ok = databaseProbe.status !== 'error' &&
-    Object.values(components).every(event => !event || event.status !== 'error');
+  // status 保持原样（陈旧不等于没发生过，详情页仍要看得到），
+  // 只是不再让它拉红整个端点。
+  const ok = databaseProbe.status !== 'error' && healthComponentsOk(components);
 
   return {
     body: {
