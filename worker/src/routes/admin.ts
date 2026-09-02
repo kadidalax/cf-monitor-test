@@ -2337,7 +2337,11 @@ adminRoutes.post('/settings', async (c) => {
     else if (settingsBody.webhook_secret === '') delete settingsBody.webhook_secret;
     if (settingsBody.webhook_headers_json === '') delete settingsBody.webhook_headers_json;
     if (settingsBody.webhook_password === '') delete settingsBody.webhook_password;
-    const normalized = sanitizeSettingsForStorage(settingsBody);
+    // 只有写入路径拦自指：读取路径（buildAdminSettings）不传 selfHost，
+    // 否则存量的坏值会在每次读取时被判无效、回落成默认值，等于静默清空用户配置。
+    const normalized = sanitizeSettingsForStorage(settingsBody, {
+      selfHost: new URL(c.req.url).hostname,
+    });
     if (!normalized.ok) {
       return c.json({ error: '设置校验失败', details: normalized.errors }, 400);
     }

@@ -480,11 +480,22 @@ function normalizeEmailRecipients(value: unknown): string | null {
   return [...new Set(recipients)].join(',');
 }
 
-function normalizeWebhookUrl(value: unknown): string | null {
-  if (value === '' || value === null || value === undefined) return '';
-  if (typeof value !== 'string') return null;
-  const normalized = validateWebhookUrl(value);
-  return normalized.ok ? normalized.url : null;
+/**
+ * 「填了本站地址」要单独回一句人话——落到通用的「类型或取值无效」上，
+ * 用户只会反复换写法而不知道错在哪。
+ */
+function normalizeWebhookUrlForWrite(
+  value: unknown,
+  selfHost?: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  if (value === '' || value === null || value === undefined) return { ok: true, value: '' };
+  if (typeof value !== 'string') return { ok: false, error: 'webhook_url 类型或取值无效' };
+  const normalized = validateWebhookUrl(value, selfHost);
+  if (normalized.ok) return { ok: true, value: normalized.url };
+  if (normalized.error === 'self_host') {
+    return { ok: false, error: 'webhook_url 不能填本站地址，否则告警会绕回自己；请填写外部接收方的地址' };
+  }
+  return { ok: false, error: 'webhook_url 类型或取值无效' };
 }
 
 function normalizeWebhookContentType(value: unknown): string | null {
@@ -517,6 +528,7 @@ export function isKnownSettingKey(key: string): key is SettingKey {
 export function normalizeSettingValue(
   key: string,
   value: unknown,
+  selfHost?: string,
 ): { ok: true; value: string } | { ok: false; error: string } {
   if (!isKnownSettingKey(key)) {
     return { ok: false, error: `未知设置: ${key}` };
@@ -544,7 +556,13 @@ export function normalizeSettingValue(
       else if (key === 'email_smtp_host') normalized = normalizeSmtpHost(value);
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);
-      else if (key === 'webhook_url') normalized = normalizeWebhookUrl(value);
+      else if (key === 'webhook_url') {
+        // 不传 selfHost 时 normalizeWebhookUrl 的行为与改动前完全一致；
+        // 这里走详细版只为把 self_host 的提示带出去。
+        const result = normalizeWebhookUrlForWrite(value, selfHost);
+        if (!result.ok) return result;
+        normalized = result.value;
+      }
       else if (key === 'webhook_content_type') normalized = normalizeWebhookContentType(value);
       else if (key === 'webhook_headers_json') normalized = normalizeWebhookHeadersJson(value);
       else if (key === 'active_theme') {
@@ -580,7 +598,7 @@ export function normalizeSettingValue(
 
 export function sanitizeSettingsForStorage(
   input: unknown,
-  options: { ignoreRemoved?: boolean } = {},
+  options: { ignoreRemoved?: boolean; selfHost?: string } = {},
 ): { ok: boolean; settings: Record<string, string>; errors: string[]; ignoredKeys: string[] } {
   const ignoreRemoved = options.ignoreRemoved ?? true;
   if (!isPlainObject(input)) {
@@ -596,7 +614,7 @@ export function sanitizeSettingsForStorage(
       ignoredKeys.push(key);
       continue;
     }
-    const normalized = normalizeSettingValue(key, value);
+    const normalized = normalizeSettingValue(key, value, options.selfHost);
     if (!normalized.ok) {
       errors.push(normalized.error);
       continue;

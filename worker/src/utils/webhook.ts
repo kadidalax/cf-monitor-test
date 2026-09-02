@@ -88,7 +88,15 @@ function isUnsafeWebhookHostname(hostname: string): boolean {
   return false;
 }
 
-export function validateWebhookUrl(rawUrl: string): { ok: true; url: string; host: string } | { ok: false; error: string } {
+/**
+ * selfHost 传入本 Worker 自己的主机名时，指向自身的 webhook 会被拒。
+ * 不传则不做这项检查——已有调用方（发送路径、设置读取路径）不知道自己的域名，
+ * 行为保持原样。
+ */
+export function validateWebhookUrl(
+  rawUrl: string,
+  selfHost?: string,
+): { ok: true; url: string; host: string } | { ok: false; error: string } {
   let url: URL;
   try {
     url = new URL(String(rawUrl || '').trim());
@@ -99,6 +107,10 @@ export function validateWebhookUrl(rawUrl: string): { ok: true; url: string; hos
   if (!url.hostname) return { ok: false, error: 'invalid_host' };
   if (url.username || url.password) return { ok: false, error: 'url_credentials_not_allowed' };
   if (isUnsafeWebhookHostname(url.hostname)) return { ok: false, error: 'unsafe_host' };
+  // 指向本站会让告警绕回自己：Worker 收到自己发的请求，轻则把 404 记成一次发送失败、
+  // 再写一条健康 error，重则在告警风暴里自激。
+  const self = String(selfHost || '').trim().toLowerCase();
+  if (self && url.hostname.toLowerCase() === self) return { ok: false, error: 'self_host' };
   return { ok: true, url: url.toString(), host: url.hostname.toLowerCase() };
 }
 
