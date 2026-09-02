@@ -14,19 +14,36 @@ export interface HealthEvent {
   detail?: string;
 }
 
-export const HEALTH_COMPONENTS = [
-  'database_connection_probe',
+/**
+ * 存储型健康组件：写入 `settings` 的 `health:<component>`，由 recordHealthEvent 落盘、
+ * readHealthEvents 读回。这份清单必须与实际写入点一一对应——少一个名字，那个组件的
+ * 事件就永远读不出来（写进去了但没人查），健康页会当它不存在。
+ *
+ * 注意不含 database_connection_probe 等「现算探针」：那些没有任何写入点，
+ * 由 buildHealthCheck 在每次请求时当场算出，不走 settings。
+ */
+export const STORED_HEALTH_COMPONENTS = [
   'do_record_persistence',
   'ping_persistence',
+  'website_probe_persistence',
+  'agent_policy',
+  'agent_policy_website_probe_tasks',
+  'do_agent_policy',
+  'do_basic_info_sync',
+  'do_viewer_expiry',
+  'do_live_network_metadata',
   'telegram',
   'email',
   'webhook',
+  'notification',
   'cron_cleanup',
   'cron_load',
   'cron_offline',
   'cron_expiry',
   'cron_website',
 ] as const;
+
+export type StoredHealthComponent = typeof STORED_HEALTH_COMPONENTS[number];
 
 const HEALTH_KEY_PREFIX = 'health:';
 const AUDIT_THROTTLE_PREFIX = 'health:audit:last:';
@@ -95,7 +112,7 @@ async function shouldWriteAuditLog(
 
 export async function recordHealthEvent(
   database: HealthDatabase | undefined,
-  component: string,
+  component: StoredHealthComponent,
   status: HealthStatus,
   detail?: unknown,
   options: {
@@ -162,7 +179,7 @@ export async function recordHealthEvent(
 
 export async function bestEffortRecordHealthEvent(
   database: HealthDatabase | undefined,
-  component: string,
+  component: StoredHealthComponent,
   status: HealthStatus,
   detail?: unknown,
   options: Parameters<typeof recordHealthEvent>[4] = {},
@@ -176,7 +193,7 @@ export async function bestEffortRecordHealthEvent(
 
 export async function readHealthEvents(
   database: HealthDatabase,
-  components: readonly string[] = HEALTH_COMPONENTS,
+  components: readonly StoredHealthComponent[] = STORED_HEALTH_COMPONENTS,
 ): Promise<Record<string, HealthEvent | null>> {
   const events: Record<string, HealthEvent | null> = {};
   const keys = components.map(component => healthKey(component));

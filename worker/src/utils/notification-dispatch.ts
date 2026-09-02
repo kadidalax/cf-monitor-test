@@ -4,6 +4,7 @@ import type { NotificationMessage } from './notification-templates.ts';
 import { formatTelegramHtmlText, sendTelegramMessage } from './telegram.ts';
 import { sendWebhookMessage, type WebhookFormat, type WebhookSendResult } from './webhook.ts';
 import { isMaskedSecretPreview } from './secret-preview.ts';
+import type { StoredHealthComponent } from './observability.ts';
 
 export const NOTIFICATION_DISPATCH_SETTING_KEYS = [
   'notification_method',
@@ -68,7 +69,7 @@ type HealthStatus = 'ok' | 'warning' | 'error' | 'disabled';
 
 type RecordHealth = (
   database: db.QueryDatabase | undefined,
-  component: string,
+  component: StoredHealthComponent,
   status: HealthStatus,
   detail?: unknown,
   options?: {
@@ -119,7 +120,7 @@ function webhookFormat(value: string | undefined): WebhookFormat {
 async function record(
   deps: DispatchDependencies,
   database: db.QueryDatabase | undefined,
-  component: string,
+  component: StoredHealthComponent,
   status: HealthStatus,
   detail?: unknown,
   options?: Parameters<RecordHealth>[4],

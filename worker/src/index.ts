@@ -23,7 +23,7 @@ import { isMfaStepUpProtectedRequest } from './auth/mfa-policy';
 import { verifyMfaToken } from './auth/mfa-token';
 import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
-import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability';
+import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from './utils/notification-dispatch';
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
@@ -865,7 +865,7 @@ async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date):
 
 async function runScheduledStep(
   context: ScheduledRunContext,
-  component: string,
+  component: StoredHealthComponent,
   action: string,
   label: string,
   step: () => Promise<void>,

@@ -16,7 +16,7 @@ import {
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
 } from '../settings/schema';
-import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
+import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
 import { isRecordPersistDue } from '../utils/record-persist';
@@ -441,7 +441,7 @@ export class LiveDataDO {
     }
   }
 
-  private runBackground(component: string, promise: Promise<unknown>): void {
+  private runBackground(component: StoredHealthComponent, promise: Promise<unknown>): void {
     const task = promise.catch(async (error) => {
       const database = this.getQueryDatabase();
       if (!database) return;
@@ -2239,7 +2239,7 @@ export class LiveDataDO {
     return !this.recordCapacityBlocked;
   }
 
-  private async recordHotPathHealthOk(component: string, detail: string, now: number): Promise<void> {
+  private async recordHotPathHealthOk(component: StoredHealthComponent, detail: string, now: number): Promise<void> {
     const previous = this.healthOkLastWriteAt.get(component) || 0;
     if (now - previous < HOT_PATH_HEALTH_OK_THROTTLE_MS) return;
     this.healthOkLastWriteAt.set(component, now);
