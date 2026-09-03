@@ -111,14 +111,16 @@ async function shouldWriteAuditLog(
   nowMs: number,
   throttleMs: number,
 ): Promise<boolean> {
-  const key = auditThrottleKey(component, action);
-  const previous = await db.getSetting(database, key);
-  const previousMs = previous ? Date.parse(previous) : 0;
-  if (Number.isFinite(previousMs) && nowMs - previousMs < throttleMs) {
-    return false;
-  }
-  await db.setSetting(database, key, nowIso(nowMs));
-  return true;
+  // 判断与占位必须在同一条语句里完成。拆成「读上次时间 → 判断 → 写新时间」时，
+  // 两个并发请求会读到同一个旧时间戳、同时判定可写，同一条错误落两行审计日志。
+  // 时间戳仍由这里的 nowMs 生成而不是服务端 now()：健康事件的其它时间戳都出自
+  // Worker 时钟，混入第二套钟会让比较结果不可解释。
+  return db.tryClaimAuditThrottle(
+    database,
+    auditThrottleKey(component, action),
+    nowIso(nowMs),
+    throttleMs,
+  );
 }
 
 export async function recordHealthEvent(

@@ -141,3 +141,38 @@ test('注册表里没有无人写入的孤儿组件', () => {
     '注册表列了但没有任何写入点：要么名字拼错了，要么该写入点已被删除',
   );
 });
+
+// 审计节流的竞态只有数据库能真正挡住（settings 主键冲突串行化）。函数体里一旦
+// 又出现 getSetting/setSetting，说明判断被搬回了 Worker 侧，锁就不在了——而这种
+// 回退在单机上跑测试永远是绿的，只能从源码这一层拦。
+const shouldWriteAuditLogBody = (() => {
+  const body = OBSERVABILITY_SRC.match(
+    /async function shouldWriteAuditLog\([\s\S]*?\n\}\r?\n/,
+  );
+  if (!body) throw new Error('没能从 observability.ts 里截到 shouldWriteAuditLog 函数体');
+  return body[0];
+})();
+
+test('审计节流的判断与占位交给单条 RPC', () => {
+  assert.match(
+    shouldWriteAuditLogBody,
+    /db\.tryClaimAuditThrottle\(/,
+    'shouldWriteAuditLog 必须走原子 RPC',
+  );
+});
+
+test('审计节流不再自己读写 settings', () => {
+  assert.doesNotMatch(
+    shouldWriteAuditLogBody,
+    /db\.(getSetting|setSetting)\(/,
+    '读一次再写一次会让并发请求同时判定可写，同一条错误落多行审计日志',
+  );
+});
+
+test('审计节流的时间戳仍由 Worker 的钟生成', () => {
+  assert.match(
+    shouldWriteAuditLogBody,
+    /nowIso\(nowMs\)/,
+    '换成服务端 now() 会让同一事件的两个时间戳分属两套钟',
+  );
+});

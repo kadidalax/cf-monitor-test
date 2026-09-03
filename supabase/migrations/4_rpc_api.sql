@@ -3884,6 +3884,48 @@ as $$
   );
 $$;
 
+-- 审计节流：把「读上次时间 → 判断是否过期 → 写新时间」压成一条语句。
+-- 拆成读写两步时，两个并发请求会读到同一个旧时间戳、同时判定可写，同一条错误
+-- 于是落两行审计日志——节流形同虚设。这里靠 settings 主键冲突串行化：抢到的
+-- 那一方 do update 生效并被 returning 命中，没抢到的一方 where 为假、返回零行。
+-- 时间戳用调用方传入的 input_now 而不是服务端 now()：健康事件的其它时间戳全部
+-- 由 Worker 自己的时钟生成，这里混入服务端时钟会让同一事件的两个时间戳分属两套
+-- 钟，之后的比较不可解释。
+-- 值一律写成定宽 UTC ISO-8601（与 Worker 的 Date#toISOString 同格式），因此过期
+-- 判断直接按字符串比大小即可：各字段等宽零填充且标点位置一致，字典序等于时间序。
+-- 不 cast 成 timestamptz 是有意为之——cast 遇到脏值会抛异常，而这条路径本来就只
+-- 在系统已经出错时才走，不该再引入一个新的失败点。格式不匹配的脏值一律当作已
+-- 过期放行，与 JS 版 Date.parse 解析失败即放行的行为一致。
+create or replace function public.cfm_try_claim_audit_throttle(
+  input_key text,
+  input_now timestamptz,
+  input_throttle_ms bigint
+)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  claimed boolean;
+begin
+  insert into settings (key, value)
+  values (input_key, to_char(input_now at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+  on conflict (key) do update
+    set value = excluded.value
+    where case
+      when settings.value !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' then true
+      else settings.value collate "C" <= to_char(
+        (input_now - make_interval(secs => input_throttle_ms / 1000.0)) at time zone 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+      )
+    end
+  returning true into claimed;
+
+  -- where 为假时一行都不返回，claimed 会被置为 null，那代表「没抢到」。
+  return coalesce(claimed, false);
+end;
+$$;
+
 revoke all on function public.cfm_create_user(text, text, text) from public;
 revoke all on function public.cfm_create_user(text, text, text) from anon;
 revoke all on function public.cfm_create_user(text, text, text) from authenticated;
@@ -3943,6 +3985,11 @@ revoke all on function public.cfm_insert_audit_log(text, text, text, text) from 
 revoke all on function public.cfm_insert_audit_log(text, text, text, text) from anon;
 revoke all on function public.cfm_insert_audit_log(text, text, text, text) from authenticated;
 grant execute on function public.cfm_insert_audit_log(text, text, text, text) to service_role;
+
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from public;
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from anon;
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from authenticated;
+grant execute on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) to service_role;
 
 notify pgrst, 'reload schema';
 

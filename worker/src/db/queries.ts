@@ -689,3 +689,12 @@ export async function insertAuditLog(
 ): Promise<void> {
   return sba.insertSupabaseAuditLog(database.env, user, action, redactDatabaseSecrets(detail), level);
 }
+
+export async function tryClaimAuditThrottle(
+  database: QueryDatabase,
+  key: string,
+  now: string,
+  throttleMs: number,
+): Promise<boolean> {
+  return sba.trySupabaseClaimAuditThrottle(database.env, key, now, throttleMs);
+}

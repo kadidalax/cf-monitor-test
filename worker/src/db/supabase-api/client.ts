@@ -1090,3 +1090,16 @@ export function insertSupabaseAuditLog(
     input_level: level,
   });
 }
+
+export function trySupabaseClaimAuditThrottle(
+  env: SupabaseApiEnv,
+  key: string,
+  now: string,
+  throttleMs: number,
+): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_try_claim_audit_throttle', {
+    input_key: key,
+    input_now: now,
+    input_throttle_ms: throttleMs,
+  });
+}
