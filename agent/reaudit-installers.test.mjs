@@ -156,8 +156,12 @@ test('R-A06 systemd generated paths decode without splitting or expansion', asyn
         'systemd string_is_safe(flags=0) rejects these characters in the executable, even after correct unquoting');
       assert.equal(execution.executable, '/bin/sh');
       assert.equal(execution.args[1], '-c');
+      // POSIX shells such as dash prohibit redefining the special builtin exec.
+      // Replace only the command name; exercise the generated quoting unchanged.
+      assert.match(execution.args[2], /^exec\s/);
+      const captureCommand = execution.args[2].replace(/^exec(?=\s)/, 'capture_agent_argv');
       const called = spawnSync('sh', ['-c',
-        'exec() { printf "%s\\n" "$#" "$@"; }\n' + execution.args[2], ...execution.args.slice(3)], {
+        'capture_agent_argv() { printf "%s\\n" "$#" "$@"; }\n' + captureCommand, ...execution.args.slice(3)], {
         encoding: 'utf8', timeout: 5000, windowsHide: true,
         env: { ...process.env, CF_AGENT_LITERAL: 'unexpected expansion' },
       });
