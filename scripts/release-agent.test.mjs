@@ -57,10 +57,14 @@ gh() {
   printf 'gh' >> "$AUDIT_COMMAND_LOG"; printf ' %s' "$@" >> "$AUDIT_COMMAND_LOG"; printf '\\n' >> "$AUDIT_COMMAND_LOG"
   if [ "$1" = api ]; then
     if [[ "$*" == *--paginate* ]]; then [ "$RELEASE_PRESENT" = 0 ] || printf '%s\\n' "$AGENT_VERSION"; return 0; fi
+    if [[ "$2" == *"/releases/tags/"* ]]; then printf 'Draft releases are not returned by the published-tag endpoint\\n' >&2; return 1; fi
     cat "$REMOTE_RELEASE_JSON"; return 0
   fi
   case "$2" in
-    view) if [ "$RELEASE_PRESENT" = 1 ]; then cat "$REMOTE_RELEASE_JSON"; return 0; else printf 'release not found\\n' >&2; return 1; fi ;;
+    view) if [ "$RELEASE_PRESENT" = 1 ]; then
+      if [[ "$*" == *"--json databaseId"* ]]; then printf '123456\\n'; else cat "$REMOTE_RELEASE_JSON"; fi
+      return 0
+      else printf 'release not found\\n' >&2; return 1; fi ;;
     create) RELEASE_PRESENT=1 ;;
     upload) if [ "$FAIL_UPLOAD" = 1 ]; then return 1; fi ;;
     edit) return 0 ;;
@@ -107,6 +111,7 @@ test('AUD-18 a new release remains draft until uploaded bytes match their record
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.commands, /--clobber/);
   assert.match(result.commands, /gh release create[^\n]*--draft/);
+  assert.match(result.commands, /gh api repos\/synthetic\/repo\/releases\/123456/);
   assert.match(result.commands, /gh release edit[^\n]*--draft=false/);
 });
 
@@ -118,10 +123,11 @@ test('AUD-18 interrupted upload or mismatched remote digest cannot publish the d
   }
 });
 
-test('R-A09 build metadata keeps tag identity and encodes the release API path', async () => {
+test('R-A09 build metadata keeps tag identity while draft assets are read by release ID', async () => {
   const result = await fixture({ version: 'v9.0.0-rc.1+build.7' });
   assert.equal(result.status, 0, result.output);
   assert.match(result.commands, /git tag v9\.0\.0-rc\.1\+build\.7 /);
-  assert.match(result.commands, /gh api repos\/synthetic\/repo\/releases\/tags\/v9\.0\.0-rc\.1%2Bbuild\.7/);
+  assert.match(result.commands, /gh release view v9\.0\.0-rc\.1\+build\.7[^\n]*--json databaseId/);
+  assert.match(result.commands, /gh api repos\/synthetic\/repo\/releases\/123456/);
   assert.match(result.commands, /gh release edit v9\.0\.0-rc\.1\+build\.7 --draft=false/);
 });

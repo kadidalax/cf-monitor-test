@@ -134,7 +134,11 @@ jobs:
             --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
             --notes-file "$release_notes" --repo "$GITHUB_REPOSITORY"
           gh release upload "$AGENT_VERSION_TAG" dist/* --repo "$GITHUB_REPOSITORY"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${AGENT_VERSION_TAG_PATH}" > "$release_metadata"
+          # The tag endpoint returns published releases. Resolve this draft's ID
+          # through the CLI, then read its assets without publishing it early.
+          release_id="$(gh release view "$AGENT_VERSION_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          case "$release_id" in ''|*[!0-9]*) echo "Invalid draft release ID" >&2; exit 1 ;; esac
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$release_metadata"
           node ../scripts/verify-release-assets.mjs "$AGENT_VERSION_TAG" "$GITHUB_SHA" dist "$release_metadata"
           gh release edit "$AGENT_VERSION_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
 
