@@ -14,7 +14,9 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **通知**：支持 Telegram 、 SMTP Email 和 Webhook，可配置离线、到期、负载以及网站监控相关通知。
 - **主题**：内置 `monitor` 和 `aurora` 主题，支持主题包、自定义 CSS、图片和字体资源。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
-- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报，足可监控50台服务器。
+- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报。可用节点数取决于 Ping 任务、访问量、上报方式以及数据库和实时服务的独立额度，请在后台容量估算中核对，不能仅凭 Worker 请求量保证免费运行 50 台。
+
+节点温度目前仅支持 Linux 上可识别的 CPU/SoC 传感器，多个有效读数取最高值。没有传感器或读取失败，以及当前 Windows、macOS、FreeBSD 安装包，均显示“不可用”；真实 0°C 和负温度仍是有效读数。GPU 温度独立显示。旧 Agent 需要升级才能使用这一规则，旧历史中的 0 不会被猜测改写。
 
 ## 预览图
 
@@ -44,6 +46,8 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 `SUPABASE_SERVICE_ROLE_KEY` 仅作为旧部署兼容变量保留；新部署请使用 `SUPABASE_SECRET_KEY`。
 
 ## 面板部署
+
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
 ### Fork 原仓库部署【推荐，方便更新】
 
@@ -80,7 +84,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 命令行部署
 
-适合本地开发或维护者。
+适合本地开发或维护者。需要 Node.js 24 和 Go；Go 会依据 `agent/go.mod` 自动选择所需工具链。
 
 ```powershell
 npm ci

@@ -10,7 +10,7 @@ export type MonitorReportPayload = JsonObject & {
   swap: number;
   swap_total: number;
   load: number | null;
-  temp: number;
+  temp: number | null;
   disk: number;
   disk_total: number;
   net_in: number;
@@ -67,12 +67,19 @@ function boundedInteger(min: number, max: number, ...values: unknown[]): number 
   return Math.trunc(boundedNumber(min, max, ...values));
 }
 
-// 负载是唯一允许「不可用」的指标：探针在 lxcfs 未虚拟化 loadavg 的容器里读到的是
+// 负载允许「不可用」：探针在 lxcfs 未虚拟化 loadavg 的容器里读到的是
 // 宿主机负载，与其报一个错值或 0（会被读成空闲），不如显式报 null。
 // 只有探针**显式送了 null** 才算不可用；字段缺失仍按 0 处理，老探针行为不变。
 function boundedNullableNumber(min: number, max: number, primary: unknown, ...fallbacks: unknown[]): number | null {
   if (primary === null) return null;
   return boundedNumber(min, max, primary, ...fallbacks);
+}
+
+function measuredTemperature(value: unknown): number | null {
+  const temperature = numberFrom(value);
+  return temperature !== undefined && temperature >= -100 && temperature <= MAX_TEMPERATURE_C
+    ? temperature
+    : null;
 }
 
 function boundedString(value: unknown, maxLength: number): string {
@@ -122,7 +129,7 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
     load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
-    temp: boundedNumber(0, MAX_TEMPERATURE_C, report.temp, gpuData.temperature),
+    temp: measuredTemperature(report.temp),
     disk: boundedNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
     disk_total: boundedNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
     net_in: boundedNumber(0, MAX_COUNTER_VALUE, report.net_in, network.down),
@@ -151,7 +158,7 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     swap: report.swap || 0,
     swap_total: report.swap_total || 0,
     load: report.load ?? null,
-    temp: report.temp || 0,
+    temp: report.temp,
     disk: report.disk || 0,
     disk_total: report.disk_total || 0,
     net_in: report.net_in || 0,

@@ -5,6 +5,32 @@ import { formatTelegramHtmlText, sendTelegramMessage } from './telegram.ts';
 import { sendWebhookMessage, type WebhookFormat, type WebhookSendResult } from './webhook.ts';
 import { isMaskedSecretPreview } from './secret-preview.ts';
 import type { StoredHealthComponent } from './observability.ts';
+import type { NotificationDeliveryClaim } from '../db/types.ts';
+import { consumeScheduledSubrequests, currentScheduledBudget, ScheduledBudgetExceeded } from './scheduled-budget.ts';
+
+export async function deliverNotification(operations: {
+  claim(): Promise<NotificationDeliveryClaim>;
+  complete(token: string, success: boolean): Promise<boolean>;
+  send(): Promise<boolean>;
+  onDelivered?(token: string): Promise<boolean>;
+}): Promise<boolean> {
+  const claim = await operations.claim();
+  if (claim.delivered) {
+    if (!operations.onDelivered) return true;
+    return claim.token ? operations.onDelivered(claim.token) : false;
+  }
+  if (!claim.claimed || !claim.token) return false;
+  let sent = false;
+  try {
+    sent = await operations.send();
+  } catch (error) {
+    if (error instanceof ScheduledBudgetExceeded) throw error;
+    console.error('[notification] delivery attempt failed:', errorDetail(error));
+  }
+  const recorded = await operations.complete(claim.token, sent);
+  if (!sent || !recorded) return false;
+  return operations.onDelivered ? operations.onDelivered(claim.token) : true;
+}
 
 export const NOTIFICATION_DISPATCH_SETTING_KEYS = [
   'notification_method',
@@ -148,6 +174,7 @@ async function dispatchTelegram(
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     });
+    if (response.body) await response.body.cancel().catch(() => undefined);
     if (!response.ok) {
       await record(deps, database, 'telegram', 'error', `Telegram HTTP ${response.status}`, {
         auditAction: 'telegram_error',
@@ -158,6 +185,7 @@ async function dispatchTelegram(
     await record(deps, database, 'telegram', 'ok', 'Telegram message sent', { successThrottleMs: 60 * 60 * 1000 });
     return true;
   } catch (error) {
+    if (error instanceof ScheduledBudgetExceeded) throw error;
     await record(deps, database, 'telegram', 'error', `Telegram send failed: ${errorDetail(error)}`, {
       auditAction: 'telegram_error',
       auditUser,
@@ -174,6 +202,8 @@ async function dispatchEmail(
   auditUser?: string,
 ): Promise<boolean> {
   try {
+    currentScheduledBudget()?.ensureCanStart(2);
+    consumeScheduledSubrequests(2); // Socket plus possible STARTTLS upgrade; conservative for implicit TLS.
     const config: SmtpConfig = {
       host: settings.email_smtp_host || '',
       port: Number(settings.email_smtp_port || 587),
@@ -195,6 +225,7 @@ async function dispatchEmail(
       auditUser,
     });
   } catch (error) {
+    if (error instanceof ScheduledBudgetExceeded) throw error;
     await record(deps, database, 'email', 'error', `SMTP send failed: ${errorDetail(error)}`, {
       auditAction: 'email_error',
       auditUser,

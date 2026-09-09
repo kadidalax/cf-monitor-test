@@ -571,7 +571,7 @@ func TestTrafficResetTrackerDetectsRebootEvenWhenOneCounterIncreases(t *testing.
 	}
 }
 
-func TestTrafficResetTrackerTreatsAnyCounterDropAsCounterReset(t *testing.T) {
+func TestTrafficResetTrackerResetsEachDirectionIndependently(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
 	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
 
@@ -582,8 +582,8 @@ func TestTrafficResetTrackerTreatsAnyCounterDropAsCounterReset(t *testing.T) {
 
 	restarted := newTrafficResetTracker(1, "token", "wan")
 	up, down := restarted.adjustSinceBoot(700, 800, now.Add(2*time.Minute), bootedInPeriod)
-	if up != 800 || down != 12_800 {
-		t.Fatalf("monthly traffic after counter reset = %d/%d, want previous period plus current counters 800/12800", up, down)
+	if up != 700 || down != 12_800 {
+		t.Fatalf("monthly traffic after one-direction reset = %d/%d, want 700/12800 without repeating upload history", up, down)
 	}
 }
 

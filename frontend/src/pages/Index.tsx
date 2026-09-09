@@ -11,7 +11,7 @@ import {
   defaultStatusCardVisibility,
   StatusCardKey,
 } from '../utils/dashboardStatus';
-import { clearCachedPublicBootstrap, fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
+import { fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
 import { mergePublicClientPatch, normalizePublicClients } from '../utils/publicClients';
 import { fetchWithBootstrapRetry } from '../utils/api';
 import { getLocalStorageItem } from '../utils/browserStorage';
@@ -100,15 +100,15 @@ function readWebsiteHidden(value: unknown): boolean {
 
 function normalizeWebsiteSummary(input: unknown, options: { includeHidden?: boolean } = {}): WebsiteMonitorSummary | null {
   if (!input || typeof input !== 'object') return null;
-  const value = input as Partial<WebsiteMonitorSummary> & { hidden?: unknown };
+  const value = input as Partial<WebsiteMonitorSummary> & { hidden?: unknown; hide_url?: unknown };
   const id = Number(value.id);
   const hidden = readWebsiteHidden(value.hidden);
   if (!Number.isInteger(id) || id <= 0 || (!options.includeHidden && hidden)) return null;
   return {
     id,
     name: String(value.name || ''),
-    // 服务端对游客隐藏地址时返回 null；此处必须保留 null，不能兜底成空串以外的值
-    url: value.url == null ? null : String(value.url),
+    // Also defend against older tabs that still publish administrator rows.
+    url: (!options.includeHidden && readWebsiteHidden(value.hide_url)) || value.url == null ? null : String(value.url),
     method: value.method === 'TCP' || value.method === 'HEAD' || value.method === 'GET' ? value.method : undefined,
     interval_sec: typeof value.interval_sec === 'number' ? value.interval_sec : 120,
     status: value.status === 'up' || value.status === 'down' || value.status === 'paused' ? value.status : 'pending',
@@ -252,6 +252,8 @@ export default function Index() {
   // Load client list
   useEffect(() => {
     let cancelled = false;
+    let clientsRequest = 0;
+    let pendingClientUpdates: PublicDataUpdateDetail[] | null = null;
     if (authLoading) {
       setClientsLoading(true);
       return () => {
@@ -266,17 +268,23 @@ export default function Index() {
     }
     setClientsLoading(true);
 
-    const loadClients = () => {
+    const loadClients = (updates: PublicDataUpdateDetail[] = pendingClientUpdates ?? []) => {
+      const request = ++clientsRequest;
+      pendingClientUpdates = updates;
+      const isCurrent = () => !cancelled && request === clientsRequest;
       fetchPublicBootstrap({ includeHidden: isAuthenticated })
         .then(data => {
           if (data.clients !== undefined) return data.clients;
           throw new Error('Bootstrap clients missing');
         })
-        .catch(() => fetchWithBootstrapRetry(`/api/clients${isAuthenticated ? '?include_hidden=1' : ''}`)
-          .then(res => {
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return res.json();
-          }))
+        .catch((loadError: unknown) => {
+          if (!isCurrent()) throw loadError;
+          return fetchWithBootstrapRetry(`/api/clients${isAuthenticated ? '?include_hidden=1' : ''}`)
+            .then(res => {
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              return res.json();
+            });
+        })
         .then(data => {
           const clients = normalizePublicClients(data, { includeHidden: isAuthenticated });
           const listPayload = Array.isArray(data) ||
@@ -285,18 +293,19 @@ export default function Index() {
           throw new Error('客户端列表格式无效');
         })
         .then(data => {
-          if (!cancelled) {
-            setClients(current => current.length > 0 && data.length === 0 ? current : data);
+          if (isCurrent()) {
+            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update, isAuthenticated), data));
             setClientsError(null);
           }
         })
         .catch((loadError: unknown) => {
-          if (!cancelled) {
+          if (isCurrent()) {
             setClientsError(loadError instanceof Error ? loadError.message : '客户端列表加载失败');
           }
         })
         .finally(() => {
-          if (!cancelled) {
+          if (isCurrent()) {
+            pendingClientUpdates = null;
             setClientsLoading(false);
             notifyPublicDataReady();
           }
@@ -310,24 +319,34 @@ export default function Index() {
       loadClients();
     };
     const refreshPublicClients = (detail?: PublicDataUpdateDetail) => {
-      clearCachedPublicBootstrap();
       setClients((current) => applyPublicClientUpdate(current, detail, isAuthenticated));
       if (detail?.clients) {
-        setClientsLoading(false);
-        setClientsError(null);
-        notifyPublicDataReady();
+        // A delta cannot replace the pending full list. Replay it after that
+        // list arrives, including in the authorized view without public caching.
+        pendingClientUpdates?.push(detail);
         return;
       }
+      const request = ++clientsRequest;
+      const updates: PublicDataUpdateDetail[] = [];
+      pendingClientUpdates = updates;
+      const isCurrent = () => !cancelled && request === clientsRequest;
       fetchPublicBootstrap({ cache: 'reload', cacheBust: true, includeHidden: isAuthenticated })
         .then(data => {
           if (data.clients === undefined) throw new Error('Bootstrap clients missing');
-          if (!cancelled && data.clients !== undefined) {
+          if (isCurrent() && data.clients !== undefined) {
             const nextClients = data.clients;
-            setClients(current => current.length > 0 && nextClients.length === 0 ? current : nextClients);
+            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update, isAuthenticated), nextClients));
             setClientsError(null);
           }
         })
-        .catch(() => loadClients());
+        .catch(() => { if (isCurrent()) loadClients(updates); })
+        .finally(() => {
+          if (isCurrent()) {
+            pendingClientUpdates = null;
+            setClientsLoading(false);
+            notifyPublicDataReady();
+          }
+        });
     };
 
     loadClients();
@@ -357,7 +376,13 @@ export default function Index() {
       };
     }
 
+    let websiteRequest = 0;
+    let pendingWebsiteUpdates: Array<WebsiteMonitorsUpdateDetail> | null = null;
     const loadWebsites = (fresh = false) => {
+      const request = ++websiteRequest;
+      const updates: Array<WebsiteMonitorsUpdateDetail> = [];
+      pendingWebsiteUpdates = updates;
+      const isCurrent = () => !cancelled && request === websiteRequest;
       setWebsitesLoading(true);
       const url = `/api/websites?hours=${websitePeriodHours}${isAuthenticated ? '&include_hidden=1' : ''}${fresh ? `&_fresh=${Date.now()}` : ''}`;
       fetchWithBootstrapRetry(url, fresh ? { cache: 'reload' } : undefined)
@@ -366,16 +391,20 @@ export default function Index() {
           return res.json();
         })
         .then(data => {
+          if (!Array.isArray(data)) throw new Error('网站监控列表格式无效');
           const list = normalizeWebsiteSummaries(data, { includeHidden: isAuthenticated });
-          if (cancelled) return;
-          setWebsites((current) => current.length > 0 && list.length === 0 ? current : list);
+          if (!isCurrent()) return;
+          setWebsites(updates.reduce((current, detail) => applyWebsiteMonitorUpdate(current, detail, { includeHidden: isAuthenticated }) || current, list));
           setWebsitesError(null);
         })
         .catch((loadError: unknown) => {
-          if (!cancelled) setWebsitesError(loadError instanceof Error ? loadError.message : '网站监控加载失败');
+          if (isCurrent()) setWebsitesError(loadError instanceof Error ? loadError.message : '网站监控加载失败');
         })
         .finally(() => {
-          if (!cancelled) setWebsitesLoading(false);
+          if (isCurrent()) {
+            pendingWebsiteUpdates = null;
+            setWebsitesLoading(false);
+          }
         });
     };
 
@@ -391,6 +420,7 @@ export default function Index() {
         loadWebsites(true);
         return;
       }
+      pendingWebsiteUpdates?.push(detail);
       setWebsites((current) => {
         const applied = applyWebsiteMonitorUpdate(current, detail, { includeHidden: isAuthenticated });
         if (!applied) return current;
@@ -436,7 +466,7 @@ export default function Index() {
     });
   }, [displayClients, offlinePosition, liveMap.online]);
 
-  const apiError = !clientsLoading && displayClients.length === 0 ? (clientsError || error) : null;
+  const apiError = !clientsLoading ? (clientsError || error) : null;
 
   const statusCards = buildDashboardStatusCards(stats);
 

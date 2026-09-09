@@ -24,7 +24,8 @@ import { verifyMfaToken } from './auth/mfa-token';
 import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from './utils/observability';
-import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from './utils/notification-dispatch';
+import { NOTIFICATION_DISPATCH_SETTING_KEYS, deliverNotification, dispatchNotification } from './utils/notification-dispatch';
+import { currentScheduledBudget, rotateScheduledItems, scheduledItems, ScheduledBudget, ScheduledBudgetExceeded, withScheduledBudget, type ScheduledCursorContext } from './utils/scheduled-budget';
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
@@ -80,6 +81,7 @@ const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
 const RECORD_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RECORD_CLEANUP_LAST_RUN_KEY = 'maintenance_last_cleanup_at';
+const SCHEDULED_CURSOR_KEY = 'maintenance_cron_cursors';
 const csrfRejectionAuditThrottle = new Map<string, { expiresAt: number }>();
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -261,7 +263,7 @@ async function requireMfaStepUp(
   database: db.QueryDatabase,
   payload: AdminJwtPayload,
 ): Promise<Response | null> {
-  const pathname = new URL(c.req.url).pathname;
+  const pathname = c.req.path;
   if (!isMfaStepUpProtectedRequest(c.req.method, pathname)) return null;
 
   const user = await db.getUserByUuid(database, payload.userId);
@@ -437,9 +439,10 @@ const SCHEDULED_SETTING_KEYS = [
   'offline_notify_never_reported',
   'offline_confirm_rounds',
   RECORD_CLEANUP_LAST_RUN_KEY,
+  SCHEDULED_CURSOR_KEY,
 ];
 
-interface ScheduledRunContext {
+interface ScheduledRunContext extends ScheduledCursorContext {
   database: db.QueryDatabase;
   env: Bindings;
   getSettings(): Promise<ScheduledSettings>;
@@ -463,10 +466,38 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
   let adminSettingsPromise: Promise<ScheduledAdminSettings> | null = null;
   let clientsPromise: Promise<ScheduledMonitorClient[]> | null = null;
   const clientsByIdsPromises = new Map<string, Promise<ScheduledMonitorClient[]>>();
+  let cursors: Record<string, string> | null = null;
+  let cursorLoad: Promise<Record<string, string>> | null = null;
+  let cursorsChanged = false;
+  const loadCursors = () => cursorLoad ||= (async () => {
+    settingsPromise ||= db.getSettingsByKeys(database, SCHEDULED_SETTING_KEYS, true);
+    const settings = await settingsPromise;
+    try {
+      const value: unknown = JSON.parse(settings[SCHEDULED_CURSOR_KEY] || '{}');
+      cursors = value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+        : {};
+    } catch { cursors = {}; }
+    return cursors;
+  })();
 
   return {
     database,
     env,
+    budget: currentScheduledBudget(),
+    async orderScheduledItems<T>(key: string, items: readonly T[], identify: (item: T) => string): Promise<T[]> {
+      const state = await loadCursors();
+      const start = Math.max(0, items.findIndex(item => identify(item) === state[key]));
+      return [...items.slice(start), ...items.slice(0, start)];
+    },
+    advanceScheduledCursor(key, nextIdentity) {
+      if (!cursors) return;
+      cursors[key] = nextIdentity;
+      cursorsChanged = true;
+    },
+    async flushScheduledCursors() {
+      if (cursorsChanged && cursors) await db.setSetting(database, SCHEDULED_CURSOR_KEY, JSON.stringify(cursors));
+    },
     getSettings() {
       settingsPromise ||= db.getSettingsByKeys(database, SCHEDULED_SETTING_KEYS, true);
       return settingsPromise;
@@ -499,14 +530,32 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
   };
 }
 
-async function sendNotification(context: ScheduledRunContext, notification: NotificationMessage): Promise<boolean> {
+async function sendNotification(
+  context: ScheduledRunContext,
+  notification: NotificationMessage,
+  delivery: { key: string; eventId: string; repeatMs?: number },
+  now: Date,
+  onDelivered?: (token: string) => Promise<boolean>,
+): Promise<boolean> {
   const settings = await context.getAdminSettings();
-  return dispatchNotification(context.database, settings, notification, {
+  const send = () => dispatchNotification(context.database, settings, notification, {
     deps: { recordHealth: bestEffortRecordHealthEvent },
+  });
+  if (settings.notification_method === 'none') return send();
+  const time = now.toISOString();
+  const repeatMs = delivery.repeatMs ?? 0;
+  return deliverNotification({
+    claim: () => db.claimNotificationDelivery(context.database, delivery.key, delivery.eventId, time, repeatMs),
+    complete: (token, success) => db.completeNotificationDelivery(
+      context.database, delivery.key, delivery.eventId, token, success, time, repeatMs,
+    ),
+    send,
+    onDelivered,
   });
 }
 
 async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promise<void> {
+  context.budget?.ensureCanStart(8);
   const settings = await context.getSettings();
   const lastCleanupAt = Date.parse(settings[RECORD_CLEANUP_LAST_RUN_KEY] || '');
   if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
@@ -524,24 +573,37 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   const websiteDeleted = await db.deleteOldWebsiteChecks(context.database, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(context.database, auditBefore);
+  const deliveryDeleted = await db.cleanupNotificationDeliveryState(context.database, now.toISOString(), {
+    batchSize: 1000, maxBatches: 1,
+  });
+  const hasMore = recordDeleted.has_more || websiteDeleted.has_more || pingDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
   const deleted = {
-    ...recordDeleted,
-    ...websiteDeleted,
-    ...pingDeleted,
-    ...auditDeleted,
+    records: recordDeleted.records,
+    gpu_records: recordDeleted.gpu_records,
+    gpu_snapshots: recordDeleted.gpu_snapshots,
+    website_checks: websiteDeleted.website_checks,
+    ping_records: pingDeleted.ping_records,
+    ping_snapshots: pingDeleted.ping_snapshots,
+    audit_logs: auditDeleted.audit_logs,
+    notification_delivery_state: deliveryDeleted.notification_delivery_state,
   };
-  await db.setSetting(context.database, RECORD_CLEANUP_LAST_RUN_KEY, now.toISOString());
+  // A capped batch is progress, not completion. Keep the old timestamp so the
+  // next two-minute Cron continues draining instead of skipping another day.
+  if (!hasMore) {
+    await db.setSetting(context.database, RECORD_CLEANUP_LAST_RUN_KEY, now.toISOString());
+  }
   const deletedRows = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
   if (deletedRows === 0) {
     return;
   }
-  await db.insertAuditLog(context.database, 'system', 'cron_cleanup', `分批清理完成: ${JSON.stringify({
+  await db.insertAuditLog(context.database, 'system', 'cron_cleanup', `分批清理${hasMore ? '待续' : '完成'}: ${JSON.stringify({
     before: {
       records: recordBefore,
       ping_records: pingBefore,
       audit_logs: auditBefore,
     },
     deleted,
+    has_more: hasMore,
   })}`);
 }
 
@@ -615,7 +677,7 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
 
   const streakThreshold = Math.max(1, Number(settings.offline_confirm_rounds || DEFAULT_OFFLINE_CONFIRM_ROUNDS));
 
-  for (const item of enabled) {
+  for await (const item of scheduledItems(context, 'offline', enabled, item => item.client)) {
     const client = clientMap.get(item.client);
     if (!client) continue;
 
@@ -646,8 +708,9 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
         lastSeen: event.lastSeenLabel,
         createdAt: event.createdAt,
         eventTime: now,
-      }));
-      await db.markOfflineNotificationSent(context.database, item.client, now.toISOString());
+      }), { key: `offline:${item.client}`, eventId: `offline:${lastTime || client.created_at || 'never'}` }, now,
+      token => db.markOfflineNotificationSent(context.database, item.client, now.toISOString(), token));
+      if (!sent) continue;
       await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${event.neverReported ? ' (从未上报)' : ''}`);
       continue;
     }
@@ -656,8 +719,9 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
       nodeName: client.name || client.uuid,
       recoveredAt: event.recoveredAt,
       eventTime: now,
-    }));
-    await db.markOfflineNotificationSent(context.database, item.client, null);
+    }), { key: `offline:${item.client}`, eventId: `recovery:${item.last_notified}` }, now,
+    token => db.markOfflineNotificationSent(context.database, item.client, null, token));
+    if (!sent) continue;
     await db.insertAuditLog(context.database, 'system', 'online_notify', `${sent ? '已发送' : '已记录'}恢复上线: ${client.name || client.uuid}`);
   }
 }
@@ -694,7 +758,7 @@ async function runExpiryCheck(context: ScheduledRunContext, now: Date): Promise<
   const clients = await context.getClients(enabled.map(item => item.client));
   const clientMap = new Map(clients.map(client => [client.uuid, client]));
 
-  for (const item of enabled) {
+  for await (const item of scheduledItems(context, 'expiry', enabled, item => item.client)) {
     const client = clientMap.get(item.client);
     if (!client) continue;
 
@@ -712,8 +776,10 @@ async function runExpiryCheck(context: ScheduledRunContext, now: Date): Promise<
       daysLeft: candidate.daysLeft,
       eventTime: now,
     });
-    const sent = await sendNotification(context, message);
-    await db.markExpiryNotificationSent(context.database, item.client, now.toISOString());
+    const sent = await sendNotification(context, message, {
+      key: `expiry:${item.client}`, eventId: candidate.expiredAt,
+    }, now, token => db.markExpiryNotificationSent(context.database, item.client, now.toISOString(), token));
+    if (!sent) continue;
     await db.insertAuditLog(context.database, 'system', 'expiry_notify', `${sent ? '已发送' : '已记录'}到期提醒: ${client.name || client.uuid} - ${candidate.daysLeft} 天`);
   }
 }
@@ -751,12 +817,12 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
     const intervalMs = Math.max(1, Number(rule.interval_min || 15)) * 60 * 1000;
     const startTime = new Date(now.getTime() - intervalMs).toISOString();
     const endTime = now.toISOString();
-    const threshold = Number(rule.threshold || 80);
-    const ratio = Math.max(0, Math.min(1, Number(rule.ratio || 0.8)));
+    const threshold = Number(rule.threshold ?? 80);
+    const ratio = Math.max(0, Math.min(1, Number(rule.ratio ?? 0.8)));
     const metric = rule.metric;
     const label = metricLabel[metric] || metric;
-    const lastNotified = rule.last_notified ? new Date(rule.last_notified).getTime() : 0;
-    if (lastNotified && now.getTime() - lastNotified < intervalMs) continue;
+    // Delivery/cooldown is tracked per target. A successful node must not put
+    // failed nodes in this rule into the full alert interval.
 
     const targetClients: string[] = rule.clients.length > 0
       ? rule.clients
@@ -781,7 +847,14 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
     group.plans.push({ rule, ratio, label, targetClients: uniqueTargetClients });
   }
 
-  for (const group of groups.values()) {
+  const rotation = Math.floor(now.getTime() / 120_000);
+  const groupIdentity = (group: LoadNotificationGroup) => `${group.metric}:${group.threshold}:${Date.parse(group.endTime) - Date.parse(group.startTime)}`;
+  const orderedGroups = context.orderScheduledItems
+    ? await context.orderScheduledItems('load_groups', [...groups.values()], groupIdentity)
+    : rotateScheduledItems([...groups.values()], rotation);
+  for (let groupIndex = 0; groupIndex < orderedGroups.length; groupIndex += 1) {
+    const group = orderedGroups[groupIndex];
+    context.budget?.ensureCanStart(15);
     const statsByClient = await db.getLoadMetricWindowStatsForClients(
       context.database,
       [...group.clientIds],
@@ -791,9 +864,19 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
       group.threshold,
     );
 
-    for (const plan of group.plans) {
-      let notified = false;
-      for (const clientUuid of plan.targetClients) {
+    const planCursorKey = `load_plans:${groupIdentity(group)}`;
+    const orderedPlans = context.orderScheduledItems
+      ? await context.orderScheduledItems(planCursorKey, group.plans, plan => String(plan.rule.id))
+      : rotateScheduledItems(group.plans, rotation);
+    for (let planIndex = 0; planIndex < orderedPlans.length; planIndex += 1) {
+      const plan = orderedPlans[planIndex];
+      const completed = () => {
+        // These are round-robin starting positions, not completion claims for
+        // entire groups. Each rule's unfinished target keeps its own identity.
+        context.advanceScheduledCursor?.('load_groups', groupIdentity(orderedGroups[(groupIndex + 1) % orderedGroups.length]));
+        context.advanceScheduledCursor?.(planCursorKey, String(orderedPlans[(planIndex + 1) % orderedPlans.length].rule.id));
+      };
+      for await (const clientUuid of scheduledItems(context, `load:${plan.rule.id}`, plan.targetClients, value => value, 14, completed)) {
         const client = clientMap.get(clientUuid);
         if (!client) continue;
 
@@ -813,12 +896,15 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
           requiredRatio: plan.ratio,
           eventTime: now,
         });
-        const sent = await sendNotification(context, message);
-        notified = true;
+        const sent = await sendNotification(context, message, {
+          key: `load:${plan.rule.id}:${clientUuid}`,
+          eventId: `${group.metric}:${group.threshold}:${plan.ratio}:${plan.rule.interval_min}`,
+          repeatMs: Math.max(1, Number(plan.rule.interval_min || 15)) * 60_000,
+        }, now, token => plan.rule.id == null ? Promise.resolve(false) : db.markLoadNotificationSent(
+          context.database, plan.rule.id, clientUuid, now.toISOString(), token,
+        ));
+        if (!sent) continue;
         await db.insertAuditLog(context.database, 'system', 'load_notify', `${sent ? '已发送' : '已记录'}负载告警: ${client.name || clientUuid} - ${plan.label}`);
-      }
-      if (notified && plan.rule.id != null) {
-        await db.updateLoadNotification(context.database, plan.rule.id, { last_notified: now.toISOString() });
       }
     }
   }
@@ -826,7 +912,7 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
 
 async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date): Promise<void> {
   const monitors = await db.listDueWebsiteMonitors(context.database, now.toISOString(), 50);
-  for (const monitor of monitors) {
+  for await (const monitor of scheduledItems(context, 'websites', monitors, monitor => String(monitor.id))) {
     const check = await checkWebsiteMonitorHttp(monitor);
     const updated = await db.recordWebsiteCheck(context.database, check);
     if (!updated) continue;
@@ -841,8 +927,9 @@ async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date):
         downMinutes,
         lastStatus,
         checkedAt: check.checked_at,
-      }));
-      await db.markWebsiteMonitorNotified(context.database, updated.id, now.toISOString());
+      }), { key: `website:${updated.id}`, eventId: `down:${updated.config_revision}:${updated.down_since}` }, now);
+      if (!sent) continue;
+      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, now.toISOString(), updated))) continue;
       await db.insertAuditLog(context.database, 'system', 'website_down', `${sent ? '已发送' : '已记录'}网站告警: ${updated.name}`);
     }
 
@@ -856,8 +943,9 @@ async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date):
         statusCode: updated.last_status_code,
         latencyMs: updated.last_latency_ms,
         eventTime: now,
-      }));
-      await db.markWebsiteMonitorNotified(context.database, updated.id, null);
+      }), { key: `website:${updated.id}`, eventId: `recovery:${updated.config_revision}:${updated.last_notified_at}` }, now);
+      if (!sent) continue;
+      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, null, updated))) continue;
       await db.insertAuditLog(context.database, 'system', 'website_recovery', `${sent ? '已发送' : '已记录'}网站恢复: ${updated.name}`);
     }
   }
@@ -872,12 +960,15 @@ async function runScheduledStep(
 ): Promise<void> {
   try {
     await step();
+    if (context.budget && !context.budget.canStart(4)) return;
     await bestEffortRecordHealthEvent(context.database, component, 'ok', `${label} completed`, {
       successThrottleMs: 60 * 60 * 1000,
     });
   } catch (error) {
+    if (error instanceof ScheduledBudgetExceeded || context.budget?.remainingMs() === 0) return;
     const message = errorDetail(error);
     console.error(`[scheduled] ${label} failed:`, message);
+    if (context.budget && !context.budget.canStart(4)) return;
     await bestEffortRecordHealthEvent(
       context.database,
       component,
@@ -889,13 +980,26 @@ async function runScheduledStep(
 }
 
 async function runScheduled(env: Bindings): Promise<void> {
-  const now = new Date();
-  const context = createScheduledRunContext(env);
-  await runScheduledStep(context, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now));
-  await runScheduledStep(context, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now));
-  await runScheduledStep(context, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now));
-  await runScheduledStep(context, 'cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(context, now));
-  await runScheduledStep(context, 'cron_website', 'cron_website_error', '网站监控检查', () => runWebsiteMonitorChecks(context, now));
+  const budget = new ScheduledBudget();
+  await withScheduledBudget(budget, async () => {
+    const now = new Date();
+    const context = createScheduledRunContext(env);
+    const steps = [
+      ['cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now)],
+      ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],
+      ['cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now)],
+      ['cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(context, now)],
+      ['cron_website', 'cron_website_error', '网站监控检查', () => runWebsiteMonitorChecks(context, now)],
+    ] as const;
+    try {
+      for (const [component, action, label, step] of rotateScheduledItems(steps, Math.floor(now.getTime() / 120_000))) {
+        if (!budget.canStart(5)) break;
+        await runScheduledStep(context, component, action, label, step);
+      }
+    } finally {
+      await budget.complete(async () => { await context.flushScheduledCursors?.(); });
+    }
+  });
 }
 
 export default {

@@ -9,7 +9,7 @@ export interface PublicMonitorRecord {
   disk_total: number;
   // null = 探针报告本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
-  temp: number;
+  temp: number | null;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -72,6 +72,8 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
   if (!time) return null;
   const load = loadField(record);
   if (load === undefined) return null;
+  // 温度未知不能补成 0，也不能丢弃同一条记录中的 CPU 等有效指标。
+  const temp = typeof record.temp === 'number' && Number.isFinite(record.temp) ? record.temp : null;
   const values = {
     cpu: numberField(record, 'cpu'),
     ram: numberField(record, 'ram'),
@@ -80,7 +82,6 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     swap_total: numberField(record, 'swap_total'),
     disk: numberField(record, 'disk'),
     disk_total: numberField(record, 'disk_total'),
-    temp: numberField(record, 'temp'),
     net_in: numberField(record, 'net_in'),
     net_out: numberField(record, 'net_out'),
     net_total_up: numberField(record, 'net_total_up'),
@@ -102,7 +103,7 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     disk: values.disk,
     disk_total: values.disk_total,
     load,
-    temp: values.temp,
+    temp,
     net_in: values.net_in,
     net_out: values.net_out,
     net_total_up: values.net_total_up,
@@ -148,4 +149,42 @@ export function normalizePublicGpuRecords(payload: unknown): PublicGpuRecord[] {
     const record = normalizePublicGpuRecord(item);
     return record ? [record] : [];
   });
+}
+
+export async function collectCursorHistory<T extends { time: string }>(
+  fetchPage: (cursor: string) => Promise<unknown>,
+  options: {
+    cursor: string;
+    start: string;
+    end?: string;
+    normalize: (payload: unknown) => T[];
+    signal?: AbortSignal;
+    maxPages?: number;
+  },
+): Promise<T[]> {
+  const start = Date.parse(options.start);
+  const end = Date.parse(options.end || options.cursor);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) throw new Error('历史时间范围无效');
+  const records = new Map<number, T>();
+  const result = () => [...records.entries()].sort(([a], [b]) => a - b).map(([, record]) => record);
+  let cursor = options.cursor;
+  const maxPages = Math.min(32, Math.max(1, options.maxPages ?? 32));
+  for (let page = 0; page < maxPages; page += 1) {
+    options.signal?.throwIfAborted();
+    const payload = await fetchPage(cursor);
+    options.signal?.throwIfAborted();
+    const envelope = asRecord(payload);
+    if (!Array.isArray(payload) && !Array.isArray(envelope?.data)) throw new Error('历史记录响应格式无效');
+    for (const record of options.normalize(payload)) {
+      const at = Date.parse(record.time);
+      if (at >= start && at <= end) records.set(at, record);
+    }
+    if (envelope?.has_more !== true) return result();
+    const next = typeof envelope.next_cursor === 'string' ? envelope.next_cursor : '';
+    const nextAt = Date.parse(next);
+    if (!Number.isFinite(nextAt) || nextAt >= Date.parse(cursor)) throw new Error('历史分页游标无效');
+    if (nextAt <= start) return result();
+    cursor = next;
+  }
+  throw new Error('历史记录过多，请选择更短的时间范围');
 }

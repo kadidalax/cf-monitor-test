@@ -1,23 +1,73 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { before } from 'node:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createWorkerLoader } from '../../test-support/worker-module.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = join(HERE, '..');
 
-// 不能 import observability.ts：它经 '../db/queries' 无扩展名导入，
-// node 的 TS 剥离解析不了。注册表因此从源码里解析出来——
-// 反正写入点也是扫源码，两边同源才谈得上「对得上」。
 const OBSERVABILITY_SRC = readFileSync(join(HERE, 'observability.ts'), 'utf8');
-const STORED_HEALTH_COMPONENTS = (() => {
-  const block = OBSERVABILITY_SRC.match(
-    /export const STORED_HEALTH_COMPONENTS = \[([\s\S]*?)\] as const;/,
-  );
-  if (!block) throw new Error('没能从 observability.ts 里解析出 STORED_HEALTH_COMPONENTS');
-  return [...block[1].matchAll(/'([a-z0-9_]+)'/g)].map(m => m[1]);
-})();
+
+function createScheduledHealthFixture({ failLoad = false } = {}) {
+  const now = Date.parse('2026-09-06T12:00:00.000Z');
+  class FixedDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
+  const settings = new Map([['maintenance_last_cleanup_at', new FixedDate().toISOString()]]);
+  const errors = [];
+  const audits = [];
+  const loader = createWorkerLoader({
+    globals: { Date: FixedDate, console: { ...console, error: (...args) => errors.push(args.join(' ')) } },
+    db: {
+      getSetting: async (_database, key) => settings.get(key) ?? null,
+      getSettingsByKeys: async (_database, keys) => Object.fromEntries(
+        keys.filter(key => settings.has(key)).map(key => [key, settings.get(key)]),
+      ),
+      setSetting: async (_database, key, value) => { settings.set(key, value); },
+      listLoadNotifications: async () => {
+        if (failLoad) throw new Error('synthetic load query failure');
+        return [];
+      },
+      listOfflineNotifications: async () => [],
+      listExpiryNotifications: async () => [],
+      listDueWebsiteMonitors: async () => [],
+      listClients: async () => [],
+      tryClaimAuditThrottle: async () => true,
+      insertAuditLog: async (_database, user, action, detail, level) => { audits.push({ user, action, detail, level }); },
+    },
+  });
+  const env = {
+    JWT_SECRET: 'synthetic-health-secret-at-least-32-bytes',
+    SUPABASE_SECRET_KEY: 'sb_secret_synthetic_health',
+    LIVE_DATA: { idFromName: name => name, get: () => ({ fetch: async request => {
+      assert.equal(new URL(request.url).pathname, '/live');
+      return Response.json({ online: [], count: 0, clients: [], data: {}, timestamp: now });
+    } }) },
+    RATE_LIMIT: { idFromName: name => name, get: () => ({ fetch: async request => {
+      assert.equal(new URL(request.url).pathname, '/rate-limit');
+      return Response.json({ allowed: true, limit: 1000, remaining: 999, reset: now / 1000 + 60, retry_after: 60 });
+    } }) },
+  };
+  return {
+    loader, settings, errors, audits,
+    run: () => loader.load('worker/src/index.ts').default.scheduled({}, env, {}),
+    health: () => loader.load('worker/src/routes/admin.ts').adminRoutes.fetch(
+      new Request('https://health.example.test/health?refresh=1'), env,
+    ),
+    writtenComponents: () => [...settings.keys()]
+      .filter(key => key.startsWith('health:') && !key.startsWith('health:audit:'))
+      .map(key => key.slice('health:'.length)),
+  };
+}
+
+// 现有测试加载器能解析无扩展名的 TS 导入；注册表和健康读写都执行正式模块。
+const scheduledHealth = createScheduledHealthFixture();
+const STORED_HEALTH_COMPONENTS = Array.from(
+  scheduledHealth.loader.load('worker/src/utils/observability.ts').STORED_HEALTH_COMPONENTS,
+);
 
 function collectTsFiles(dir) {
   const files = [];
@@ -105,6 +155,13 @@ for (const match of SOURCE.matchAll(/\bcomponent(?:: [A-Za-z]+)? = '([a-z0-9_]+)
   writtenComponents.add(match[1]);
 }
 
+before(async () => {
+  // Cron 的组件名来自阶段元组。只统计真实执行后落下的健康键，
+  // 不把未执行的配置字符串或另一份手写组件名单冒充写入点。
+  await scheduledHealth.run();
+  for (const component of scheduledHealth.writtenComponents()) writtenComponents.add(component);
+});
+
 test('注册表本身无重复', () => {
   assert.equal(STORED_HEALTH_COMPONENTS.length, 18, '注册表条数变了：确认是有意增删，再改这个数字');
   assert.equal(
@@ -114,12 +171,12 @@ test('注册表本身无重复', () => {
   );
 });
 
-test('扫描确实找到了写入点（否则下面两条断言是空转）', () => {
+test('扫描和运行确实找到了写入点（否则下面两条断言是空转）', () => {
   // 没有这条，任何一次重构改掉函数名都会让扫描结果变成空集，
   // 而空集天然满足「⊆ 注册表」，测试会假绿。
   assert.ok(
     writtenComponents.size >= 15,
-    `只扫到 ${writtenComponents.size} 个写入点字面量，正则多半已经失配`,
+    `只找到 ${writtenComponents.size} 个组件写入点，源码扫描或运行验证已失配`,
   );
 });
 
@@ -140,6 +197,38 @@ test('注册表里没有无人写入的孤儿组件', () => {
     [],
     '注册表列了但没有任何写入点：要么名字拼错了，要么该写入点已被删除',
   );
+});
+
+test('正式定时阶段写入的健康状态完整出现在健康接口', async () => {
+  assert.deepEqual(scheduledHealth.errors, [], '定时阶段必须真实执行成功，不能把测试环境错误当成正常写入');
+  const written = scheduledHealth.writtenComponents().sort();
+  assert.deepEqual(written, [...STORED_HEALTH_COMPONENTS].filter(name => name.startsWith('cron_')).sort());
+  const response = await scheduledHealth.health();
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.ok, true);
+  for (const component of written) {
+    const stored = JSON.parse(scheduledHealth.settings.get(`health:${component}`));
+    assert.equal(stored.component, component);
+    assert.equal(stored.status, 'ok');
+    assert.equal(stored.last_success_at, '2026-09-06T12:00:00.000Z');
+    assert.deepEqual(body.components[component], stored, `${component} 写入后必须能从健康接口读回`);
+  }
+});
+
+test('定时阶段失败的实际写入使健康接口报告异常', async () => {
+  const fixture = createScheduledHealthFixture({ failLoad: true });
+  await fixture.run();
+  const response = await fixture.health();
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.ok, false);
+  assert.equal(body.components.cron_load?.status, 'error');
+  assert.equal(body.components.cron_load?.last_failure_at, '2026-09-06T12:00:00.000Z');
+  assert.match(body.components.cron_load?.detail ?? '', /synthetic load query failure/);
+  assert.equal(fixture.errors.length, 1, JSON.stringify(fixture.errors));
+  assert.equal(fixture.audits.length, 1);
+  assert.equal(fixture.audits[0].action, 'cron_load_error');
 });
 
 // 审计节流的竞态只有数据库能真正挡住（settings 主键冲突串行化）。函数体里一旦

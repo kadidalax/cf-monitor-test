@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const { SETTING_SCHEMA } = await import('./schema.ts');
+const { evaluateHistoryCapacity } = await import('../utils/history-capacity.ts');
 
 // ── 容量熔断改成量字节 ──
 // 原本数行数：同样行数可能对应 72MB 也可能 189MB，且完全不含索引开销，
-// 熔断点落不到真正快满的地方。数据库卡的是磁盘字节，就该按字节量。
+// AUD-13: allocated物理字节保留诊断，但DELETE后不缩小；熔断必须使用
+// 明确标注的有效数据字节估算，并保留行数边界与80%恢复低水位。
 
 const entry = SETTING_SCHEMA.record_high_watermark_bytes;
 assert.ok(entry, '必须存在 record_high_watermark_bytes 设置项');
@@ -34,10 +36,12 @@ assert.doesNotMatch(rpc, /grant execute on function public\.cfm_history_storage_
 
 // 2) 种子与熔断判定
 assert.match(schemaSql, /\('record_high_watermark_bytes', '419430400'\)/, '设置种子必须写入默认值');
-assert.match(live, /const bytesBlocked = this\.recordCapacityBytes >= this\.recordHighWatermarkBytes;/,
-  '必须按字节判定熔断');
-assert.match(live, /this\.recordCapacityBlocked = bytesBlocked \|\| rowsBlocked;/,
-  '字节与行数任一到线都要熔断');
+const limits = { rowLimit: 700000, byteLimit: 419430400 };
+const small = { live_rows: 1, estimated_live_storage_bytes: 420, allocated_bytes: 600 * 1024 * 1024 };
+assert.equal(evaluateHistoryCapacity(small, limits).blocked, false, '大allocated不能阻塞已清理的有效数据');
+assert.equal(evaluateHistoryCapacity({ ...small, estimated_live_storage_bytes: limits.byteLimit }, limits).blocked, true, '字节到线熔断');
+assert.equal(evaluateHistoryCapacity({ ...small, live_rows: limits.rowLimit }, limits).blocked, true, '行数到线熔断');
+assert.equal(evaluateHistoryCapacity(small, { ...limits, wasBlocked: true }).blocked, false, '低于低水位恢复');
 
 // 3) 快照复用：熔断线改了必须立刻重算，否则改了设置也要等缓存过期才生效
 assert.match(live, /snapshot\.highWatermarkBytes === this\.recordHighWatermarkBytes/,
@@ -47,4 +51,4 @@ assert.match(live, /snapshot\.highWatermarkBytes === this\.recordHighWatermarkBy
 assert.match(admin, /'record_high_watermark_bytes',/, '后台必须允许编辑该设置');
 assert.match(live, /'record_high_watermark_bytes',/, 'DO 必须订阅该设置键');
 
-console.log('ok - 容量熔断按字节量');
+console.log('ok - 有效数据字节/行数熔断与allocated诊断分离');

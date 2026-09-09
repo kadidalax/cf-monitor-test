@@ -5,6 +5,7 @@ on:
     branches:
       - '**'
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Lint, build and test
+    name: Lint, build, test and security
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,12 +45,21 @@ jobs:
       - name: Build
         run: npm run build
 
-      # `npm test` chains test:js (node --test, all 59 .test.mjs across the repo)
+      # `npm test` chains test:js (node --test across the repo)
       # and test:go. The gate is the exit code -- never the output line count:
       # node --test prints per-file for top-level bare assertions and per-test for
       # test() files, so counting lines silently misses whole files.
       - name: Test
         run: npm test
+
+      - name: Agent data race check
+        working-directory: agent
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race ./...
+
+      - name: Dependency and toolchain security
+        run: npm run security:check
 
       - name: Check migration drift
         run: |

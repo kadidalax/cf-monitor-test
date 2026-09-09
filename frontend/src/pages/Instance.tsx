@@ -18,6 +18,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { publicFetch } from '../utils/api';
 import { normalizePublicClients } from '../utils/publicClients';
 import {
+  collectCursorHistory,
   normalizePublicGpuRecords,
   normalizePublicMonitorRecords,
   type PublicGpuRecord,
@@ -103,6 +104,12 @@ export default function Instance() {
   const [records, setRecords] = useState<PublicMonitorRecord[]>([]);
   const [clientLoading, setClientLoading] = useState(true);
   const [recordsLoading, setRecordsLoading] = useState(true);
+  const [recordsError, setRecordsError] = useState<string | null>(null);
+  const [gpuError, setGpuError] = useState<string | null>(null);
+  const [gpuLoading, setGpuLoading] = useState(false);
+  const [gpuRefresh, setGpuRefresh] = useState(0);
+  const clientRequestRef = useRef(0);
+  const recordsRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [chartTab, setChartTab] = useState<ChartTab>('cpu');
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
@@ -141,26 +148,39 @@ export default function Instance() {
   }, [clients, onlineSet]);
 
   // Load public client info.
-  const loadClient = useCallback(async () => {
+  const loadClient = useCallback(async (signal?: AbortSignal) => {
     if (!uuid || authLoading) return;
+    const requestId = ++clientRequestRef.current;
     setClientLoading(true);
+    setClient(null);
     try {
       setError(null);
-      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`);
+      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`, { signal });
+      if (signal?.aborted || requestId !== clientRequestRef.current) return;
       const visible = normalizePublicClients(data, { includeHidden: isAuthenticated });
       setClients(visible);
       const found = visible.find((c) => c.uuid === uuid) || null;
       if (found) { setClient(found); } else { setError('服务器不存在'); }
-    } catch { setError('加载失败'); }
-    finally { setClientLoading(false); }
+    } catch {
+      if (!signal?.aborted && requestId === clientRequestRef.current) setError('加载失败');
+    } finally {
+      if (!signal?.aborted && requestId === clientRequestRef.current) setClientLoading(false);
+    }
   }, [uuid, authLoading, isAuthenticated]);
 
-  useEffect(() => { loadClient(); }, [loadClient]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadClient(controller.signal);
+    return () => { controller.abort(); clientRequestRef.current += 1; };
+  }, [loadClient]);
 
   // Load history records
-  const loadRecords = useCallback(async (range: TimeRange) => {
+  const loadRecords = useCallback(async (range: TimeRange, signal?: AbortSignal) => {
     if (!uuid || authLoading) return;
+    const requestId = ++recordsRequestRef.current;
     setRecordsLoading(true);
+    setRecords([]);
+    setRecordsError(null);
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[range];
     const start = new Date(startTs).toISOString();
@@ -169,14 +189,22 @@ export default function Instance() {
     setRecordsRangeEnd(endTs);
 
     try {
-      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor: end, limit, include_hidden: isAuthenticated ? 1 : undefined })}`);
-      setRecords(normalizePublicMonitorRecords(data));
-    } catch {}
-    setRecordsLoading(false);
+      const data = await collectCursorHistory(
+        (cursor) => publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor, limit: Math.min(limit, 500), include_hidden: isAuthenticated ? 1 : undefined })}`, { signal }),
+        { cursor: end, start, end, normalize: normalizePublicMonitorRecords, signal },
+      );
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecords(data);
+    } catch {
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsError('加载监控历史失败，请重试');
+    } finally {
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsLoading(false);
+    }
   }, [uuid, authLoading, isAuthenticated]);
 
   useEffect(() => {
-    loadRecords(timeRange);
+    const controller = new AbortController();
+    void loadRecords(timeRange, controller.signal);
+    return () => { controller.abort(); recordsRequestRef.current += 1; };
   }, [loadRecords, timeRange]);
 
   useEffect(() => {
@@ -230,24 +258,40 @@ export default function Instance() {
 
   // Load GPU records (only for GPU-capable clients)
   useEffect(() => {
-    if (!uuid || authLoading || !client?.gpu_name) return;
+    if (client && !client.gpu_name) setChartTab(current => current === 'gpu' ? 'cpu' : current);
+  }, [client?.uuid, client?.gpu_name]);
+
+  useEffect(() => {
+    setGpuRecords([]);
+    setGpuError(null);
+    setGpuLoading(false);
+    if (!uuid || authLoading || !client?.gpu_name || client.uuid !== uuid) return;
+    setGpuLoading(true);
+    const controller = new AbortController();
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[timeRange];
     const start = new Date(startTs).toISOString();
     const end = new Date(endTs).toISOString();
 
-    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200, include_hidden: isAuthenticated ? 1 : undefined })}`)
-      .then((data) => setGpuRecords(normalizePublicGpuRecords(data)))
-      .catch(() => {});
-  }, [uuid, timeRange, client?.gpu_name, authLoading, isAuthenticated]);
+    collectCursorHistory(
+      (cursor) => publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor, limit: 500, include_hidden: isAuthenticated ? 1 : undefined })}`, { signal: controller.signal }),
+      { cursor: end, start, end, normalize: normalizePublicGpuRecords, signal: controller.signal },
+    )
+      .then((data) => { if (!controller.signal.aborted) setGpuRecords(data); })
+      .catch(() => { if (!controller.signal.aborted) setGpuError('加载 GPU 历史失败，请重试'); })
+      .finally(() => { if (!controller.signal.aborted) setGpuLoading(false); });
+    return () => controller.abort();
+  }, [uuid, timeRange, client?.uuid, client?.gpu_name, authLoading, isAuthenticated, gpuRefresh]);
 
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;
     setTimeRange(range);
+    setRecords([]);
+    setGpuRecords([]);
     setRecordsLoading(true);
   };
 
-  if (clientLoading || (recordsLoading && records.length === 0)) return <Loading />;
+  if (clientLoading || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
   if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
 
   const latestHistory = records.length > 0 ? records[records.length - 1] : null;
@@ -325,6 +369,8 @@ export default function Instance() {
 
       {/* Chart section */}
       <Card mb="4">
+        {recordsError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
+        {chartTab === 'gpu' && gpuError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
           <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : '最近3天'}</Text>
           <Flex align="center" gap="3" wrap="wrap">
@@ -347,14 +393,22 @@ export default function Instance() {
               <Tabs.Trigger value="connections">连接数</Tabs.Trigger>
               <Tabs.Trigger value="process">进程数</Tabs.Trigger>
               <Tabs.Trigger value="temp">温度</Tabs.Trigger>
-              {client.gpu_name && gpuRecords.length > 0 && (
+              {client.gpu_name && (
                 <Tabs.Trigger value="gpu">GPU</Tabs.Trigger>
               )}
             </Tabs.List>
           </Flex>
 
           <Box pt="3">
-            {chartTab === 'gpu' ? (
+            {chartTab === 'temp' && !recordsLoading && !recordsError && !chartData.some((point) => point.temp !== null) ? (
+              <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
+                <Text role="status" color="gray">温度数据不可用</Text>
+              </Flex>
+            ) : chartTab === 'gpu' && gpuLoading ? (
+              <Text role="status" color="gray">正在加载 GPU 历史…</Text>
+            ) : chartTab === 'gpu' && !gpuError && gpuRecords.length === 0 ? (
+              <Text role="status" color="gray">暂无 GPU 历史记录</Text>
+            ) : chartTab === 'gpu' && gpuError ? null : chartTab === 'gpu' ? (
               <ResponsiveContainer width="100%" height={monitorChartHeight}>
                 <LineChart data={gpuChartData} margin={monitorChartMargin}>
                   <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
@@ -478,7 +532,7 @@ export default function Instance() {
                       return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
                     }}
                   />
-                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             )}

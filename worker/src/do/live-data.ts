@@ -21,14 +21,20 @@ import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
 import { isRecordPersistDue } from '../utils/record-persist';
 import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
+import { toPublicReport } from '../utils/public-report';
+import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
+import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
+import { evaluateHistoryCapacity } from '../utils/history-capacity';
+import { MAX_BACKUP_BYTES } from '../utils/backup';
+import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
 
 // 客户端状态
 interface ClientState {
   uuid: string;
   name: string;
   hidden: boolean;
-  lastReportTime: number;
-  lastReport: MonitorReportPayload; // 最后一次上报的数据
+  lastReportTime: number; // 服务端接收时间，用于判活；不采用 Agent 时钟。
+  lastReport: MonitorReportPayload; // timestamp 保留采样时间，历史记录使用它。
   expiresAt?: number;
 }
 
@@ -73,12 +79,15 @@ const RECORD_PERSISTENCE_SETTING_KEYS = [
   'record_high_watermark_bytes',
 ];
 const HTTP_CLIENT_MIN_TTL_MS = 30_000;
+const HTTP_LIVE_STATE_PREFIX = 'http-live:';
 const HTTP_CLIENT_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 const HTTP_CLIENT_REPORT_MAX_BODY_BYTES = 512 * 1024;
 const HTTP_CLIENT_META_MAX_BODY_BYTES = 16 * 1024;
 const HTTP_ADMIN_CLIENTS_SNAPSHOT_MAX_BODY_BYTES = 256 * 1024;
 const HTTP_PING_RESULT_MAX_BODY_BYTES = 64 * 1024;
 const AGENT_WS_MAX_MESSAGE_BYTES = 512 * 1024;
+// Cloudflare permits 16,384 bytes; leave room for structured-clone overhead.
+const AGENT_ATTACHMENT_BUDGET_BYTES = 12 * 1024;
 const AGENT_REPORT_MAX_BATCH = 300;
 const VIEWER_MIN_TTL_MS = 60_000;
 const VIEWER_MAX_TTL_MS = 60 * 60 * 1000;
@@ -302,6 +311,7 @@ interface GPUSnapshotMeta {
 }
 
 interface RecordCapacitySnapshot {
+  measurement: 'live-row-bytes-plus-index-estimate';
   rows: number;
   bytes: number;
   blocked: boolean;
@@ -312,6 +322,7 @@ interface RecordCapacitySnapshot {
 }
 
 interface AdminClientsSnapshot {
+  complete?: boolean;
   clients: JsonObject[];
   updatedAt: number;
   removed?: string[];
@@ -389,6 +400,7 @@ export class LiveDataDO {
   private sessionRoles: Map<string, SessionRole>;
   private viewerExpiresAt: Map<string, number>;
   private clients: Map<string, ClientState>; // 在线客户端状态
+  private httpClientsReady: Promise<void>;
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
   private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
@@ -402,6 +414,7 @@ export class LiveDataDO {
   private recordCapacityLastAuditAt: number = 0;
   private healthOkLastWriteAt: Map<string, number> = new Map();
   private recordLastPersistAt: Map<string, number> = new Map();
+  private recordWritesInFlight = new Set<string>();
   private pingResultStateCache: Map<string, PingResultState> = new Map();
   private policySettings: AgentPolicySettings = {
     activeIntervalSec: 3,
@@ -421,6 +434,8 @@ export class LiveDataDO {
   private trafficResetDaysAt = 0;
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private basicInfoSignatures = new Map<string, string>();
+  private metadataSyncQueues = new Map<string, Promise<void>>();
+  private pingWriteQueues = new Map<string, Promise<unknown>>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
 
   constructor(state: DurableObjectState, env: LiveDataEnv) {
@@ -431,6 +446,40 @@ export class LiveDataDO {
     this.viewerExpiresAt = new Map();
     this.clients = new Map();
     this.hydrateSessionsFromAcceptedWebSockets();
+    this.httpClientsReady = this.hydrateHttpClients();
+  }
+
+  private async hydrateHttpClients(): Promise<void> {
+    const now = Date.now();
+    const stored = await this.state.storage.list<ClientState>({ prefix: HTTP_LIVE_STATE_PREFIX });
+    const obsolete: string[] = [];
+    for (const [key, client] of stored) {
+      if (
+        !client || typeof client.uuid !== 'string' || key !== `${HTTP_LIVE_STATE_PREFIX}${client.uuid}` ||
+        !Number.isFinite(client.lastReportTime) || !Number.isFinite(client.expiresAt) ||
+        client.expiresAt! <= now || !isObjectPayload(client.lastReport) || this.clients.has(client.uuid)
+      ) {
+        obsolete.push(key);
+        continue;
+      }
+      this.clients.set(client.uuid, {
+        ...client,
+        name: typeof client.name === 'string' ? client.name : client.uuid,
+        hidden: Boolean(client.hidden),
+        lastReport: compactLiveReport(client.lastReport),
+      });
+    }
+    for (let offset = 0; offset < obsolete.length; offset += 128) {
+      await this.state.storage.delete(obsolete.slice(offset, offset + 128));
+    }
+    if (stored.size) await this.scheduleExpiryAlarm(now);
+  }
+
+  private async persistHttpClient(client: ClientState): Promise<void> {
+    await this.state.storage.put(`${HTTP_LIVE_STATE_PREFIX}${client.uuid}`, {
+      ...client,
+      lastReport: compactLiveReport(client.lastReport),
+    });
   }
 
   private getQueryDatabase(): db.QueryDatabase | null {
@@ -583,7 +632,7 @@ export class LiveDataDO {
     const onlineClients = Array.from(this.clients.values())
       .filter(c => (includeHidden || !c.hidden) && (!c.expiresAt || c.expiresAt > now))
       .map(c => ({
-        ...(c.lastReport || {}),
+        ...(includeHidden ? c.lastReport : toPublicReport(c.lastReport)),
         uuid: c.uuid,
         name: c.name,
         lastReportTime: c.lastReportTime,
@@ -631,7 +680,23 @@ export class LiveDataDO {
     return Boolean(client && !client.hidden && (!client.expiresAt || client.expiresAt > now));
   }
 
-  private updateClientReport(
+  private async resolveReportClientControl(clientId: string, name: string, hidden: boolean): Promise<{ name: string; hidden: boolean }> {
+    const snapshot = await this.readAdminClientsSnapshot();
+    const metadata = snapshot?.clients.find(client => client.uuid === clientId);
+    if (snapshot && (snapshot.removed?.includes(clientId) || (snapshot.complete !== false && !metadata))) {
+      throw new Error('Client authorization was removed');
+    }
+    if (metadata) {
+      return {
+        name: typeof metadata.name === 'string' ? metadata.name : name,
+        hidden: booleanField(metadata, 'hidden'),
+      };
+    }
+    const current = this.clients.get(clientId);
+    return current ? { name: current.name, hidden: current.hidden } : { name, hidden };
+  }
+
+  private async updateClientReport(
     clientId: string,
     clientName: string,
     hidden: boolean,
@@ -640,7 +705,7 @@ export class LiveDataDO {
     expiresAt?: number,
     ws?: WebSocket,
     network?: ReportNetworkMetadata,
-  ): MonitorReportPayload {
+  ): Promise<MonitorReportPayload> {
     const report = this.sanitizeReport(
       normalizeMonitorReport(data),
       network || (ws ? this.getSessionAttachment(ws) || undefined : undefined),
@@ -656,6 +721,7 @@ export class LiveDataDO {
       expiresAt,
     };
 
+    if (!ws && expiresAt !== undefined) await this.persistHttpClient(next);
     this.clients.set(clientId, next);
     if (ws) this.rememberAgentReportAttachment(ws, clientId, clientName, hidden, report, now, expiresAt);
     this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, clientName, hidden, report, now));
@@ -681,8 +747,8 @@ export class LiveDataDO {
 
   private async syncNetworkMetadataFromReport(
     clientId: string,
-    clientName: string,
-    hidden: boolean,
+    _clientName: string,
+    _hidden: boolean,
     report: MonitorReportPayload,
     now: number,
   ): Promise<void> {
@@ -698,17 +764,27 @@ export class LiveDataDO {
     this.applyInferredNetworkMetadataToLiveReport(clientId, patch, now);
 
     const signature = JSON.stringify(patch);
-    const previous = this.networkMetadataSignatures.get(clientId);
-    if (previous?.signature === signature) return;
-    this.networkMetadataSignatures.set(clientId, { signature, syncedAt: now });
+    await this.runClientMetadataSync(clientId, async () => {
+      const previous = this.networkMetadataSignatures.get(clientId);
+      if (previous?.signature === signature) return;
+      const database = this.getQueryDatabase();
+      if (!database) return;
+      await db.updateClient(database, clientId, patch as Partial<db.Client>);
+      const client = await this.upsertAdminClientSnapshot({ uuid: clientId, ...patch }, true);
+      this.networkMetadataSignatures.set(clientId, { signature, syncedAt: now });
+      if (client) this.broadcastMetadataChanged({ clients: { upsert: [client] } });
+    });
+  }
 
-    const client = { uuid: clientId, name: clientName || clientId, hidden, ...patch };
-    await this.upsertAdminClientSnapshot(client);
-    this.broadcastMetadataChanged({ clients: { upsert: [this.publicClientMetadata(client)] } });
-
-    const database = this.getQueryDatabase();
-    if (!database) return;
-    await db.updateClient(database, clientId, patch as Partial<db.Client>);
+  private async runClientMetadataSync(clientId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.metadataSyncQueues.get(clientId) || Promise.resolve();
+    const pending = previous.catch(() => {}).then(work);
+    this.metadataSyncQueues.set(clientId, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.metadataSyncQueues.get(clientId) === pending) this.metadataSyncQueues.delete(clientId);
+    }
   }
 
   private applyInferredNetworkMetadataToLiveReport(clientId: string, patch: JsonObject, now: number): void {
@@ -779,17 +855,24 @@ export class LiveDataDO {
     expiresAt?: number,
   ): void {
     const previous = this.getSessionAttachment(ws);
-    ws.serializeAttachment({
+    const attachment: SessionAttachment = {
       role: 'agent',
       clientId,
-      clientName,
+      clientName: clientName.slice(0, 256),
       hidden,
       ...(previous?.sourceIp ? { sourceIp: previous.sourceIp } : {}),
       ...(previous?.region ? { region: previous.region } : {}),
-      lastReport: report,
+      lastReport: compactLiveReport(report),
       lastReportTime: now,
       expiresAt,
-    });
+    };
+    if (serializedBytes(attachment) > AGENT_ATTACHMENT_BUDGET_BYTES && attachment.lastReport) {
+      delete attachment.lastReport.basic_info;
+    }
+    if (serializedBytes(attachment) > AGENT_ATTACHMENT_BUDGET_BYTES && attachment.lastReport) {
+      attachment.lastReport.gpus = attachment.lastReport.gpus.map(gpu => ({ ...gpu, device_name: '' }));
+    }
+    ws.serializeAttachment(attachment);
   }
 
   private boundedHttpTtlMs(value: unknown): number {
@@ -902,7 +985,7 @@ export class LiveDataDO {
     this.websiteProbeTasksPending.clear();
   }
 
-  private async getWebsiteProbeTasks(now: number, clientId?: string): Promise<db.WebsiteMonitor[]> {
+  private async getWebsiteProbeTasks(now: number, clientId?: string, requireSuccess = false): Promise<db.WebsiteMonitor[]> {
     const database = this.getQueryDatabase();
     if (!database || !clientId) return [];
     const cached = this.websiteProbeTasksCache.get(clientId);
@@ -934,6 +1017,7 @@ export class LiveDataDO {
           { auditAction: 'agent_policy_website_probe_tasks_error' },
         );
       }
+      if (requireSuccess) throw error;
       return [];
     } finally {
       if (this.websiteProbeTasksPending.get(clientId) === pending) {
@@ -1036,11 +1120,12 @@ export class LiveDataDO {
     }
   }
 
-  private removeExpiredClients(now: number) {
+  private async removeExpiredClients(now: number) {
     for (const [uuid, client] of this.clients) {
       if (!client.expiresAt || client.expiresAt > now) continue;
 
       this.clients.delete(uuid);
+      await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${uuid}`);
       this.broadcastToViewers({
         type: 'remove',
         client: uuid,
@@ -1078,7 +1163,8 @@ export class LiveDataDO {
   }
 
   private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
-    let payload = '';
+    let publicPayload = '';
+    let adminPayload = '';
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'viewer' || session.readyState !== WebSocket.READY_STATE_OPEN) {
         continue;
@@ -1087,8 +1173,15 @@ export class LiveDataDO {
       if (audience === 'admin' && !includeHidden) continue;
       if (audience === 'public' && includeHidden) continue;
       try {
-        payload ||= JSON.stringify(message);
-        session.send(payload);
+        if (includeHidden) {
+          adminPayload ||= JSON.stringify(message);
+          session.send(adminPayload);
+        } else {
+          publicPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
+            ? { ...message, data: toPublicReport(message.data as MonitorReportPayload) }
+            : message);
+          session.send(publicPayload);
+        }
       } catch {
         // Close/error handlers clean up broken viewer sockets.
       }
@@ -1096,11 +1189,34 @@ export class LiveDataDO {
   }
 
   private broadcastMetadataChanged(detail: JsonObject = {}, audience: 'all' | 'public' | 'admin' = 'all') {
-    this.broadcastToViewers({
-      type: 'metadata_changed',
-      ...detail,
-      timestamp: Date.now(),
-    }, audience);
+    const timestamp = Date.now();
+    for (const target of ['public', 'admin'] as const) {
+      if (audience !== 'all' && audience !== target) continue;
+      let projected = detail;
+      if (isObjectPayload(detail.clients)) {
+        const patch = detail.clients;
+        const upserts = Array.isArray(patch.upsert) ? patch.upsert.filter(isObjectPayload) : [];
+        const remove = new Set(Array.isArray(patch.remove)
+          ? patch.remove.filter((uuid): uuid is string => typeof uuid === 'string')
+          : []);
+        if (target === 'public') {
+          for (const client of upserts) {
+            if (client.hidden && typeof client.uuid === 'string') remove.add(client.uuid);
+          }
+        }
+        projected = {
+          ...detail,
+          clients: {
+            ...(Array.isArray(patch.upsert) ? {
+              upsert: upserts.filter(client => target === 'admin' || !client.hidden)
+                .map(client => projectClientMetadata(client, target === 'admin')),
+            } : {}),
+            ...(remove.size ? { remove: [...remove] } : {}),
+          },
+        };
+      }
+      this.broadcastToViewers({ type: 'metadata_changed', ...projected, timestamp }, target);
+    }
   }
 
   private countViewers(viewerIp?: string): { total: number; sameIp: number } {
@@ -1251,11 +1367,18 @@ export class LiveDataDO {
     }
 
     const uuid = meta.uuid;
+    if (meta.source === 'agent') {
+      const patch = projectAgentClientMetadata(isObjectPayload(meta.client) ? meta.client : meta);
+      const client = await this.upsertAdminClientSnapshot({ uuid, ...patch }, true);
+      if (client) this.broadcastMetadataChanged({ clients: { upsert: [client] } });
+      return Response.json({ success: true });
+    }
     const current = this.clients.get(uuid);
     if (current) {
       const wasVisible = !current.hidden;
       current.name = typeof meta.name === 'string' ? meta.name : current.name;
       current.hidden = booleanField(meta, 'hidden');
+      if (current.expiresAt !== undefined) await this.persistHttpClient(current);
       this.clients.set(uuid, current);
       const session = this.sessions.get(uuid);
       if (session?.readyState === WebSocket.READY_STATE_OPEN) {
@@ -1299,11 +1422,8 @@ export class LiveDataDO {
       ? meta.client
       : { uuid, name: current?.name || uuid, hidden: booleanField(meta, 'hidden') };
     await this.upsertAdminClientSnapshot(client);
-    const broadcastClient = this.publicClientMetadata(client);
     this.broadcastMetadataChanged({
-      clients: booleanField(meta, 'hidden')
-        ? { upsert: [broadcastClient], remove: [uuid] }
-        : { upsert: [broadcastClient] },
+      clients: { upsert: [{ ...client, hidden: booleanField(meta, 'hidden') }] },
     });
 
     return new Response(JSON.stringify({ success: true }), {
@@ -1335,6 +1455,7 @@ export class LiveDataDO {
     this.sessions.delete(meta.uuid);
     this.sessionRoles.delete(meta.uuid);
     this.clients.delete(meta.uuid);
+    await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`);
     await this.removeAgentAuthByUuid(String(meta.uuid));
     if (!keepMetadata) {
       await this.removeAdminClientSnapshot(String(meta.uuid));
@@ -1370,14 +1491,6 @@ export class LiveDataDO {
     return { ...safe, uuid };
   }
 
-  private publicClientMetadata(client: JsonObject): JsonObject {
-    const safe = this.sanitizeAdminClientSnapshotItem(client);
-    const broadcastClient: JsonObject = safe ? { ...safe } : {};
-    delete broadcastClient.ipv4;
-    delete broadcastClient.ipv6;
-    return broadcastClient;
-  }
-
   private async readAdminClientsSnapshot(): Promise<AdminClientsSnapshot | null> {
     const snapshot = await this.state.storage.get<AdminClientsSnapshot>(ADMIN_CLIENTS_SNAPSHOT_KEY);
     if (!snapshot || !Array.isArray(snapshot.clients)) {
@@ -1386,6 +1499,7 @@ export class LiveDataDO {
     }
     const normalized = {
       clients: snapshot.clients.filter(isObjectPayload),
+      complete: snapshot.complete !== false,
       updatedAt: Number(snapshot.updatedAt || 0),
       removed: Array.isArray(snapshot.removed)
         ? snapshot.removed.filter((uuid): uuid is string => typeof uuid === 'string' && uuid.trim() !== '')
@@ -1401,37 +1515,81 @@ export class LiveDataDO {
     const clients = Array.isArray(parsed.body.clients)
       ? parsed.body.clients.filter(isObjectPayload).map(client => this.sanitizeAdminClientSnapshotItem(client)).filter((client): client is JsonObject => Boolean(client))
       : [];
-    const updatedAt = Date.now();
+    const previous = await this.readAdminClientsSnapshot();
+    const reorder = parsed.body.mode === 'reorder';
+    // A cache read cannot replace changes that committed after its read began.
+    // Unversioned writes only seed an object that has no management snapshot.
+    if (!reorder && (previous || Object.hasOwn(parsed.body, 'expected_version')) &&
+      parsed.body.expected_version !== (previous?.updatedAt ?? null)) {
+      return Response.json({ error: 'Client metadata changed while the database was being read' }, { status: 409 });
+    }
+    const confirmed = new Set(!reorder && Array.isArray(parsed.body.confirmed_removed)
+      ? parsed.body.confirmed_removed.filter((uuid): uuid is string => typeof uuid === 'string') : []);
+    const removed = (previous?.removed || []).filter(uuid => !confirmed.has(uuid));
+    const removedSet = new Set(previous?.removed || []);
+    let nextClients = clients.filter(client => !removedSet.has(String(client.uuid)));
+    if (reorder && previous) {
+      const orders = new Map(clients.map(client => [String(client.uuid), client.sort_order]));
+      nextClients = previous.clients.map(client => {
+        const order = orders.get(String(client.uuid));
+        return typeof order === 'number' && Number.isSafeInteger(order) && order > 0
+          ? { ...client, sort_order: order } : client;
+      });
+    }
+    const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
     this.adminClientsUpdatedAt = updatedAt;
-    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, { clients, updatedAt, removed: [] });
-    return Response.json({ success: true, count: clients.length });
+    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+      clients: nextClients, updatedAt, removed, complete: reorder && previous ? previous.complete !== false : true,
+    });
+    return Response.json({ success: true, count: nextClients.length });
   }
 
-  private async upsertAdminClientSnapshot(client: JsonObject): Promise<void> {
+  private async upsertAdminClientSnapshot(client: JsonObject, fromAgent = false): Promise<JsonObject | null> {
     const safe = this.sanitizeAdminClientSnapshotItem(client);
-    if (!safe) return;
+    if (!safe) return null;
     const snapshot = await this.readAdminClientsSnapshot();
-    if (!snapshot) return;
+    if (!snapshot) {
+      if (!fromAgent) {
+        const updatedAt = Math.max(Date.now(), (this.adminClientsUpdatedAt || 0) + 1);
+        this.adminClientsUpdatedAt = updatedAt;
+        await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+          clients: [safe], updatedAt, removed: [], complete: false,
+        });
+        return safe;
+      }
+      // No management snapshot yet: only a currently live node can supply the
+      // visibility/name. Captured values from before external I/O may be stale.
+      const current = this.clients.get(String(safe.uuid));
+      return fromAgent && current ? { ...safe, name: current.name, hidden: current.hidden } : null;
+    }
     const clients = snapshot.clients;
     const byUuid = new Map(clients.map(item => [String(item.uuid || ''), item]));
-    byUuid.set(String(safe.uuid), { ...(byUuid.get(String(safe.uuid)) || {}), ...safe });
-    const updatedAt = Date.now();
+    const previous = byUuid.get(String(safe.uuid));
+    // An Agent can update technical fields, but cannot recreate deleted metadata
+    // or clear a tombstone after an administrator removed the node during I/O.
+    if (fromAgent && (!previous || snapshot.removed?.includes(String(safe.uuid)))) return null;
+    const merged = { ...(previous || {}), ...safe };
+    byUuid.set(String(safe.uuid), merged);
+    const updatedAt = Math.max(Date.now(), (snapshot.updatedAt || 0) + 1);
     this.adminClientsUpdatedAt = updatedAt;
     await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
       clients: [...byUuid.values()],
       updatedAt,
       removed: (snapshot?.removed || []).filter(item => item !== safe.uuid),
+      complete: snapshot.complete !== false,
     });
+    return merged;
   }
 
   private async removeAdminClientSnapshot(uuid: string): Promise<void> {
     const snapshot = await this.readAdminClientsSnapshot();
-    const updatedAt = Date.now();
+    const updatedAt = Math.max(Date.now(), (snapshot?.updatedAt || 0) + 1);
     this.adminClientsUpdatedAt = updatedAt;
     await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
       clients: (snapshot?.clients || []).filter(client => client.uuid !== uuid),
       updatedAt,
       removed: [uuid, ...(snapshot?.removed || []).filter(item => item !== uuid)].slice(0, 200),
+      complete: snapshot ? snapshot.complete !== false : false,
     });
   }
 
@@ -1455,40 +1613,49 @@ export class LiveDataDO {
       sourceIp: stringField(payload, 'source_ip'),
       region: stringField(payload, 'region'),
     };
-    const now = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
+    const now = Date.now();
     const ttlMs = this.boundedHttpTtlMs(payload.ttl_ms);
-    const clientName = typeof payload.name === 'string' && payload.name.trim() !== '' ? payload.name.trim() : payload.uuid;
-    const hidden = booleanField(payload, 'hidden');
+    const control = await this.resolveReportClientControl(payload.uuid,
+      typeof payload.name === 'string' && payload.name.trim() !== '' ? payload.name.trim() : payload.uuid,
+      booleanField(payload, 'hidden'));
+    const clientName = control.name;
+    const hidden = control.hidden;
     const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
     for (let index = 0; index < reports.length; index += 1) {
       const rawReport = reports[index];
       const reportTime = this.reportTimestamp(rawReport, now);
       const isLast = index === reports.length - 1;
       if (isLast) {
-        const report = this.updateClientReport(
+        const report = await this.updateClientReport(
           payload.uuid,
           clientName,
           hidden,
           rawReport,
-          reportTime,
+          now,
           now + ttlMs,
           undefined,
           network,
         );
         reportsToPersist.push({ report, reportTime });
-        this.runBackground('ping_persistence', this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime));
-        this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime));
       } else {
         reportsToPersist.push({ report: rawReport, reportTime });
-        this.runBackground('ping_persistence', this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime));
-        this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime));
+      }
+      try {
+        await this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime);
+        await this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime);
+      } catch {
+        return Response.json({ error: 'Probe persistence failed; retry this report' }, { status: 503 });
       }
     }
 
     await this.scheduleExpiryAlarm(now);
     const basicInfoReport = this.latestBasicInfoReport(reports);
     if (basicInfoReport) {
-      this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(payload.uuid, clientName, hidden, basicInfoReport));
+      try {
+        await this.syncBasicInfoFromReport(payload.uuid, clientName, hidden, basicInfoReport);
+      } catch {
+        return Response.json({ error: 'Basic information persistence failed; retry this report' }, { status: 503 });
+      }
     }
     this.runBackground('do_record_persistence', this.persistReportsSequential(payload.uuid, reportsToPersist));
 
@@ -1524,7 +1691,7 @@ export class LiveDataDO {
     return text !== '' && !isUnknownRegionValue(text);
   }
 
-  private async syncBasicInfoFromReport(clientId: string, clientName: string, hidden: boolean, report: JsonObject): Promise<void> {
+  private async syncBasicInfoFromReport(clientId: string, _clientName: string, _hidden: boolean, report: JsonObject): Promise<void> {
     const basicInfo = report.basic_info;
     if (!isObjectPayload(basicInfo)) return;
     const patch: Record<string, unknown> = {};
@@ -1560,20 +1727,24 @@ export class LiveDataDO {
     }
     if (Object.keys(patch).length === 0) return;
     const signature = JSON.stringify(patch);
-    if (this.basicInfoSignatures.get(clientId) === signature) return;
-    this.basicInfoSignatures.set(clientId, signature);
-    const database = this.getQueryDatabase();
-    if (!database) return;
     try {
-      await db.updateClient(database, clientId, patch as Partial<db.Client>);
-      const clientPatch: JsonObject = { uuid: clientId, name: clientName || clientId, hidden, ...patch };
-      await this.upsertAdminClientSnapshot(clientPatch);
-      const broadcastPatch = this.publicClientMetadata(clientPatch);
-      this.broadcastMetadataChanged({
-        clients: hidden ? { upsert: [broadcastPatch], remove: [clientId] } : { upsert: [broadcastPatch] },
+      await this.runClientMetadataSync(clientId, async () => {
+        if (this.basicInfoSignatures.get(clientId) === signature) return;
+        const database = this.getQueryDatabase();
+        if (!database) return;
+        await db.updateClient(database, clientId, patch as Partial<db.Client>);
+        const clientPatch = await this.upsertAdminClientSnapshot({ uuid: clientId, ...patch }, true);
+        this.basicInfoSignatures.set(clientId, signature);
+        if (clientPatch) this.broadcastMetadataChanged({ clients: { upsert: [clientPatch] } });
       });
-    } catch {
-      // Basic info is refreshed periodically; keep live reporting independent.
+    } catch (error) {
+      // No successful signature was committed: the unacknowledged report retries.
+      const database = this.getQueryDatabase();
+      if (database) {
+        await bestEffortRecordHealthEvent(database, 'do_basic_info_sync', 'error',
+          `basic info persist failed for ${clientId}: ${errorDetail(error)}`, { auditAction: 'do_basic_info_sync_error' });
+      }
+      throw error;
     }
   }
 
@@ -1598,13 +1769,14 @@ export class LiveDataDO {
       if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
       if (!(await this.canPersistWithinCapacity(nowMs))) return;
 
-      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId)).map(task => task.id));
+      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId, true)).map(task => task.id));
       if (assigned.size === 0) return;
       const checkedAt = new Date(nowMs).toISOString();
       let changed = false;
       const fallbackChecked = new Set<number>();
       for (const item of results) {
         const monitorId = Number(item.monitor_id);
+        const configRevision = item.config_revision;
         const latencyMs = Math.round(Number(item.latency_ms));
         const statusCode = item.status_code === null || item.status_code === undefined ? null : Number(item.status_code);
         const rawStatusCode = item.raw_status_code === null || item.raw_status_code === undefined ? statusCode : Number(item.raw_status_code);
@@ -1612,6 +1784,8 @@ export class LiveDataDO {
         if (
           !Number.isInteger(monitorId) ||
           !assigned.has(monitorId) ||
+          typeof configRevision !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(configRevision) ||
           !Number.isFinite(latencyMs) ||
           latencyMs < 0 ||
           latencyMs > 60_000 ||
@@ -1623,6 +1797,7 @@ export class LiveDataDO {
         }
         const updated = await db.recordWebsiteCheck(database, {
           monitor_id: monitorId,
+          config_revision: configRevision,
           checked_at: checkedAt,
           ok: Boolean(item.ok) && effectiveStatus === 'up',
           effective_status: effectiveStatus,
@@ -1653,12 +1828,72 @@ export class LiveDataDO {
         `website probe persist failed for ${clientId}: ${errorDetail(error)}`,
         { auditAction: 'website_probe_persistence_error' },
       );
+      throw error;
     }
+  }
+
+  private async restoreClients(request: Request): Promise<Response> {
+    const parsed = await parseJsonRequestWithLimit(request, MAX_BACKUP_BYTES);
+    if ('response' in parsed) return parsed.response;
+    if (!Array.isArray(parsed.body.clients) || parsed.body.clients.length > 1000 ||
+      parsed.body.clients.some(client => !isObjectPayload(client))) {
+      return Response.json({ error: 'Invalid restored client list' }, { status: 400 });
+    }
+    const clients = parsed.body.clients.map(restoredClientMetadata);
+    if (clients.some(client => !client.uuid) || new Set(clients.map(client => client.uuid)).size !== clients.length) {
+      return Response.json({ error: 'Invalid or duplicate restored client UUID' }, { status: 400 });
+    }
+    if (!measureRestoredClientSnapshot(clients, false).fits) {
+      return Response.json({ error: 'Restored client snapshot exceeds the safe storage size' }, { status: 413 });
+    }
+
+    // A restore is a rare whole-configuration transition. Only local storage is
+    // awaited in this gate; no database or other external I/O can hold it open.
+    return this.state.blockConcurrencyWhile(async () => {
+      const previous = await this.readAdminClientsSnapshot();
+      const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
+      for (const prefix of [HTTP_LIVE_STATE_PREFIX, AGENT_AUTH_SNAPSHOT_PREFIX, AGENT_AUTH_UUID_PREFIX]) {
+        while (true) {
+          const entries = await this.state.storage.list({ prefix, limit: 128 });
+          if (entries.size === 0) break;
+          await this.state.storage.delete([...entries.keys()]);
+        }
+      }
+      await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, { clients, updatedAt, removed: [], complete: true });
+      this.adminClientsUpdatedAt = updatedAt;
+      for (const socket of new Set([...this.sessions.values(), ...this.state.getWebSockets()])) {
+        const attachment = this.getSessionAttachment(socket);
+        if (attachment?.role !== 'agent') continue;
+        try { socket.close(1008, 'Client configuration restored'); } catch {}
+        this.sessions.delete(attachment.clientId);
+        this.sessionRoles.delete(attachment.clientId);
+      }
+      this.clients.clear();
+      this.networkMetadataSignatures.clear();
+      this.basicInfoSignatures.clear();
+      this.trafficResetDays.clear();
+      this.trafficResetDaysAt = 0;
+      this.recordPersistenceCheckedAt = 0;
+      this.policySettingsCheckedAt = 0;
+      this.invalidatePingTasksCache();
+      this.invalidateWebsiteProbeTasksCache();
+      this.broadcastMetadataChanged({ clients: true });
+      for (const [id, socket] of this.sessions) {
+        if (this.sessionRoles.get(id) === 'viewer') this.sendSnapshot(socket);
+      }
+      await this.scheduleExpiryAlarm(Date.now());
+      return Response.json({ success: true, count: clients.length, version: updatedAt });
+    });
   }
 
   // HTTP 请求处理（用于 Agent 上报数据）
   async fetch(request: Request): Promise<Response> {
+    await this.httpClientsReady;
     const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname === '/clients-restore') {
+      return this.restoreClients(request);
+    }
 
     if (request.method === 'POST' && url.pathname === '/client-meta') {
       return this.updateClientMeta(request);
@@ -1728,6 +1963,21 @@ export class LiveDataDO {
       // audience 只用于投递范围，不进广播载荷
       const { audience, ...detail } = parsed.body as JsonObject & { audience?: unknown };
       const target = audience === 'public' || audience === 'admin' ? audience : 'all';
+      if (isObjectPayload(detail.clients)) {
+        const snapshot = await this.readAdminClientsSnapshot();
+        if (snapshot) {
+          const current = new Map(snapshot.clients.map(client => [String(client.uuid), client]));
+          const removed = new Set(snapshot.removed || []);
+          const patch = detail.clients;
+          detail.clients = {
+            ...(Array.isArray(patch.upsert) ? { upsert: patch.upsert.filter(isObjectPayload)
+              .map(client => removed.has(String(client.uuid)) ? undefined : current.get(String(client.uuid)))
+              .filter((client): client is JsonObject => Boolean(client)) } : {}),
+            ...(Array.isArray(patch.remove) ? { remove: patch.remove.filter((uuid): uuid is string =>
+              typeof uuid === 'string' && (!current.has(uuid) || removed.has(uuid))) } : {}),
+          };
+        }
+      }
       this.broadcastMetadataChanged(detail, target);
       return Response.json({ success: true });
     }
@@ -1754,6 +2004,7 @@ export class LiveDataDO {
       if (role === 'viewer') {
         const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
         if (limitResponse) return limitResponse;
+        await this.getAgentPolicySettings(now);
       }
 
       const oldSession = role === 'agent' ? this.sessions.get(clientId) : undefined;
@@ -1819,6 +2070,9 @@ export class LiveDataDO {
 
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: Record<string, unknown>, ws: WebSocket) {
     const now = Date.now();
+    const control = await this.resolveReportClientControl(clientId, clientName, hidden);
+    clientName = control.name;
+    hidden = control.hidden;
     if (data?.type === 'ping_result') {
       this.runBackground('ping_persistence', this.persistPingResult(clientId, data, now));
       return;
@@ -1832,17 +2086,19 @@ export class LiveDataDO {
         const reportTime = this.reportTimestamp(rawReport, now);
         const isLast = index === reports.length - 1;
         if (isLast) {
-          const report = this.updateClientReport(clientId, clientName, hidden, rawReport, reportTime, undefined, ws);
+          const report = await this.updateClientReport(clientId, clientName, hidden, rawReport, now, undefined, ws);
           reportsToPersist.push({ report, reportTime });
-          this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
-          this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
-          this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
-          this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
         }
+        await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
+        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
       }
 
+      const basicInfoReport = this.latestBasicInfoReport(reports);
+      if (basicInfoReport) {
+        await this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport);
+      }
       if (ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
           ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
@@ -1851,20 +2107,16 @@ export class LiveDataDO {
         }
       }
       this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(ws, now, false, false, clientId));
-      const basicInfoReport = this.latestBasicInfoReport(reports);
-      if (basicInfoReport) {
-        this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport));
-      }
       this.runBackground('do_record_persistence', this.persistReportsSequential(clientId, reportsToPersist));
       return;
     }
 
     const rawReport = unwrapMonitorReportEnvelope(data);
     const reportTime = this.reportTimestamp(rawReport, now);
-    const report = this.updateClientReport(clientId, clientName, hidden, rawReport, reportTime, undefined, ws);
-    this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
-    this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
-    this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(clientId, clientName, hidden, rawReport));
+    const report = await this.updateClientReport(clientId, clientName, hidden, rawReport, now, undefined, ws);
+    await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
+    await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
+    await this.syncBasicInfoFromReport(clientId, clientName, hidden, rawReport);
 
     if (ws.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -1874,12 +2126,14 @@ export class LiveDataDO {
       }
     }
 
-    // 持久化放在实时响应之后，避免数据库写入延迟阻塞 Agent WebSocket ack。
+    // Ordinary sampled history remains asynchronous; acknowledged probe results
+    // above must already be saved or intentionally skipped by recording policy.
     this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(ws, now, false, false, clientId));
     this.runBackground('do_record_persistence', this.persistReport(clientId, report, reportTime));
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (!attachment || attachment.role !== 'agent') return;
     const messageBytes = typeof message === 'string'
@@ -1898,11 +2152,16 @@ export class LiveDataDO {
       if (!isObjectPayload(data)) return;
       await this.handleMessage(attachment.clientId, attachment.clientName, attachment.hidden, data, ws);
     } catch {
-      // Ignore malformed agent messages.
+      // A rejected report must be observable by the Agent rather than looking
+      // like a successfully accepted message with missing history.
+      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
+        try { ws.send(JSON.stringify({ type: 'error', code: 'REPORT_REJECTED', error: 'Invalid or unsupported Agent report' })); } catch {}
+      }
     }
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
+    await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
       const wasViewer = attachment.role === 'viewer';
@@ -1915,6 +2174,7 @@ export class LiveDataDO {
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
       const wasViewer = attachment.role === 'viewer';
@@ -1927,8 +2187,9 @@ export class LiveDataDO {
   }
 
   async alarm(): Promise<void> {
+    await this.httpClientsReady;
     const now = Date.now();
-    this.removeExpiredClients(now);
+    await this.removeExpiredClients(now);
     this.removeExpiredViewers(now);
     await this.broadcastAgentPolicy(now, false);
     await this.scheduleExpiryAlarm(now);
@@ -2014,10 +2275,10 @@ export class LiveDataDO {
     return isRecordPersistDue(now - lastPersist, this.recordPersistIntervalMs);
   }
 
-  private async markPersistAttempt(clientId: string, now: number): Promise<void> {
+  private async markPersistSuccess(clientId: string, now: number): Promise<void> {
     const storageKey = `record:persist:${clientId}`;
-    this.recordLastPersistAt.set(clientId, now);
     await this.state.storage.put(storageKey, now);
+    this.recordLastPersistAt.set(clientId, now);
   }
 
   private async persistReportsSequential(
@@ -2114,6 +2375,7 @@ export class LiveDataDO {
     const highWatermarkRows = Number(value.highWatermarkRows);
     const highWatermarkBytes = Number(value.highWatermarkBytes);
     if (
+      value.measurement !== 'live-row-bytes-plus-index-estimate' ||
       !Number.isFinite(rows) ||
       rows < 0 ||
       !Number.isFinite(bytes) ||
@@ -2132,6 +2394,7 @@ export class LiveDataDO {
       return null;
     }
     return {
+      measurement: 'live-row-bytes-plus-index-estimate',
       rows,
       bytes,
       blocked: Boolean(value.blocked),
@@ -2153,6 +2416,11 @@ export class LiveDataDO {
       const snapshot = this.normalizeRecordCapacitySnapshot(
         await this.state.storage.get(RECORD_CAPACITY_SNAPSHOT_KEY),
       );
+      if (snapshot && snapshot.highWatermarkRows === this.recordHighWatermarkRows
+        && snapshot.highWatermarkBytes === this.recordHighWatermarkBytes) {
+        // Preserve hysteresis across cold starts even when a new measurement is due.
+        this.recordCapacityBlocked = snapshot.blocked;
+      }
       if (!snapshot || !this.isReusableRecordCapacitySnapshot(snapshot, now)) return null;
       return snapshot;
     } catch {
@@ -2189,18 +2457,20 @@ export class LiveDataDO {
     }
 
     try {
-      // 字节是主熔断线（Supabase 卡的就是磁盘字节），行数保留为次要边界，谁先到谁熔断。
-      const [counts, sizes] = await Promise.all([
-        db.getHistoryStorageRowCounts(database),
-        db.getHistoryStorageBytes(database),
-      ]);
-      this.recordCapacityRows = counts.records + counts.gpu_records + counts.gpu_snapshots + counts.ping_records + counts.ping_snapshots;
-      this.recordCapacityBytes = Number(sizes.total) || 0;
-      const bytesBlocked = this.recordCapacityBytes >= this.recordHighWatermarkBytes;
-      const rowsBlocked = this.recordCapacityRows >= this.recordHighWatermarkRows;
-      this.recordCapacityBlocked = bytesBlocked || rowsBlocked;
+      // DELETE frees live tuples for reuse without necessarily shrinking allocated
+      // files. Use the explicitly estimated live footprint; allocation is diagnostic.
+      const usage = await db.getHistoryStorageUsage(database);
+      this.recordCapacityRows = usage.live_rows;
+      this.recordCapacityBytes = usage.estimated_live_storage_bytes;
+      const decision = evaluateHistoryCapacity(usage, {
+        rowLimit: this.recordHighWatermarkRows,
+        byteLimit: this.recordHighWatermarkBytes,
+        wasBlocked: this.recordCapacityBlocked,
+      });
+      this.recordCapacityBlocked = decision.blocked;
       this.recordCapacityNextCheckAt = now + this.capacityCheckDelayMs();
       await this.writeRecordCapacitySnapshot({
+        measurement: 'live-row-bytes-plus-index-estimate',
         rows: this.recordCapacityRows,
         bytes: this.recordCapacityBytes,
         blocked: this.recordCapacityBlocked,
@@ -2212,7 +2482,7 @@ export class LiveDataDO {
       if (this.recordCapacityBlocked && now - this.recordCapacityLastAuditAt >= RECORD_CAPACITY_AUDIT_THROTTLE_MS) {
         this.recordCapacityLastAuditAt = now;
         // 写清楚是哪条线跳的：只报一个总数会让人对着错的旋钮调半天。
-        const trigger = bytesBlocked ? 'size' : 'row count';
+        const trigger = decision.byteRatio >= decision.rowRatio ? 'estimated live size' : 'row count';
         await bestEffortRecordHealthEvent(
           database,
           'do_record_persistence',
@@ -2220,6 +2490,7 @@ export class LiveDataDO {
           `record persistence paused by history ${trigger}: `
           + `${this.recordCapacityBytes}/${this.recordHighWatermarkBytes} bytes, `
           + `${this.recordCapacityRows}/${this.recordHighWatermarkRows} rows; `
+          + `${usage.allocated_bytes} allocated bytes (diagnostic only); `
           + 'live data continues without history writes',
           { auditAction: 'do_record_capacity_high_watermark' },
         );
@@ -2233,7 +2504,7 @@ export class LiveDataDO {
         `record capacity check failed: ${errorDetail(error)}`,
         { auditAction: 'do_record_capacity_error' },
       );
-      return true;
+      return !this.recordCapacityBlocked;
     }
 
     return !this.recordCapacityBlocked;
@@ -2322,8 +2593,8 @@ export class LiveDataDO {
   }
 
   private async writePingResultState(key: string, state: PingResultState): Promise<void> {
-    this.pingResultStateCache.set(key, state);
     await this.state.storage.put(key, state);
+    this.pingResultStateCache.set(key, state);
   }
 
   private shouldPersistPingResult(result: PingPersistenceResult, state: PingResultState, nowMs: number): boolean {
@@ -2342,25 +2613,38 @@ export class LiveDataDO {
   }
 
   private async markPingResultsPersisted(clientId: string, results: PingPersistenceResult[], nowMs: number): Promise<void> {
+    const updates: Record<string, PingResultState> = {};
     for (const result of results) {
       const key = this.pingResultStateKey(clientId, result.taskId);
       const previous = this.pingResultStateCache.get(key) || { lastAcceptedMs: nowMs };
-      await this.writePingResultState(key, {
+      updates[key] = {
         ...previous,
-        lastAcceptedMs: previous.lastAcceptedMs || nowMs,
+        lastAcceptedMs: Math.max(previous.lastAcceptedMs, nowMs),
         value: result.value,
         persistedAt: nowMs,
-      });
+      };
+    }
+    // At most 50 results. Commit their interval state together so a failed
+    // local write cannot turn a retried SQL batch into a different subset.
+    await this.state.storage.put(updates);
+    for (const [key, state] of Object.entries(updates)) {
+      this.pingResultStateCache.set(key, state);
     }
   }
 
   private async persistReport(clientId: string, report: JsonObject, nowMs: number, force = false): Promise<boolean> {
+    if (this.recordWritesInFlight.has(clientId)) return false;
+    this.recordWritesInFlight.add(clientId);
+    try {
+      return await this.persistReservedReport(clientId, report, nowMs, force);
+    } finally {
+      this.recordWritesInFlight.delete(clientId);
+    }
+  }
+
+  private async persistReservedReport(clientId: string, report: JsonObject, nowMs: number, force: boolean): Promise<boolean> {
     const database = this.getQueryDatabase();
     if (!database || !report || report.type === 'ping' || report.type === 'pong' || report.type === 'ping_result') {
-      return false;
-    }
-
-    if (!force && !(await this.isPersistDue(clientId, nowMs))) {
       return false;
     }
 
@@ -2368,17 +2652,20 @@ export class LiveDataDO {
       return false;
     }
 
-    if (!(await this.canPersistWithinCapacity(nowMs))) {
+    if (!force && !(await this.isPersistDue(clientId, nowMs))) {
       return false;
     }
 
-    if (!force) await this.markPersistAttempt(clientId, nowMs);
+    if (!(await this.canPersistWithinCapacity(nowMs))) {
+      return false;
+    }
 
     const time = new Date(nowMs).toISOString();
     try {
       const normalizedReport = normalizeMonitorReport(report);
       const record = toMonitorRecord(clientId, time, normalizedReport);
       await db.insertRecord(database, record);
+      if (!force) await this.markPersistSuccess(clientId, nowMs);
 
       const gpuDecision = await this.shouldPersistGPUSnapshot(clientId, normalizedReport.gpus, nowMs);
       if (gpuDecision.persist && gpuDecision.signature) {
@@ -2404,7 +2691,22 @@ export class LiveDataDO {
     }
   }
 
-  private async persistPingResult(clientId: string, result: unknown, nowMs: number) {
+  private async runPingWrite<T>(clientId: string, write: () => Promise<T>): Promise<T> {
+    const previous = this.pingWriteQueues.get(clientId);
+    const pending = (previous || Promise.resolve()).catch(() => {}).then(write);
+    this.pingWriteQueues.set(clientId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.pingWriteQueues.get(clientId) === pending) this.pingWriteQueues.delete(clientId);
+    }
+  }
+
+  private persistPingResult(clientId: string, result: unknown, nowMs: number): Promise<void> {
+    return this.runPingWrite(clientId, () => this.persistQueuedPingResult(clientId, result, nowMs));
+  }
+
+  private async persistQueuedPingResult(clientId: string, result: unknown, nowMs: number): Promise<void> {
     const database = this.getQueryDatabase();
     if (!database) return;
 
@@ -2435,6 +2737,7 @@ export class LiveDataDO {
         `ping persist failed for ${clientId}: ${errorDetail(error)}`,
         { auditAction: 'ping_persistence_error' },
       );
+      throw error;
     }
   }
 
@@ -2450,50 +2753,53 @@ export class LiveDataDO {
       return Response.json({ error: 'Database is unavailable' }, { status: 500 });
     }
 
-    try {
-      const nowMs = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
-      if (!(await this.isRecordPersistenceEnabled(nowMs))) {
-        return Response.json({ success: true, accepted: 0, disabled: true });
-      }
-      if (!(await this.canPersistWithinCapacity(nowMs))) {
-        return Response.json({ success: true, accepted: 0, capacity_limited: true });
-      }
-
-      let accepted: PingPersistenceResult[] = [];
-      const trustedResults = this.trustedPingResults(payload.results);
-      if (trustedResults) {
-        accepted = await this.filterTrustedPingResultsByInterval(payload.client_id, trustedResults, nowMs);
-      } else {
-        const tasks = await this.getPingTasks(nowMs);
-        const validated = validatePingResults(payload.results, tasks, payload.client_id);
-        if (!validated.ok) {
-          return Response.json({ error: validated.error }, { status: validated.status });
+    const clientId = payload.client_id;
+    return this.runPingWrite(clientId, async () => {
+      try {
+        const nowMs = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
+        if (!(await this.isRecordPersistenceEnabled(nowMs))) {
+          return Response.json({ success: true, accepted: 0, disabled: true });
         }
-        accepted = await this.filterPingResultsByInterval(payload.client_id, validated.results, tasks, nowMs);
-      }
-      if (accepted.length === 0) {
-        return Response.json({ success: true, accepted: 0, rate_limited: true });
-      }
+        if (!(await this.canPersistWithinCapacity(nowMs))) {
+          return Response.json({ success: true, accepted: 0, capacity_limited: true });
+        }
 
-      const time = new Date(nowMs).toISOString();
-      await db.insertPingSnapshot(database, payload.client_id, time, accepted);
-      await this.markPingResultsPersisted(payload.client_id, accepted, nowMs);
-      await this.recordHotPathHealthOk(
-        'ping_persistence',
-        `ping result persisted for ${payload.client_id}`,
-        nowMs,
-      );
-      return Response.json({ success: true, accepted: accepted.length });
-    } catch (error) {
-      await bestEffortRecordHealthEvent(
-        database,
-        'ping_persistence',
-        'error',
-        `ping persist failed: ${errorDetail(error)}`,
-        { auditAction: 'ping_persistence_error' },
-      );
-      return Response.json({ error: 'Ping persist failed' }, { status: 500 });
-    }
+        let accepted: PingPersistenceResult[] = [];
+        const trustedResults = this.trustedPingResults(payload.results);
+        if (trustedResults) {
+          accepted = await this.filterTrustedPingResultsByInterval(clientId, trustedResults, nowMs);
+        } else {
+          const tasks = await this.getPingTasks(nowMs);
+          const validated = validatePingResults(payload.results, tasks, clientId);
+          if (!validated.ok) {
+            return Response.json({ error: validated.error }, { status: validated.status });
+          }
+          accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
+        }
+        if (accepted.length === 0) {
+          return Response.json({ success: true, accepted: 0, rate_limited: true });
+        }
+
+        const time = new Date(nowMs).toISOString();
+        await db.insertPingSnapshot(database, clientId, time, accepted);
+        await this.markPingResultsPersisted(clientId, accepted, nowMs);
+        await this.recordHotPathHealthOk(
+          'ping_persistence',
+          `ping result persisted for ${clientId}`,
+          nowMs,
+        );
+        return Response.json({ success: true, accepted: accepted.length });
+      } catch (error) {
+        await bestEffortRecordHealthEvent(
+          database,
+          'ping_persistence',
+          'error',
+          `ping persist failed: ${errorDetail(error)}`,
+          { auditAction: 'ping_persistence_error' },
+        );
+        return Response.json({ error: 'Ping persist failed' }, { status: 500 });
+      }
+    });
   }
 
   private pingResultIntervalMs(intervalSec?: number): number {
@@ -2563,16 +2869,19 @@ export class LiveDataDO {
         continue;
       }
       const shouldPersist = this.shouldPersistPingResult(result, state, nowMs);
-      await this.writePingResultState(key, {
-        ...state,
-        lastAcceptedMs: nowMs,
-      });
       dueResults.push(result);
       if (!shouldPersist) {
         continue;
       }
       accepted.push(result);
     }
-    return accepted.length > 0 ? dueResults : [];
+    if (accepted.length > 0) return dueResults;
+    // Intentional unchanged-value compression has no SQL write to await.
+    for (const result of dueResults) {
+      const key = this.pingResultStateKey(clientId, result.taskId);
+      const state = await this.readPingResultState(key);
+      await this.writePingResultState(key, { ...state, lastAcceptedMs: nowMs });
+    }
+    return [];
   }
 }

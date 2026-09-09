@@ -625,6 +625,11 @@ async function updateLiveReport(
     reportBody = { report };
   }
   if (!report) return false;
+  const reports = Array.isArray(reportOrReports) ? reportOrReports : [reportOrReports];
+  const requiresProbeReceipt = reports.some(item =>
+    (Array.isArray(item.ping_results) && item.ping_results.length > 0) ||
+    (isJsonObjectPayload(item.ping) && Array.isArray(item.ping.results) && item.ping.results.length > 0) ||
+    (Array.isArray(item.website_probe_results) && item.website_probe_results.length > 0));
   try {
     const doId = c.env.LIVE_DATA.idFromName('global');
     const stub = c.env.LIVE_DATA.get(doId);
@@ -643,9 +648,13 @@ async function updateLiveReport(
       }),
     }));
     const result = await readClientReportResult(response);
+    if (requiresProbeReceipt && (!response.ok || !result)) {
+      throw new Error('Probe persistence was not acknowledged');
+    }
     return Boolean(response.ok && result?.persisted);
-  } catch {
-    // HTTP reports remain accepted even if the realtime fanout path is unavailable.
+  } catch (error) {
+    if (requiresProbeReceipt) throw error;
+    // Plain realtime samples retain their existing best-effort fanout behavior.
     return false;
   }
 }
@@ -698,6 +707,7 @@ async function syncLiveBasicInfoMetadata(c: ClientContext, client: Record<string
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      source: 'agent',
       client,
       uuid,
       name: typeof client.name === 'string' ? client.name : uuid,
@@ -759,13 +769,11 @@ async function syncBasicInfoFromReportBatch(
     inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
   );
   if (Object.keys(patch).length > 0) {
+    await db.updateClient(database, uuid, patch);
     await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, hidden, oldClient, patch)).catch(() => undefined);
     invalidatePublicMetadataCache();
     invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-    runClientBackground(c, (async () => {
-      await db.updateClient(database, uuid, patch);
-      await recordIpChangeIfEnabled(database, displayName, ipChange);
-    })());
+    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   } else {
     runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   }
@@ -780,6 +788,8 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     ? agentPingTasksForClient(await listAgentPingTasks(database), uuid, Math.floor(pingIntervalSec))
     : [];
   const websiteProbeTasks = await agentWebsiteProbeTasksForClient(database, uuid);
+  const client = uuid ? await db.getClient(database, uuid).catch(() => null) : null;
+  const trafficResetDay = Number(client?.traffic_reset_day);
   return {
     type: 'policy',
     mode: 'idle',
@@ -794,6 +804,9 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     viewer_ttl_sec: Math.floor(viewerTtlSec),
     policy_ttl_sec: 120,
     idle_policy_ttl_sec: 120,
+    ...(Number.isInteger(trafficResetDay) && trafficResetDay >= 1 && trafficResetDay <= 31
+      ? { traffic_reset_day: trafficResetDay }
+      : {}),
     timestamp: Date.now(),
   };
 }
@@ -1131,13 +1144,11 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
       inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
     );
     if (Object.keys(patch).length > 0) {
+      await db.updateClient(database, uuid, patch);
       await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, Boolean(c.get('clientHidden')), oldClient, patch)).catch(() => undefined);
       invalidatePublicMetadataCache();
       invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-      runClientBackground(c, (async () => {
-        await db.updateClient(database, uuid, patch);
-        await recordIpChangeIfEnabled(database, displayName, ipChange);
-      })());
+      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
     } else {
       runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
     }

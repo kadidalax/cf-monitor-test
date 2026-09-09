@@ -176,7 +176,7 @@ type Report struct {
 	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
 	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
 	Load                *float64             `json:"load"`
-	Temp                float64              `json:"temp"`
+	Temp                *float64             `json:"temp"`
 	Disk                int64                `json:"disk"`
 	DiskTotal           int64                `json:"disk_total"`
 	NetIn               int64                `json:"net_in"`
@@ -205,7 +205,11 @@ type Report struct {
 	// 不能只靠上面的汇总标量做差：一旦参与统计的接口集合发生变化
 	//（隧道/VPN 接口起来、容器网卡出现），汇总值会跳增该接口的历史累计流量，
 	// 被当成一个采样周期内的增量，算出几百 MB/s 的荒谬速率。
-	netPerInterface map[string]interfaceCounters
+	netPerInterface     map[string]interfaceCounters
+	pingResultLeases    map[int]uint64
+	websiteResultLeases map[int]uint64
+	basicInfoOwner      *reportPreparer
+	basicInfoRevision   uint64
 }
 
 // interfaceCounters 是单个网卡的累计收发字节数。
@@ -249,6 +253,7 @@ type PingResult struct {
 
 type WebsiteProbeTask struct {
 	ID                int    `json:"id"`
+	ConfigRevision    string `json:"config_revision"`
 	Name              string `json:"name"`
 	URL               string `json:"url"`
 	Method            string `json:"method"`
@@ -260,6 +265,7 @@ type WebsiteProbeTask struct {
 
 type WebsiteProbeResult struct {
 	MonitorID       int     `json:"monitor_id"`
+	ConfigRevision  string  `json:"config_revision"`
 	OK              bool    `json:"ok"`
 	EffectiveStatus string  `json:"effective_status"`
 	EffectiveReason string  `json:"effective_reason"`
@@ -321,7 +327,7 @@ func websiteProbeInterval(task WebsiteProbeTask) time.Duration {
 	return time.Duration(interval) * time.Second
 }
 
-func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time) []PingTask {
+func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time, blocked ...map[int]bool) []PingTask {
 	if s.lastRunByTaskID == nil {
 		s.lastRunByTaskID = make(map[int]time.Time)
 	}
@@ -333,6 +339,9 @@ func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time) []PingTask
 			continue
 		}
 		seen[task.ID] = struct{}{}
+		if len(blocked) > 0 && blocked[0][task.ID] {
+			continue
+		}
 		lastRun, ok := s.lastRunByTaskID[task.ID]
 		if ok && now.Sub(lastRun) < pingTaskInterval(task) {
 			continue
@@ -351,7 +360,7 @@ func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time) []PingTask
 	return due
 }
 
-func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time) []WebsiteProbeTask {
+func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time, blocked ...map[int]bool) []WebsiteProbeTask {
 	if s.lastRunByTaskID == nil {
 		s.lastRunByTaskID = make(map[int]time.Time)
 	}
@@ -362,6 +371,9 @@ func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time
 			continue
 		}
 		seen[task.ID] = struct{}{}
+		if len(blocked) > 0 && blocked[0][task.ID] {
+			continue
+		}
 		lastRun, ok := s.lastRunByTaskID[task.ID]
 		if ok && now.Sub(lastRun) < websiteProbeInterval(task) {
 			continue
@@ -410,27 +422,49 @@ type serverMessage struct {
 type agentPolicy = serverMessage
 
 type reportPreparer struct {
+	collect             func(int) Report
 	lastNetUp           int64
 	lastNetDown         int64
 	lastNetCountersRaw  bool
 	lastNetPerInterface map[string]interfaceCounters
 	lastTimestampMs     int64
 	lastBasicInfoAt     time.Time
+	basicInfoMu         sync.Mutex
+	pendingBasicInfo    *BasicInfo
+	basicInfoRevision   uint64
 	ready               bool
 }
 
 type pingReportState struct {
+	mu               sync.Mutex
 	scheduler        *pingTaskScheduler
 	websiteScheduler *websiteProbeScheduler
 	tasks            []PingTask
 	websiteTasks     []WebsiteProbeTask
 	policyVersion    string
 	intervalSec      int
+	pendingPing      map[int]*queuedPingResult
+	pendingWebsites  map[int]*queuedWebsiteResult
+	pingOrder        []int
+	websiteOrder     []int
+	nextResultID     uint64
+	retryQueue       []Report
+	ctx              context.Context
+	cancel           context.CancelFunc
+	probeWake        chan struct{}
+	probeDone        chan struct{}
+	probeWorkers     sync.WaitGroup
+	runningPing      map[int]*probeRun
+	runningWebsites  map[int]*probeRun
+	activeProbes     int
+	preferWebsite    bool
 }
 
 type safeWebSocketConn struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn         *websocket.Conn
+	mu           sync.Mutex
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
 func init() {
@@ -474,6 +508,7 @@ func main() {
 		log.Fatal("missing token: pass --token or set CF_MONITOR_TOKEN")
 	}
 	trafficTracker = newTrafficResetTracker(trafficResetDay, token, trafficCounterScope())
+	trafficResetDay = trafficTracker.resetDay
 
 	log.Printf("CF VPS Monitor Agent %s", Version)
 	log.Printf("server: %s", serverURL)
@@ -506,7 +541,7 @@ func applyEnvDefaults() {
 	if clientName == "" {
 		clientName = os.Getenv("CF_MONITOR_NAME")
 	}
-	if mode := os.Getenv("CF_MONITOR_MODE"); reportMode == "websocket" && mode != "" {
+	if mode := os.Getenv("CF_MONITOR_MODE"); !flagWasSet("mode") && mode != "" {
 		reportMode = mode
 	}
 	if mountInclude == "" {
@@ -624,11 +659,10 @@ func detectNvidiaGPU() ([]string, []GPUInfo) {
 		return nil, nil
 	}
 
-	cmd := exec.Command(nvidiaSmi,
+	output, err := runBoundedCommand(context.Background(), auxiliaryCommandTimeout, nvidiaSmi,
 		"--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
 		"--format=csv,noheader,nounits",
 	)
-	output, err := cmd.Output()
 	if err != nil {
 		log.Printf("nvidia-smi query failed: %v", err)
 		return nil, nil
@@ -744,8 +778,7 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 		return nil, nil
 	}
 
-	cmd := exec.Command(rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
-	output, err := cmd.Output()
+	output, err := runBoundedCommand(context.Background(), auxiliaryCommandTimeout, rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
 	if err != nil {
 		log.Printf("rocm-smi query failed: %v", err)
 		return nil, nil
@@ -757,17 +790,26 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 // ==================== Ping Execution ====================
 
 func newPingReportState() *pingReportState {
-	return &pingReportState{
+	ctx, cancel := context.WithCancel(context.Background())
+	state := &pingReportState{
 		scheduler:        newPingTaskScheduler(),
 		websiteScheduler: &websiteProbeScheduler{lastRunByTaskID: make(map[int]time.Time)},
 		intervalSec:      defaultPingIntervalSec,
+		pendingPing:      make(map[int]*queuedPingResult),
+		pendingWebsites:  make(map[int]*queuedWebsiteResult),
+		ctx:              ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
+		runningPing: make(map[int]*probeRun), runningWebsites: make(map[int]*probeRun), preferWebsite: true,
 	}
+	go state.runProbeScheduler()
+	return state
 }
 
 func (s *pingReportState) applyPolicy(policy agentPolicy) {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if policy.PingIntervalSec > 0 {
 		s.intervalSec = policy.PingIntervalSec
 	}
@@ -781,7 +823,6 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		}
 		tasks = append(tasks, task)
 	}
-	s.tasks = tasks
 	websiteTasks := make([]WebsiteProbeTask, 0, len(policy.WebsiteProbeTasks))
 	for _, task := range policy.WebsiteProbeTasks {
 		if task.IntervalSec < 1 {
@@ -789,8 +830,10 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		}
 		websiteTasks = append(websiteTasks, task)
 	}
-	s.websiteTasks = websiteTasks
+	s.invalidateResultsForPolicyLocked(tasks, websiteTasks)
+	s.tasks, s.websiteTasks = tasks, websiteTasks
 	s.policyVersion = policy.PingPolicyVersion
+	s.signalProbeScheduler()
 	if len(tasks) > 0 || len(websiteTasks) > 0 {
 		log.Printf("policy updated: %d ping task(s), %d website probe(s), interval=%ds, version=%s", len(tasks), len(websiteTasks), s.intervalSec, s.policyVersion)
 	}
@@ -800,62 +843,10 @@ func (s *pingReportState) appendDueResults(report *Report, now time.Time) {
 	if s == nil || report == nil {
 		return
 	}
-	if len(s.tasks) > 0 {
-		dueTasks := s.scheduler.dueTasks(s.tasks, now)
-		if len(dueTasks) > 0 {
-			results := runPingTasks(dueTasks)
-			if len(results) > 0 {
-				report.PingResults = append(report.PingResults, results...)
-			}
-		}
-	}
-	if len(s.websiteTasks) == 0 {
-		return
-	}
-	dueWebsiteTasks := s.websiteScheduler.dueTasks(s.websiteTasks, now)
-	if len(dueWebsiteTasks) == 0 {
-		return
-	}
-	websiteResults := runWebsiteProbeTasks(dueWebsiteTasks)
-	if len(websiteResults) > 0 {
-		report.WebsiteProbeResults = append(report.WebsiteProbeResults, websiteResults...)
-	}
-}
-
-func runPingTasks(tasks []PingTask) []PingResult {
-	log.Printf("executing %d ping task(s)", len(tasks))
-	results := make([]PingResult, 0, len(tasks))
-	for _, task := range tasks {
-		var value float64
-		switch strings.ToLower(task.Type) {
-		case "icmp":
-			value = executeICMPPing(task.Target)
-		case "tcp":
-			value = executeTCPPing(task.Target)
-		case "http", "https":
-			value = executeHTTPPing(task.Target)
-		default:
-			value = executeTCPPing(task.Target)
-		}
-		results = append(results, PingResult{
-			TaskID: task.ID,
-			Value:  value,
-		})
-	}
-	return results
-}
-
-func runWebsiteProbeTasks(tasks []WebsiteProbeTask) []WebsiteProbeResult {
-	log.Printf("executing %d website probe task(s)", len(tasks))
-	results := make([]WebsiteProbeResult, 0, len(tasks))
-	for _, task := range tasks {
-		if strings.EqualFold(task.Method, "TCP") {
-			results = append(results, executeWebsiteTCPProbe(task))
-		} else {
-			results = append(results, executeWebsiteHTTPProbe(task))
-		}
-	}
-	return results
+	s.mu.Lock()
+	s.appendPendingResultsLocked(report)
+	s.mu.Unlock()
+	s.signalProbeScheduler()
 }
 
 func mustParseCIDRs(cidrs ...string) []*net.IPNet {
@@ -961,6 +952,9 @@ func dialResolvedTCP(ctx context.Context, network string, ips []net.IP, port str
 	dialer := &net.Dialer{Timeout: timeout}
 	var lastErr error
 	for _, ip := range ips {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if err == nil {
 			return conn, nil
@@ -974,63 +968,66 @@ func dialResolvedTCP(ctx context.Context, network string, ips []net.IP, port str
 }
 
 func executeICMPPing(target string) float64 {
-	ips, err := resolvePublicIPs(context.Background(), target)
+	return executeICMPPingWithContext(context.Background(), target)
+}
+
+func executeICMPPingWithContext(parent context.Context, target string) float64 {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	ips, err := resolvePublicIPsForPing(ctx, target)
 	if err != nil {
-		log.Printf("blocked ICMP ping target %q: %v", target, err)
+		log.Printf("ICMP target resolution failed for %q: %v", target, err)
 		return -1
 	}
-	pingTarget := ips[0].String()
-
-	start := time.Now()
-
-	// Use system ping command for cross-platform ICMP
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("ping", "-n", "1", "-w", "2000", pingTarget)
-	} else {
-		cmd = exec.Command("ping", "-c", "1", "-W", "2", pingTarget)
-	}
-
-	output, err := cmd.CombinedOutput()
-	elapsed := time.Since(start).Milliseconds()
-
+	program, args, err := icmpPingCommand(runtime.GOOS, ips[0])
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail != "" {
-			log.Printf("ICMP ping failed for %q (%s): %v: %s", target, pingTarget, err, detail)
-		} else {
-			log.Printf("ICMP ping failed for %q (%s): %v", target, pingTarget, err)
-		}
+		log.Printf("ICMP command unavailable for %q: %v", target, err)
 		return -1
 	}
-	return float64(elapsed)
+	started := time.Now()
+	output, err := runBoundedCommand(ctx, 2*time.Second, program, args...)
+	if err != nil {
+		log.Printf("ICMP ping failed for %q: %v: %s", target, err, strings.TrimSpace(string(output)))
+		return -1
+	}
+	return float64(time.Since(started).Milliseconds())
 }
 
 func executeTCPPing(target string) float64 {
+	value, err := executeTCPProbeWithContext(context.Background(), target, 3*time.Second)
+	if err != nil {
+		log.Printf("TCP ping failed for %q: %v", target, err)
+	}
+	return value
+}
+
+func executeTCPProbeWithContext(parent context.Context, target string, timeout time.Duration) (float64, error) {
 	address, host, port, err := normalizeTCPTargetAddress(target)
 	if err != nil {
-		return -1
+		return -1, err
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	ips, err := resolvePublicIPsForPing(ctx, host)
 	if err != nil {
-		log.Printf("TCP ping failed for %q: %v", address, err)
-		return -1
+		return -1, fmt.Errorf("%s: %w", address, err)
 	}
-
-	start := time.Now()
-	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, 3*time.Second)
-	elapsed := time.Since(start).Milliseconds()
-
+	// The budget includes DNS, but TCP latency still measures only the connect phase.
+	started := time.Now()
+	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, timeout)
+	elapsed := time.Since(started).Milliseconds()
 	if err != nil {
-		log.Printf("TCP ping failed for %q: %v", address, err)
-		return -1
+		return -1, err
 	}
-	conn.Close()
-	return float64(elapsed)
+	_ = conn.Close()
+	return float64(elapsed), nil
 }
 
 func executeHTTPPing(target string) float64 {
+	return executeHTTPPingWithContext(context.Background(), target)
+}
+
+func executeHTTPPingWithContext(parent context.Context, target string) float64 {
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
 	}
@@ -1038,30 +1035,24 @@ func executeHTTPPing(target string) float64 {
 	if err != nil || parsed.Hostname() == "" {
 		return -1
 	}
-
-	start := time.Now()
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		return dialPublicTCP(ctx, network, host, port, 5*time.Second)
-	}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
-	resp, err := client.Get(parsed.String())
-	elapsed := time.Since(start).Milliseconds()
-
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return -1
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	started := time.Now()
+	client := &http.Client{Timeout: 5 * time.Second, Transport: publicHTTPTransport(5 * time.Second)}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
+	if err != nil {
 		return -1
 	}
-	return float64(elapsed)
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return -1
+	}
+	return float64(time.Since(started).Milliseconds())
 }
 
 func intPtr(value int) *int {
@@ -1092,6 +1083,7 @@ func normalizeWebsiteProbeHTTPResult(task WebsiteProbeTask, status int, latency 
 	}
 	result := WebsiteProbeResult{
 		MonitorID:       task.ID,
+		ConfigRevision:  task.ConfigRevision,
 		OK:              ok,
 		EffectiveStatus: "down",
 		EffectiveReason: reason,
@@ -1110,6 +1102,7 @@ func normalizeWebsiteProbeHTTPResult(task WebsiteProbeTask, status int, latency 
 func websiteProbeError(task WebsiteProbeTask, latency int64, reason string) WebsiteProbeResult {
 	return WebsiteProbeResult{
 		MonitorID:       task.ID,
+		ConfigRevision:  task.ConfigRevision,
 		OK:              false,
 		EffectiveStatus: "down",
 		EffectiveReason: reason,
@@ -1118,17 +1111,41 @@ func websiteProbeError(task WebsiteProbeTask, latency int64, reason string) Webs
 	}
 }
 
-func executeWebsiteHTTPProbe(task WebsiteProbeTask) WebsiteProbeResult {
-	timeout := time.Duration(task.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+func websiteProbeTimeout(task WebsiteProbeTask) time.Duration {
+	seconds := task.TimeoutSec
+	if seconds <= 0 {
+		seconds = 5
 	}
+	if seconds > 30 {
+		seconds = 30
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func probeFailureReason(err error) string {
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		return "timeout"
+	}
+	return "network_error"
+}
+
+func executeWebsiteHTTPProbe(task WebsiteProbeTask) WebsiteProbeResult {
+	return executeWebsiteHTTPProbeWithContext(context.Background(), task)
+}
+
+func executeWebsiteHTTPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
+	timeout := websiteProbeTimeout(task)
 	client := &http.Client{Timeout: timeout, Transport: publicHTTPTransport(timeout)}
 	defer client.CloseIdleConnections()
-	return executeWebsiteHTTPProbeWithClient(task, client)
+	return executeWebsiteHTTPProbeWithClientContext(ctx, task, client)
 }
 
 func executeWebsiteHTTPProbeWithClient(task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
+	return executeWebsiteHTTPProbeWithClientContext(context.Background(), task, client)
+}
+
+func executeWebsiteHTTPProbeWithClientContext(parent context.Context, task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
 	target := task.URL
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
@@ -1141,24 +1158,23 @@ func executeWebsiteHTTPProbeWithClient(task WebsiteProbeTask, client *http.Clien
 	if method != http.MethodHead {
 		method = http.MethodGet
 	}
-	start := time.Now()
-	req, err := http.NewRequest(method, parsed.String(), nil)
+	ctx, cancel := context.WithTimeout(parent, websiteProbeTimeout(task))
+	defer cancel()
+	started := time.Now()
+	request, err := http.NewRequestWithContext(ctx, method, parsed.String(), nil)
 	if err != nil {
 		return websiteProbeError(task, 0, "invalid_url")
 	}
-	req.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
-	resp, err := client.Do(req)
-	elapsed := time.Since(start).Milliseconds()
+	request.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
+	response, err := client.Do(request)
 	if err != nil {
-		reason := "network_error"
-		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
-			reason = "timeout"
-		}
-		return websiteProbeError(task, elapsed, reason)
+		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
-	return normalizeWebsiteProbeHTTPResult(task, resp.StatusCode, elapsed)
+	defer response.Body.Close()
+	if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 512)); err != nil {
+		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
+	}
+	return normalizeWebsiteProbeHTTPResult(task, response.StatusCode, time.Since(started).Milliseconds())
 }
 
 func publicHTTPTransport(timeout time.Duration) *http.Transport {
@@ -1175,6 +1191,10 @@ func publicHTTPTransport(timeout time.Duration) *http.Transport {
 }
 
 func executeWebsiteTCPProbe(task WebsiteProbeTask) WebsiteProbeResult {
+	return executeWebsiteTCPProbeWithContext(context.Background(), task)
+}
+
+func executeWebsiteTCPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
 	target := task.URL
 	if strings.HasPrefix(strings.ToLower(target), "tcp://") {
 		parsed, err := url.Parse(target)
@@ -1183,19 +1203,12 @@ func executeWebsiteTCPProbe(task WebsiteProbeTask) WebsiteProbeResult {
 		}
 		target = net.JoinHostPort(parsed.Hostname(), parsed.Port())
 	}
-	start := time.Now()
-	value := executeTCPPing(target)
-	elapsed := time.Since(start).Milliseconds()
-	if value < 0 {
-		return websiteProbeError(task, elapsed, "network_error")
+	started := time.Now()
+	value, err := executeTCPProbeWithContext(ctx, target, websiteProbeTimeout(task))
+	if err != nil {
+		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
 	}
-	return WebsiteProbeResult{
-		MonitorID:       task.ID,
-		OK:              true,
-		EffectiveStatus: "up",
-		EffectiveReason: "tcp_connect",
-		LatencyMS:       int64(value),
-	}
+	return WebsiteProbeResult{MonitorID: task.ID, ConfigRevision: task.ConfigRevision, OK: true, EffectiveStatus: "up", EffectiveReason: "tcp_connect", LatencyMS: int64(value)}
 }
 
 // ==================== Original Functions (Enhanced) ====================
@@ -1204,6 +1217,7 @@ func runHTTPReporter() {
 	log.Println("HTTP reporter started")
 	preparer := &reportPreparer{}
 	pingState := newPingReportState()
+	defer pingState.close()
 	currentSampleInterval := normalizeReportDuration(time.Duration(reportInterval) * time.Second)
 	currentUploadInterval := currentSampleInterval
 	nextUploadAt := time.Now()
@@ -1248,8 +1262,8 @@ func runHTTPReporter() {
 					)
 				}
 				if policy.ReportNow {
-					pending = append(pending, prepareReportWithPing(preparer, pingState, currentSampleInterval))
-					sendHTTPReports(pending)
+					pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
+					_ = deliverHTTPReports(pingState, pending)
 					pending = nil
 					nextUploadAt = time.Now().Add(currentUploadInterval)
 				}
@@ -1264,9 +1278,9 @@ func runHTTPReporter() {
 			}
 		}
 
-		pending = append(pending, prepareReportWithPing(preparer, pingState, currentSampleInterval))
+		pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
 		if currentUploadInterval <= currentSampleInterval || !time.Now().Before(nextUploadAt) {
-			sendHTTPReports(pending)
+			_ = deliverHTTPReports(pingState, pending)
 			pending = nil
 			nextUploadAt = time.Now().Add(currentUploadInterval)
 		}
@@ -1283,6 +1297,7 @@ func runWebSocketReporter() {
 	log.Printf("WebSocket reporter started: %s", endpoint)
 	preparer := &reportPreparer{}
 	pingState := newPingReportState()
+	defer pingState.close()
 
 	for {
 		conn, err := connectWebSocket(endpoint, token)
@@ -1294,13 +1309,16 @@ func runWebSocketReporter() {
 		}
 
 		log.Println("WebSocket connected")
-		_ = runWebSocketSession(
+		err = runWebSocketSession(
 			conn,
 			preparer,
 			pingState,
 			time.Duration(reportInterval)*time.Second,
 			30*time.Second,
 		)
+		if err != nil {
+			log.Printf("WebSocket session ended: %v", err)
+		}
 		log.Printf("reconnecting in %ds", reconnectInterval)
 		time.Sleep(time.Duration(reconnectInterval) * time.Second)
 	}
@@ -1321,91 +1339,135 @@ func runWebSocketSession(
 	heartbeatInterval time.Duration,
 ) error {
 	defer conn.Close()
-
-	done := make(chan error, 1)
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 30 * time.Second
+	}
+	if err := conn.configureLiveness(heartbeatInterval); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 2) // Reader and heartbeat each send at most one failure.
 	policies := make(chan serverMessage, 8)
-	go readWebSocketMessages(conn, done, policies)
+	acks := make(chan struct{}, 1)
+	var socketWorkers sync.WaitGroup
+	socketWorkers.Add(2)
+	go func() {
+		defer socketWorkers.Done()
+		defer conn.Close()
+		readWebSocketMessages(conn, done, policies, acks)
+	}()
+	go func() {
+		defer socketWorkers.Done()
+		if err := runWebSocketHeartbeat(ctx, conn, heartbeatInterval); err != nil {
+			done <- err
+			conn.Close()
+		}
+	}()
+	defer func() {
+		cancel()
+		conn.Close()
+		socketWorkers.Wait()
+	}()
+
+	ackTimer := time.NewTimer(conn.readTimeout)
+	ackTimer.Stop()
+	defer ackTimer.Stop()
+	var ackDeadline <-chan time.Time
+	stopAckTimer := func() {
+		if !ackTimer.Stop() {
+			select {
+			case <-ackTimer.C:
+			default:
+			}
+		}
+		ackDeadline = nil
+	}
 
 	currentInterval := normalizeReportDuration(dataInterval)
 	currentUploadInterval := currentInterval
-	var pending []Report
-
-	pending = append(pending, prepareReportWithPing(preparer, pingState, currentInterval))
-	if err := sendWebSocketReports(conn, pending); err != nil {
-		log.Printf("WebSocket initial report failed: %v", err)
+	pending := prepareReportsWithPing(preparer, pingState, currentInterval)
+	var inFlight []Report
+	uploadReady := true
+	defer func() {
+		// A reconnect retries the original probe sample and timestamp, without executing it again.
+		pingState.retryReports(inFlight)
+		pingState.retryReports(pending)
+	}()
+	flush := func() error {
+		if !uploadReady || len(inFlight) > 0 || len(pending) == 0 {
+			return nil
+		}
+		for len(acks) > 0 {
+			<-acks
+		}
+		count := min(len(pending), maxReportsPerEnvelope)
+		inFlight = pingState.currentReportResults(pending[:count])
+		pending = pending[count:]
+		uploadReady = len(pending) > 0
+		if err := sendWebSocketReports(conn, inFlight); err != nil {
+			return err
+		}
+		// Pong proves socket liveness; only ACK accepts this report batch.
+		ackTimer.Reset(conn.readTimeout)
+		ackDeadline = ackTimer.C
+		return nil
+	}
+	if err := flush(); err != nil {
 		return err
 	}
-	pending = nil
-
 	sampleTimer := time.NewTimer(currentInterval)
 	defer sampleTimer.Stop()
 	uploadTimer := time.NewTimer(currentUploadInterval)
 	defer uploadTimer.Stop()
-	heartbeatTicker := time.NewTicker(heartbeatInterval)
-	defer heartbeatTicker.Stop()
 
 	for {
 		select {
 		case <-sampleTimer.C:
-			pending = append(pending, prepareReportWithPing(preparer, pingState, currentInterval))
+			pending = append(pending, prepareReportsWithPing(preparer, pingState, currentInterval)...)
 			if currentUploadInterval <= currentInterval {
-				if err := sendWebSocketReports(conn, pending); err != nil {
-					log.Printf("WebSocket report failed: %v", err)
+				uploadReady = true
+				if err := flush(); err != nil {
 					return err
 				}
-				pending = nil
 				resetTimer(uploadTimer, currentUploadInterval)
 			}
 			resetTimer(sampleTimer, currentInterval)
 		case <-uploadTimer.C:
-			if len(pending) > 0 {
-				if err := sendWebSocketReports(conn, pending); err != nil {
-					log.Printf("WebSocket report batch failed: %v", err)
-					return err
-				}
-				pending = nil
+			uploadReady = len(pending) > 0
+			if err := flush(); err != nil {
+				return err
 			}
 			resetTimer(uploadTimer, currentUploadInterval)
+		case <-acks:
+			if len(inFlight) > 0 {
+				stopAckTimer()
+				pingState.acknowledgeReports(inFlight)
+				inFlight = nil
+				if err := flush(); err != nil {
+					return err
+				}
+			}
 		case policy := <-policies:
 			if policy.Type != "policy" {
 				continue
 			}
 			pingState.applyPolicy(policy)
 			applyTrafficResetDayPolicy(policy)
-			nextInterval, nextUploadInterval := policyDurations(policy, currentInterval)
-			if nextInterval != currentInterval || nextUploadInterval != currentUploadInterval {
-				currentInterval = nextInterval
-				currentUploadInterval = nextUploadInterval
-				reportInterval = int(currentInterval / time.Second)
-				log.Printf("WebSocket policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds",
-					policy.Mode,
-					currentInterval,
-					currentUploadInterval,
-					policy.ViewerCount,
-					policy.ViewerTTLSec,
-				)
-			}
+			currentInterval, currentUploadInterval = policyDurations(policy, currentInterval)
+			reportInterval = int(currentInterval / time.Second)
 			if policy.ReportNow {
-				pending = append(pending, prepareReportWithPing(preparer, pingState, currentInterval))
-				if err := sendWebSocketReports(conn, pending); err != nil {
-					log.Printf("WebSocket immediate report failed: %v", err)
+				pending = append(pending, prepareReportsWithPing(preparer, pingState, currentInterval)...)
+				uploadReady = true
+				if err := flush(); err != nil {
 					return err
 				}
-				pending = nil
 			}
 			resetTimer(sampleTimer, currentInterval)
 			resetTimer(uploadTimer, currentUploadInterval)
-		case <-heartbeatTicker.C:
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("WebSocket heartbeat failed: %v", err)
-				return err
-			}
+		case <-ackDeadline:
+			return errors.New("WebSocket report acknowledgement timed out")
 		case err := <-done:
-			if err != nil {
-				log.Printf("WebSocket read stopped: %v", err)
-				return err
-			}
-			return nil
+			return err
 		}
 	}
 }
@@ -1681,7 +1743,7 @@ func detectVirtualization(current string) string {
 	if runtime.GOOS != "linux" {
 		return current
 	}
-	if out, err := exec.Command("systemd-detect-virt").Output(); err == nil {
+	if out, err := runBoundedCommand(context.Background(), auxiliaryCommandTimeout, "systemd-detect-virt"); err == nil {
 		if virt := strings.TrimSpace(string(out)); virt != "" {
 			return virt
 		}
@@ -1892,78 +1954,6 @@ func parseProcMeminfo(data string) memorySnapshot {
 		snapshot.hasSwap = true
 	}
 	return snapshot
-}
-
-func readCgroupMemory(cgroupRoot string, procSelfCgroup string) memorySnapshot {
-	snapshot := memorySnapshot{}
-	lines, err := os.ReadFile(procSelfCgroup)
-	if err != nil {
-		return snapshot
-	}
-
-	for _, rawLine := range strings.Split(string(lines), "\n") {
-		fields := strings.Split(rawLine, ":")
-		if len(fields) < 3 {
-			continue
-		}
-		controllers := fields[1]
-		rel := strings.TrimPrefix(filepath.Clean("/"+fields[2]), string(os.PathSeparator))
-		if controllers == "" {
-			dir := filepath.Join(cgroupRoot, rel)
-			if max, ok := readCgroupLimit(filepath.Join(dir, "memory.max")); ok {
-				current, _ := readCgroupLimit(filepath.Join(dir, "memory.current"))
-				snapshot.ramTotal = max
-				snapshot.ramUsed = current
-				snapshot.hasRAM = true
-			}
-			if max, ok := readCgroupLimit(filepath.Join(dir, "memory.swap.max")); ok {
-				current, _ := readCgroupLimit(filepath.Join(dir, "memory.swap.current"))
-				snapshot.swapTotal = max
-				snapshot.swapUsed = current
-				snapshot.hasSwap = true
-			}
-			return snapshot
-		}
-		if strings.Contains(","+controllers+",", ",memory,") {
-			for _, dir := range []string{filepath.Join(cgroupRoot, "memory", rel), filepath.Join(cgroupRoot, rel)} {
-				if max, ok := readCgroupLimit(filepath.Join(dir, "memory.limit_in_bytes")); ok {
-					current, _ := readCgroupLimit(filepath.Join(dir, "memory.usage_in_bytes"))
-					snapshot.ramTotal = max
-					snapshot.ramUsed = current
-					snapshot.hasRAM = true
-					if memswMax, ok := readCgroupLimit(filepath.Join(dir, "memory.memsw.limit_in_bytes")); ok {
-						memswCurrent, _ := readCgroupLimit(filepath.Join(dir, "memory.memsw.usage_in_bytes"))
-						if memswMax >= max {
-							snapshot.swapTotal = memswMax - max
-							snapshot.hasSwap = true
-						}
-						if memswCurrent >= current {
-							snapshot.swapUsed = memswCurrent - current
-						}
-					}
-					break
-				}
-			}
-			return snapshot
-		}
-	}
-	return snapshot
-}
-
-func readCgroupLimit(path string) (uint64, bool) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
-	value := strings.TrimSpace(string(raw))
-	if value == "" || value == "max" {
-		return 0, false
-	}
-	limit, err := strconv.ParseUint(value, 10, 64)
-	if err != nil || limit > maxReasonableCgroupLimit {
-		return 0, false
-	}
-	return limit, true
 }
 
 func parseFilterList(value string) []string {
@@ -2675,26 +2665,39 @@ func countProcNetFile(path string) (int, error) {
 	return count, nil
 }
 
+type trafficInterfaceState struct {
+	Sent uint64 `json:"sent"`
+	Recv uint64 `json:"recv"`
+}
+
 type trafficResetState struct {
-	ResetDay     int    `json:"reset_day"`
-	Period       string `json:"period"`
-	Scope        string `json:"scope"`
-	LastRawUp    int64  `json:"last_raw_up"`
-	LastRawDown  int64  `json:"last_raw_down"`
-	PeriodUp     int64  `json:"period_up"`
-	PeriodDown   int64  `json:"period_down"`
-	BaselineUp   int64  `json:"baseline_up,omitempty"`
-	BaselineDown int64  `json:"baseline_down,omitempty"`
-	LastBootUnix int64  `json:"last_boot_unix,omitempty"`
+	ResetDay          int                              `json:"reset_day"`
+	Period            string                           `json:"period"`
+	Scope             string                           `json:"scope"`
+	LastRawUp         int64                            `json:"last_raw_up"`
+	LastRawDown       int64                            `json:"last_raw_down"`
+	PeriodUp          int64                            `json:"period_up"`
+	PeriodDown        int64                            `json:"period_down"`
+	BaselineUp        int64                            `json:"baseline_up,omitempty"`
+	BaselineDown      int64                            `json:"baseline_down,omitempty"`
+	LastBootUnix      int64                            `json:"last_boot_unix,omitempty"`
+	CounterVersion    int                              `json:"counter_version,omitempty"`
+	Interfaces        map[string]trafficInterfaceState `json:"interfaces,omitempty"`
+	ResetDaySource    string                           `json:"reset_day_source,omitempty"`
+	PolicyResetDay    *int                             `json:"policy_reset_day,omitempty"`
+	Revision          uint64                           `json:"revision,omitempty"`
+	HistoryIncomplete bool                             `json:"history_incomplete,omitempty"`
 }
 
 type trafficResetTracker struct {
-	mu        sync.Mutex
-	resetDay  int
-	scope     string
-	statePath string
-	state     trafficResetState
-	loaded    bool
+	mu             sync.Mutex
+	resetDay       int
+	scope          string
+	statePath      string
+	state          trafficResetState
+	loaded         bool
+	resetDaySource string
+	policyResetDay *int
 }
 
 func normalizeTrafficResetDay(day int) int {
@@ -2708,11 +2711,21 @@ func normalizeTrafficResetDay(day int) int {
 }
 
 func newTrafficResetTracker(resetDay int, token string, scope string) *trafficResetTracker {
-	return &trafficResetTracker{
-		resetDay:  normalizeTrafficResetDay(resetDay),
-		scope:     scope,
-		statePath: trafficResetStatePath(token),
+	tracker := &trafficResetTracker{
+		resetDay:       normalizeTrafficResetDay(resetDay),
+		scope:          scope,
+		statePath:      trafficResetStatePath(token),
+		resetDaySource: "local",
 	}
+	tracker.load()
+	tracker.loaded = true
+	if day := tracker.state.PolicyResetDay; day != nil && *day >= 1 && *day <= 31 {
+		tracker.resetDay, tracker.policyResetDay, tracker.resetDaySource = *day, intPtr(*day), "server"
+	} else if tracker.state.ResetDay >= 1 && tracker.state.ResetDay <= 31 && tracker.state.Period != "" && tracker.state.ResetDaySource != "local" {
+		// Legacy state did not record policy origin. Preserve its valid effective cycle until a fresh policy arrives.
+		tracker.resetDay, tracker.resetDaySource = tracker.state.ResetDay, "restored"
+	}
+	return tracker
 }
 
 // setResetDay 更新重置日。改动会让下一次 adjust 因 period key 变化而走重建分支，
@@ -2729,7 +2742,29 @@ func (t *trafficResetTracker) setResetDay(day int) bool {
 		return false
 	}
 	t.resetDay = day
+	t.resetDaySource = "local"
+	t.policyResetDay = nil
 	return true
+}
+
+func (t *trafficResetTracker) setPolicyResetDay(day int) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	changed := t.resetDay != day
+	known := t.policyResetDay != nil && *t.policyResetDay == day
+	t.resetDay = day
+	t.resetDaySource = "server"
+	t.policyResetDay = intPtr(day)
+	if !known {
+		// Keep period counters intact until adjust applies an intentional cycle change.
+		t.state.PolicyResetDay = intPtr(day)
+		t.state.ResetDaySource = "server"
+		t.save()
+	}
+	return changed
 }
 
 // applyTrafficResetDayPolicy 应用后台下发的流量重置日。
@@ -2741,12 +2776,12 @@ func applyTrafficResetDayPolicy(policy agentPolicy) {
 		return
 	}
 	day := *policy.TrafficResetDay
-	if day < 1 || day > 31 || day == trafficResetDay {
+	if day < 1 || day > 31 {
 		return
 	}
 	previous := trafficResetDay
 	trafficResetDay = day
-	if trafficTracker.setResetDay(day) {
+	if trafficTracker.setPolicyResetDay(day) {
 		log.Printf("traffic reset day updated by server policy: %d -> %d (current period restarts)", previous, day)
 	}
 }
@@ -2840,13 +2875,36 @@ func (t *trafficResetTracker) adjust(rawUp int64, rawDown int64, now time.Time) 
 }
 
 func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now time.Time, bootedAt time.Time) (int64, int64) {
+	// An empty interface name represents the original single-counter API.
+	return t.adjustInterfacesSinceBoot(map[string]interfaceCounters{
+		"": {sent: uint64(maxInt64(0, rawUp)), recv: uint64(maxInt64(0, rawDown))},
+	}, now, bootedAt)
+}
+
+func (t *trafficResetTracker) adjustInterfaces(current map[string]interfaceCounters, now time.Time) (int64, int64) {
+	return t.adjustInterfacesSinceBoot(current, now, trafficBootTime(now))
+}
+
+func trafficCounterDelta(previous, current uint64) int64 {
+	if current < previous {
+		return int64(current)
+	}
+	return int64(current - previous)
+}
+
+func (t *trafficResetTracker) adjustInterfacesSinceBoot(current map[string]interfaceCounters, now time.Time, bootedAt time.Time) (int64, int64) {
+	var rawUp, rawDown int64
+	snapshot := make(map[string]trafficInterfaceState, len(current))
+	for name, counter := range current {
+		rawUp += int64(counter.sent)
+		rawDown += int64(counter.recv)
+		snapshot[name] = trafficInterfaceState{Sent: counter.sent, Recv: counter.recv}
+	}
 	if t == nil {
 		return rawUp, rawDown
 	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	if !t.loaded {
 		t.load()
 		t.loaded = true
@@ -2856,114 +2914,72 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 	period := periodStart.Format(time.DateOnly)
 	rawCoversPeriod := rawTrafficCoversPeriod(periodStart, now, bootedAt)
 	bootUnix := trafficBootUnix(bootedAt)
-	samePeriod := t.state.ResetDay == t.resetDay && t.state.Period == period && t.state.Scope == t.scope
 	bootChanged := bootUnix != 0 && t.state.LastBootUnix != 0 && t.state.LastBootUnix != bootUnix
-	if samePeriod && rawCoversPeriod && bootChanged {
-		t.state.PeriodUp += rawUp
-		t.state.PeriodDown += rawDown
-		t.state.LastRawUp = rawUp
-		t.state.LastRawDown = rawDown
-		t.state.LastBootUnix = bootUnix
-		t.state.BaselineUp = 0
-		t.state.BaselineDown = 0
-		t.save()
-		return t.state.PeriodUp, t.state.PeriodDown
-	}
-	if t.state.ResetDay == t.resetDay && t.state.Period == period && t.state.Scope == t.scope && rawCoversPeriod &&
-		rawUp >= t.state.PeriodUp && rawDown >= t.state.PeriodDown &&
-		(t.state.PeriodUp < rawUp || t.state.PeriodDown < rawDown) {
-		t.state.PeriodUp = maxInt64(t.state.PeriodUp, rawUp)
-		t.state.PeriodDown = maxInt64(t.state.PeriodDown, rawDown)
-		t.state.LastRawUp = rawUp
-		t.state.LastRawDown = rawDown
-		t.state.LastBootUnix = bootUnix
-		t.state.BaselineUp = 0
-		t.state.BaselineDown = 0
-		t.save()
-		return t.state.PeriodUp, t.state.PeriodDown
-	}
-	if t.state.LastRawUp == 0 && t.state.LastRawDown == 0 && (t.state.BaselineUp != 0 || t.state.BaselineDown != 0) {
-		t.state.LastRawUp = rawUp
-		t.state.LastRawDown = rawDown
-		if t.state.ResetDay == t.resetDay && t.state.Period == period && t.state.Scope == t.scope {
-			t.state.PeriodUp = rawUp - t.state.BaselineUp
-			t.state.PeriodDown = rawDown - t.state.BaselineDown
-			if t.state.PeriodUp < 0 {
-				t.state.PeriodUp = 0
-			}
-			if t.state.PeriodDown < 0 {
-				t.state.PeriodDown = 0
-			}
-		} else {
-			t.state.ResetDay = t.resetDay
-			t.state.Period = period
-			t.state.Scope = t.scope
-			t.state.PeriodUp = 0
-			t.state.PeriodDown = 0
-		}
-		t.state.LastBootUnix = bootUnix
-		t.state.BaselineUp = 0
-		t.state.BaselineDown = 0
-		t.save()
-		return t.state.PeriodUp, t.state.PeriodDown
-	}
-
 	if t.state.ResetDay != t.resetDay || t.state.Period == "" || t.state.Scope != t.scope {
-		periodUp, periodDown := int64(0), int64(0)
+		t.state = trafficResetState{ResetDay: t.resetDay, Period: period, Scope: t.scope, Revision: t.state.Revision, HistoryIncomplete: t.state.HistoryIncomplete}
 		if rawCoversPeriod {
-			periodUp = rawUp
-			periodDown = rawDown
+			t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
 		}
-		t.state = trafficResetState{
-			ResetDay:     t.resetDay,
-			Period:       period,
-			Scope:        t.scope,
-			LastRawUp:    rawUp,
-			LastRawDown:  rawDown,
-			PeriodUp:     periodUp,
-			PeriodDown:   periodDown,
-			LastBootUnix: bootUnix,
-		}
-		t.save()
 		log.Printf("traffic tracker initialized for period %s", period)
-		return periodUp, periodDown
-	}
-
-	deltaUp := rawUp - t.state.LastRawUp
-	deltaDown := rawDown - t.state.LastRawDown
-	if deltaUp < 0 || deltaDown < 0 {
-		if rawCoversPeriod {
-			deltaUp = rawUp
-			deltaDown = rawDown
-		} else {
-			if deltaUp < 0 {
-				deltaUp = 0
-			}
-			if deltaDown < 0 {
-				deltaDown = 0
-			}
-		}
-	}
-
-	if t.state.Period != period {
-		t.state.Period = period
-		if rawCoversPeriod {
-			deltaUp = rawUp
-			deltaDown = rawDown
-		}
-		t.state.PeriodUp = deltaUp
-		t.state.PeriodDown = deltaDown
-		log.Printf("traffic period rotated to %s", period)
 	} else {
-		t.state.PeriodUp += deltaUp
-		t.state.PeriodDown += deltaDown
+		previous := t.state.Interfaces
+		migratedTotals := false
+		if t.state.CounterVersion == 0 {
+			switch {
+			case t.state.Period == period && t.state.LastRawUp == 0 && t.state.LastRawDown == 0 &&
+				(t.state.BaselineUp != 0 || t.state.BaselineDown != 0):
+				t.state.PeriodUp = maxInt64(0, rawUp-t.state.BaselineUp)
+				t.state.PeriodDown = maxInt64(0, rawDown-t.state.BaselineDown)
+				migratedTotals = true
+			case t.state.Period == period && rawCoversPeriod && t.state.PeriodUp == 0 && t.state.PeriodDown == 0:
+				// Repair the historical zero-install baseline only during old-format migration.
+				t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
+				migratedTotals = true
+			default:
+				if _, singleCounter := current[""]; singleCounter {
+					previous = map[string]trafficInterfaceState{"": {
+						Sent: uint64(maxInt64(0, t.state.LastRawUp)), Recv: uint64(maxInt64(0, t.state.LastRawDown)),
+					}}
+				}
+			}
+			log.Printf("traffic state migrated to per-interface counters; prior period totals retained")
+		}
+		var deltaUp, deltaDown int64
+		if !migratedTotals {
+			for name, counter := range snapshot {
+				if prior, exists := previous[name]; exists {
+					deltaUp += trafficCounterDelta(prior.Sent, counter.Sent)
+					deltaDown += trafficCounterDelta(prior.Recv, counter.Recv)
+				}
+			}
+		}
+		if bootChanged && rawCoversPeriod {
+			deltaUp, deltaDown = rawUp, rawDown
+		}
+		if t.state.Period != period {
+			if rawCoversPeriod {
+				deltaUp, deltaDown = rawUp, rawDown
+			}
+			t.state.Period = period
+			t.state.HistoryIncomplete = false
+			t.state.PeriodUp, t.state.PeriodDown = deltaUp, deltaDown
+			log.Printf("traffic period rotated to %s", period)
+		} else {
+			t.state.PeriodUp += deltaUp
+			t.state.PeriodDown += deltaDown
+		}
 	}
-
 	t.state.ResetDay = t.resetDay
 	t.state.Scope = t.scope
-	t.state.LastRawUp = rawUp
-	t.state.LastRawDown = rawDown
-	t.state.LastBootUnix = bootUnix
+	t.state.LastRawUp, t.state.LastRawDown = rawUp, rawDown
+	t.state.BaselineUp, t.state.BaselineDown = 0, 0
+	if bootUnix != 0 {
+		t.state.LastBootUnix = bootUnix
+	}
+	t.state.CounterVersion = 1
+	t.state.Interfaces = snapshot
+	t.state.ResetDaySource = t.resetDaySource
+	t.state.PolicyResetDay = t.policyResetDay
 	t.save()
 	return t.state.PeriodUp, t.state.PeriodDown
 }
@@ -2972,17 +2988,20 @@ func (t *trafficResetTracker) load() {
 	if t.statePath == "" {
 		return
 	}
-	data, err := os.ReadFile(t.statePath)
+	state, _, recoveredFrom, err := readTrafficResetState(t.statePath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("traffic reset state read failed: %v", err)
+		var corruption *trafficStateCorruption
+		if errors.As(err, &corruption) {
+			t.state.HistoryIncomplete = true
+			log.Printf("traffic history is incomplete; corrupt generations will be retained while new accumulation resumes")
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("traffic reset state recovery failed; existing files retained: %v", err)
 		}
 		return
 	}
-	var state trafficResetState
-	if err := json.Unmarshal(data, &state); err != nil {
-		log.Printf("traffic reset state parse failed: %v", err)
-		return
+	if recoveredFrom != t.statePath {
+		log.Printf("traffic reset state recovered from %s", filepath.Base(recoveredFrom))
 	}
 	t.state = state
 }
@@ -2991,24 +3010,9 @@ func (t *trafficResetTracker) save() {
 	if t.statePath == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(t.statePath), 0o700); err != nil {
-		log.Printf("traffic reset state directory create failed: %v", err)
-		return
-	}
-	data, err := json.MarshalIndent(t.state, "", "  ")
-	if err != nil {
-		log.Printf("traffic reset state encode failed: %v", err)
-		return
-	}
-	tmpPath := t.statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		log.Printf("traffic reset state write failed: %v", err)
-		return
-	}
-	_ = os.Remove(t.statePath)
-	if err := os.Rename(tmpPath, t.statePath); err != nil {
-		log.Printf("traffic reset state replace failed: %v", err)
-		_ = os.Remove(tmpPath)
+	t.state.Revision++
+	if err := writeTrafficResetState(t.statePath, t.state, replaceTrafficStateFile); err != nil {
+		log.Printf("traffic reset state save failed; recovery generations retained: %v", err)
 	}
 }
 
@@ -3037,6 +3041,7 @@ func collectReportWithInterval(intervalSec int) Report {
 		value := loadInfo.Load1
 		r.Load = &value
 	}
+	r.Temp = nodeTemperatureSampler.sample(context.Background())
 	r.Disk, r.DiskTotal = diskUsageTotals()
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
 		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
@@ -3047,7 +3052,7 @@ func collectReportWithInterval(intervalSec int) Report {
 		r.rawNetTotalDown = rawDown
 		r.netPerInterface = collectPerInterfaceCounters(netIO, selected)
 		if trafficTracker != nil {
-			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjust(rawUp, rawDown, now)
+			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjustInterfaces(r.netPerInterface, now)
 		} else {
 			r.NetTotalUp, r.NetTotalDown = rawUp, rawDown
 		}
@@ -3088,7 +3093,11 @@ func (p *reportPreparer) prepare() Report {
 
 func (p *reportPreparer) prepareForInterval(interval time.Duration) Report {
 	intervalSec := intervalSeconds(interval)
-	report := collectReportWithInterval(intervalSec)
+	collect := p.collect
+	if collect == nil {
+		collect = collectReportWithInterval
+	}
+	report := collect(intervalSec)
 	prepared := p.prepareReportForInterval(report, intervalSec)
 	p.attachBasicInfoIfDue(&prepared, time.Now())
 	return prepared
@@ -3100,6 +3109,12 @@ func prepareReportWithPing(preparer *reportPreparer, pingState *pingReportState,
 		pingState.appendDueResults(&report, time.Now())
 	}
 	return report
+}
+
+func prepareReportsWithPing(preparer *reportPreparer, pingState *pingReportState, interval time.Duration) []Report {
+	retry := pingState.takeRetryReports()
+	first := prepareReportWithPing(preparer, pingState, interval)
+	return append(retry, pingState.appendPendingReports(first)...)
 }
 
 func (p *reportPreparer) prepareReport(report Report) Report {
@@ -3186,32 +3201,56 @@ func (p *reportPreparer) attachBasicInfoIfDue(report *Report, now time.Time) {
 	if p == nil || report == nil {
 		return
 	}
-	if !p.lastBasicInfoAt.IsZero() && now.Sub(p.lastBasicInfoAt) < basicInfoRefreshInterval {
-		return
+	p.basicInfoMu.Lock()
+	defer p.basicInfoMu.Unlock()
+	if p.lastBasicInfoAt.IsZero() || now.Sub(p.lastBasicInfoAt) >= basicInfoRefreshInterval {
+		info := getBasicInfo()
+		p.pendingBasicInfo = &info
+		p.basicInfoRevision++
+		p.lastBasicInfoAt = now
 	}
-	info := getBasicInfo()
-	report.BasicInfo = &info
-	p.lastBasicInfoAt = now
+	if p.pendingBasicInfo != nil {
+		report.BasicInfo = p.pendingBasicInfo
+		report.basicInfoOwner, report.basicInfoRevision = p, p.basicInfoRevision
+	}
 }
 
-func sendHTTPReports(reports []Report) {
+func sendHTTPReports(reports []Report) error {
 	if len(reports) == 0 {
-		return
+		return nil
+	}
+	if len(reports) > maxReportsPerEnvelope {
+		return fmt.Errorf("report envelope exceeds %d reports", maxReportsPerEnvelope)
 	}
 	endpoint := serverURL + "/api/clients/report"
 	payload := any(reports[0])
 	if len(reports) > 1 {
 		payload = map[string]any{"reports": reports}
 	}
-	if err := postJSON(endpoint, payload, token); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := postJSONResponse(ctx, endpoint, payload, token)
+	if err != nil {
 		log.Printf("HTTP report failed: %v", err)
-		return
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusError(resp)
+	}
+	var accepted struct{ Success bool }
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes)).Decode(&accepted); err != nil {
+		return fmt.Errorf("invalid report acknowledgement: %w", err)
+	}
+	if !accepted.Success {
+		return errors.New("server did not accept the report")
 	}
 	if len(reports) == 1 {
-		logReport("HTTP report sent", reports[0])
+		logReport("HTTP report accepted", reports[0])
 	} else {
-		log.Printf("HTTP report batch sent: %d reports", len(reports))
+		log.Printf("HTTP report batch accepted: %d reports", len(reports))
 	}
+	return nil
 }
 
 func fetchAgentPolicy() (agentPolicy, error) {
@@ -3292,32 +3331,32 @@ func postJSON(endpoint string, data interface{}, bearerToken string) error {
 }
 
 func postJSONWithContext(ctx context.Context, endpoint string, data interface{}, bearerToken string) error {
-	body, err := json.Marshal(data)
+	resp, err := postJSONResponse(ctx, endpoint, data, bearerToken)
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusError(resp)
+	}
+	return nil
+}
 
+func postJSONResponse(ctx context.Context, endpoint string, data interface{}, bearerToken string) (*http.Response, error) {
+	body, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
-
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return httpStatusError(resp)
-	}
-
-	return nil
+	return client.Do(req)
 }
 
 func httpStatusError(resp *http.Response) error {
@@ -3432,7 +3471,7 @@ func connectWebSocket(endpoint string, agentToken string) (*safeWebSocketConn, e
 	return &safeWebSocketConn{conn: conn}, nil
 }
 
-func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies chan<- serverMessage) {
+func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies chan<- serverMessage, acknowledgements ...chan<- struct{}) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -3445,8 +3484,20 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			log.Printf("WebSocket message: %s", string(raw))
 			continue
 		}
+		if message.Type == "ack" || message.Type == "policy" {
+			if err := conn.renewReadDeadline(); err != nil {
+				done <- err
+				return
+			}
+		}
 		if message.Type == "ack" {
 			log.Printf("WebSocket ack received: %d", message.Timestamp)
+			if len(acknowledgements) > 0 {
+				select {
+				case acknowledgements[0] <- struct{}{}:
+				default:
+				}
+			}
 			continue
 		}
 		if message.Type == "policy" {
@@ -3459,26 +3510,4 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 		}
 		log.Printf("WebSocket message type=%s", message.Type)
 	}
-}
-
-func (c *safeWebSocketConn) WriteMessage(messageType int, data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteMessage(messageType, data)
-}
-
-func (c *safeWebSocketConn) WriteJSON(data interface{}) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteJSON(data)
-}
-
-func (c *safeWebSocketConn) ReadMessage() (int, []byte, error) {
-	return c.conn.ReadMessage()
-}
-
-func (c *safeWebSocketConn) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_ = c.conn.Close()
 }

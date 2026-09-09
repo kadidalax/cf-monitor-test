@@ -16,6 +16,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'supabase', 'migrations');
 const files = readdirSync(migrationsDir).filter(name => name.endsWith('.sql')).sort();
@@ -52,13 +53,15 @@ function scanCreateTables(lines) {
   return { defined, blockLines };
 }
 
-const violations = [];
-
-for (const file of files) {
-  // 注释里提到列名不算引用，否则本锁自己的说明文字就会触发它。
-  const lines = readFileSync(join(migrationsDir, file), 'utf8')
-    .split(/\r?\n/)
-    .map(line => line.replace(/--.*$/, ''));
+function findColumnOrderViolations(source, file = 'fixture.sql') {
+  const violations = [];
+  // 单引号值不是列引用；双引号仍是标识符。整段处理以保留跨行字符串，
+  // 且不能先删 --：字符串中的 -- 后面还可能跟着真正的列引用。
+  // 不屏蔽 $$ / $tag$ 函数体，否则 language sql 中的真实早期引用会漏报。
+  const lines = source
+    .replace(/"(?:[^"]|"")*"|\b[eE]'(?:\\[\s\S]|''|[^'\\])*'|'(?:''|[^'])*'|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
+      token => token.startsWith('"') ? token : token.replace(/[^\r\n]/g, ' '))
+    .split(/\r?\n/);
 
   const { defined, blockLines } = scanCreateTables(lines);
 
@@ -89,28 +92,56 @@ for (const file of files) {
       break;
     }
   }
+  return violations;
 }
 
-assert.deepEqual(
-  violations,
-  [],
-  '存量库应用迁移时会报 42703：\n' + violations.join('\n'),
-);
+test('all migration files add columns before referencing them', () => {
+  const violations = files.flatMap(file =>
+    findColumnOrderViolations(readFileSync(join(migrationsDir, file), 'utf8'), file));
+  assert.deepEqual(violations, [], '存量库应用迁移时会报 42703：\n' + violations.join('\n'));
+});
 
-// 口径自检：这条锁只有在真能抓到「引用早于建列」时才有意义。
-// 上面全绿可能是因为扫描逻辑把所有情况都跳过了，所以这里造一个已知的坏样本验证它会红。
-const probe = [
-  'create or replace function public.f() returns void language sql as $$',
-  '  select probe_col from clients;',
-  '$$;',
-  'alter table clients add column if not exists probe_col text;',
-];
-const probeAdd = probe.findIndex(l => ADD_COLUMN.test(l)) + 1;
-const probeRef = probe.findIndex(l => /\bprobe_col\b/.test(l)) + 1;
-assert.ok(probeRef > 0 && probeRef < probeAdd, '自检样本本身不成立');
-assert.ok(
-  !scanCreateTables(probe).defined.get('clients')?.has('probe_col'),
-  'create table 扫描不得把 probe_col 当成已定义列——否则真实违规也会被跳过',
-);
+// 自检必须调用与真实迁移相同的扫描器，不能只证明样本中两个词的先后顺序。
+for (const [label, statement] of [
+  ['unquoted identifier', 'select probe_col from clients;'],
+  ['double-quoted identifier', 'select "probe_col" from clients;'],
+  ['reference after a comment-like string', "select 'not -- a comment', probe_col from clients;"],
+]) {
+  test(`column-order scanner rejects an early ${label} inside a SQL function`, () => {
+    const violations = findColumnOrderViolations([
+      'create or replace function public.f() returns text language sql as $$',
+      statement,
+      '$$;',
+      'alter table clients add column if not exists probe_col text;',
+    ].join('\n'));
+    assert.equal(violations.length, 1, '真实引用早于建列必须被拦住');
+    assert.match(violations[0], /clients\.probe_col 的建列 DDL 在第 4 行，但第 2 行已经引用了它/);
+  });
+}
 
-console.log(`ok - ${files.length} 个迁移文件的新增列 DDL 均早于其引用`);
+for (const [label, statement] of [
+  ['a single-quoted value', "select 1 from information_schema.columns where column_name = 'probe_col';"],
+  ['doubled single quotes', "select 'user''s probe_col';"],
+  ['an escape string', String.raw`select E'user\'s probe_col';`],
+  ['a multiline string', "select 'first line\nprobe_col\nlast line';"],
+  ['a line comment', '-- probe_col does not exist yet'],
+  ['a block comment', '/* probe_col does not exist yet */'],
+]) {
+  test(`column-order scanner accepts ${label} before the DDL`, () => {
+    assert.deepEqual(findColumnOrderViolations([
+      statement,
+      'alter table clients add column if not exists probe_col text;',
+      'select probe_col from clients;',
+    ].join('\n')), []);
+  });
+}
+
+test('column-order scanner accepts a column defined by CREATE TABLE in the same file', () => {
+  assert.deepEqual(findColumnOrderViolations([
+    'create table clients (',
+    '  probe_col text',
+    ');',
+    'select probe_col from clients;',
+    'alter table clients add column if not exists probe_col text;',
+  ].join('\n')), []);
+});

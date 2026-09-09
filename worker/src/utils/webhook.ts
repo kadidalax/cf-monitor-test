@@ -1,9 +1,11 @@
 import type { NotificationMessage } from './notification-templates.ts';
+import { currentScheduledBudget, scheduledFetch, ScheduledBudgetExceeded } from './scheduled-budget.ts';
 
 export const WEBHOOK_MESSAGE_MAX_CHARS = 4000;
 export const WEBHOOK_DISCORD_MAX_CHARS = 1900;
 export const WEBHOOK_RESPONSE_ERROR_MAX_CHARS = 1024;
 export const WEBHOOK_TIMEOUT_MS = 5000;
+const WEBHOOK_PROVIDER_RESPONSE_MAX_BYTES = 16 * 1024;
 
 export type WebhookFormat = 'generic' | 'slack' | 'discord' | 'feishu' | 'dingtalk' | 'wecom' | 'custom';
 
@@ -82,6 +84,7 @@ function isUnsafeWebhookHostname(hostname: string): boolean {
   if (isAmbiguousNumericHost(host)) return true;
   const ipv4 = parseIPv4(host);
   if (ipv4) return isBlockedIPv4(ipv4);
+  if (!host.includes(':')) return false;
   if (isIPv4MappedIPv6(host)) return true;
   if (host === '::' || host === '::1') return true;
   if (/^(fc|fd|fe8|fe9|fea|feb)/.test(host)) return true;
@@ -339,6 +342,54 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+type BusinessWebhookFormat = 'feishu' | 'dingtalk' | 'wecom';
+type BusinessResponse = { ok: true } | { ok: false; error: string; retryable: boolean };
+
+function isBusinessWebhookFormat(format: WebhookFormat): format is BusinessWebhookFormat {
+  return format === 'feishu' || format === 'dingtalk' || format === 'wecom';
+}
+
+async function readBusinessResponse(response: Response, format: BusinessWebhookFormat): Promise<BusinessResponse> {
+  const invalid: BusinessResponse = { ok: false, error: `${format}: invalid response`, retryable: false };
+  if (!response.body) return invalid;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > WEBHOOK_PROVIDER_RESPONSE_MAX_BYTES) return invalid;
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes));
+  } catch {
+    return invalid;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid;
+  const code = (value as Record<string, unknown>)[format === 'feishu' ? 'code' : 'errcode'];
+  if (code === 0 || (format === 'dingtalk' && code === '0')) return { ok: true };
+  if (typeof code !== 'number' || !Number.isSafeInteger(code)) return invalid;
+  const retryable = format === 'feishu' ? code === 11232
+    : format === 'dingtalk' ? code === -1
+      : code === -1 || code === 45009;
+  return { ok: false, error: `${format}: code=${code}`, retryable };
+}
+
 export async function sendWebhookMessage(
   config: WebhookConfig,
   notification: NotificationMessage,
@@ -363,19 +414,35 @@ export async function sendWebhookMessage(
         signal: controller.signal,
       };
       if (request.body !== undefined) init.body = request.body;
-      const response = await (io.fetch || fetch)(request.url, init);
+      const response = await scheduledFetch(request.url, init, io.fetch || fetch);
       if (response.status >= 200 && response.status < 300) {
+        if (isBusinessWebhookFormat(config.format)) {
+          const business = await readBusinessResponse(response, config.format);
+          if (!business.ok) {
+            lastResult = { ok: false, status: response.status, host: request.host, error: business.error };
+            if (!business.retryable) return lastResult;
+            continue;
+          }
+        }
+        if (response.body) await response.body.cancel().catch(() => undefined);
         return { ok: true, status: response.status, host: request.host };
       }
-      const body = await readErrorBody(response);
+      const businessProvider = isBusinessWebhookFormat(config.format);
+      const body = businessProvider ? '' : await readErrorBody(response);
+      if (businessProvider && response.body) await response.body.cancel().catch(() => undefined);
       lastResult = {
         ok: false,
         status: response.status,
         host: request.host,
         error: `HTTP ${response.status}${body ? `: ${body}` : ''}`,
       };
+      if (businessProvider && response.status < 500 && response.status !== 429 && response.status !== 408) return lastResult;
     } catch (error) {
-      lastResult = { ok: false, host: request.host, error: errorDetail(error) };
+      if (error instanceof ScheduledBudgetExceeded || currentScheduledBudget()?.remainingMs() === 0) throw new ScheduledBudgetExceeded();
+      lastResult = {
+        ok: false, host: request.host,
+        error: isBusinessWebhookFormat(config.format) ? `${config.format}: request failed` : errorDetail(error),
+      };
     } finally {
       clearTimeout(timeoutId);
     }

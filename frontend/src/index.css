@@ -6255,3 +6255,16 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   border-radius: 8px;
   background: var(--gray-a2);
 }
+
+/* Keyboard-operable native controls retain the existing table/card appearance. */
+.setting-card-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.node-table-sort-button { display: flex; align-items: center; gap: 4px; min-height: 28px; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.setting-card-toggle:focus-visible, .node-table-sort-button:focus-visible { outline: 2px solid var(--accent-9); outline-offset: 3px; border-radius: 3px; }
+
+
+.capacity-resources { min-width: 0; margin: 16px 0; }
+.capacity-resource-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 12px; }
+.capacity-resource-table th, .capacity-resource-table td { padding: 8px; border-bottom: 1px solid var(--gray-5); text-align: left; vertical-align: top; }
+.capacity-resource-table details { font-weight: normal; max-width: 240px; }
+.capacity-resource-table summary { cursor: pointer; color: var(--gray-11); }
+.capacity-resource-table ul { margin: 4px 0; padding-left: 16px; }

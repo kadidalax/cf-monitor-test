@@ -219,7 +219,7 @@ export default function NodeCard({ client, live, online, includeHidden = false }
     net_total_up: 0,
     net_total_down: 0,
     load: 0,
-    temp: 0,
+    temp: null,
     uptime: 0,
     process_count: 0,
     connections: 0,

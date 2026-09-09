@@ -195,6 +195,24 @@ function ExpandedNodeDetails({
   );
 }
 
+function SortHeader({ column, children, style, activeKey, direction, onSort }: {
+  column: SortKey;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  activeKey: SortKey;
+  direction: SortDir;
+  onSort: (column: SortKey) => void;
+}) {
+  return (
+    <Table.ColumnHeaderCell style={{ whiteSpace: 'nowrap', ...style }} aria-sort={activeKey === column ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" className="node-table-sort-button" onClick={() => onSort(column)}>
+        {children}
+        {activeKey !== column ? <ChevronsUpDown size={12} style={{ opacity: 0.35 }} aria-hidden="true" /> : direction === 'asc' ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />}
+      </button>
+    </Table.ColumnHeaderCell>
+  );
+}
+
 export default function NodeTable({ nodes, liveData, includeHidden = false }: NodeTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('manual');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -218,10 +236,7 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
     setSortDir('asc');
   };
 
-  const SortIcon = ({ column }: { column: SortKey }) => {
-    if (sortKey !== column) return <ChevronsUpDown size={12} style={{ opacity: 0.35 }} />;
-    return sortDir === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />;
-  };
+  const sortHeaderProps = { activeKey: sortKey, direction: sortDir, onSort: handleSort };
 
   const sortedNodes = useMemo(() => {
     return [...nodes].sort((a, b) => {
@@ -276,26 +291,6 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
     );
   };
 
-  const SortHeader = ({
-    column,
-    children,
-    style,
-  }: {
-    column: SortKey;
-    children: React.ReactNode;
-    style?: React.CSSProperties;
-  }) => (
-    <Table.ColumnHeaderCell
-      style={{ cursor: 'pointer', whiteSpace: 'nowrap', ...style }}
-      onClick={() => handleSort(column)}
-    >
-      <Flex align="center" gap="1">
-        {children}
-        <SortIcon column={column} />
-      </Flex>
-    </Table.ColumnHeaderCell>
-  );
-
   return (
     <Box className="node-table-scroll">
       <Table.Root
@@ -307,15 +302,15 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
         <Table.Header>
           <Table.Row>
             <Table.ColumnHeaderCell style={{ width: 36 }} />
-            <SortHeader column="name" style={{ width: 180 }}>名称</SortHeader>
-            <SortHeader column="os" style={{ width: 132 }}>系统</SortHeader>
-            <SortHeader column="status" style={{ width: 136 }}>状态</SortHeader>
-            <SortHeader column="cpu" style={{ width: 118 }}>CPU</SortHeader>
-            <SortHeader column="ram" style={{ width: 118 }}>内存</SortHeader>
-            <SortHeader column="disk" style={{ width: 118 }}>硬盘</SortHeader>
-            <SortHeader column="network" style={{ width: 142 }}>网络</SortHeader>
-            <SortHeader column="price" style={{ width: 108 }}>价格</SortHeader>
-            <SortHeader column="traffic" style={{ width: 166 }}>流量</SortHeader>
+            <SortHeader {...sortHeaderProps} column="name" style={{ width: 180 }}>名称</SortHeader>
+            <SortHeader {...sortHeaderProps} column="os" style={{ width: 132 }}>系统</SortHeader>
+            <SortHeader {...sortHeaderProps} column="status" style={{ width: 136 }}>状态</SortHeader>
+            <SortHeader {...sortHeaderProps} column="cpu" style={{ width: 118 }}>CPU</SortHeader>
+            <SortHeader {...sortHeaderProps} column="ram" style={{ width: 118 }}>内存</SortHeader>
+            <SortHeader {...sortHeaderProps} column="disk" style={{ width: 118 }}>硬盘</SortHeader>
+            <SortHeader {...sortHeaderProps} column="network" style={{ width: 142 }}>网络</SortHeader>
+            <SortHeader {...sortHeaderProps} column="price" style={{ width: 108 }}>价格</SortHeader>
+            <SortHeader {...sortHeaderProps} column="traffic" style={{ width: 166 }}>流量</SortHeader>
           </Table.Row>
         </Table.Header>
 
@@ -351,7 +346,7 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
                     <Link
                       to={`/instance/${node.uuid}`}
                       style={{ textDecoration: 'none', color: 'inherit' }}
-                      onClick={(event) => event.stopPropagation()}
+                      onClick={(event: React.MouseEvent<HTMLAnchorElement>) => event.stopPropagation()}
                     >
                       <Flex className="node-table-name-cell" align="center" gap="2">
                         <Flag region={node.region} size={16} />
