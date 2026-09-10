@@ -23,7 +23,9 @@ function userFixture(t, scenario) {
 ROOT=${quote(posix)}
 export XDG_DATA_HOME="$ROOT/data" XDG_CONFIG_HOME="$ROOT/config" XDG_STATE_HOME="$ROOT/state"
 export CF_MONITOR_TEST_CRON="$ROOT/cron.txt" CF_MONITOR_TEST_OUTPUT="$ROOT/running.txt"
-export PATH="$ROOT/bin:$PATH"
+FIXTURE_BIN="$(cd "$ROOT/bin" && pwd)"
+export PATH="$FIXTURE_BIN:$PATH"
+[ "$(command -v crontab)" = "$FIXTURE_BIN/crontab" ] || { echo 'Unsafe crontab fixture path' >&2; exit 90; }
 TMPDIR="$ROOT/temp"; export TMPDIR; mkdir -p "$TMPDIR"
 SERVICE_MODE=user; DRY_RUN=0; YES=1; KEEP_FILES=0; INSTALL_DIR=''; SERVICE_NAME=''; INSTANCE_ID=one
 SERVER=https://monitor.example.test; TOKEN=old-token; NODE_NAME=fixture; MODE=websocket

@@ -599,14 +599,14 @@ detect_service_mode() {
       printf 'launchctl'
       ;;
     linux)
-      if has systemctl; then
+      if has systemctl && [ -d /run/systemd/system ] && [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then
         printf 'systemd'
-      elif has rc-service || [ -d /etc/init.d ]; then
+      elif has rc-service && has rc-update && [ -x /sbin/openrc-run ] && [ -f /run/openrc/softlevel ]; then
         printf 'openrc'
       elif [ "$install_mode" = "auto" ]; then
         printf 'user'
       else
-        die "systemd or OpenRC is required for --install-mode system on Linux."
+        die "A running systemd or OpenRC service manager is required for --install-mode system on Linux. Use --install-mode user when no init system is running."
       fi
       ;;
     freebsd)
@@ -891,7 +891,10 @@ prepare_binary() {
 install_systemd() {
   agent_assert_instance 0 || return 1
   ensure_agent_user
-  run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+  (
+    umask 022
+    run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+  ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
   run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
@@ -940,7 +943,10 @@ EOF
 install_openrc() {
   agent_assert_instance 0 || return 1
   ensure_agent_user
-  run mkdir -p "$INSTALL_DIR" "$STATE_DIR" /etc/conf.d /etc/init.d
+  (
+    umask 022
+    run mkdir -p "$INSTALL_DIR" "$STATE_DIR" /etc/conf.d /etc/init.d
+  ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
   run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
@@ -952,6 +958,7 @@ command=$(shell_quote "$INSTALL_DIR/cf-vps-monitor-agent")
 command_args="--interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}"
 command_user="${AGENT_USER}:${AGENT_USER}"
 command_background=true
+start_stop_daemon_args="--wait 1000"
 pidfile="/run/\${RC_SVCNAME}.pid"
 directory=$(shell_quote "$INSTALL_DIR")
 output_log="/var/log/\${RC_SVCNAME}.log"
@@ -965,14 +972,29 @@ start_pre() {
   export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
   export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE
-  checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR")
+  checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR") || return 1
+  _cf_log_path="\$output_log"
+  while [ -n "\$_cf_log_path" ]; do
+    if [ -L "\$_cf_log_path" ]; then
+      eerror "Refusing a linked Agent log path: \$output_log"
+      return 1
+    fi
+    _cf_log_parent="\$(dirname "\$_cf_log_path")" || return 1
+    [ "\$_cf_log_parent" != "\$_cf_log_path" ] || break
+    _cf_log_path="\$_cf_log_parent"
+  done
+  if [ -e "\$output_log" ] && { [ ! -f "\$output_log" ] || [ "\$(stat -c %h "\$output_log")" != 1 ]; }; then
+    eerror "Refusing a non-regular or hard-linked Agent log: \$output_log"
+    return 1
+  fi
+  checkpath -f -m 0600 -o ${AGENT_USER}:${AGENT_USER} "\$output_log" || return 1
 }
 EOF
 )
   write_file "$INIT_FILE" "755" "$INIT_CONTENT"
   agent_write_marker
-  run rc-update add "$SERVICE_NAME" default
-  run rc-service "$SERVICE_NAME" restart
+  run rc-update add "$SERVICE_NAME" default || die "Failed to enable ${SERVICE_NAME}."
+  run rc-service "$SERVICE_NAME" restart || die "Failed to start ${SERVICE_NAME}; inspect /var/log/${SERVICE_NAME}.log and rc-service ${SERVICE_NAME} status."
   echo "Installed ${SERVICE_NAME}."
   echo "Status: rc-service ${SERVICE_NAME} status"
   echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
@@ -1025,7 +1047,7 @@ EOF
   echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
 }
 
-install_user_autostart() {
+install_user_autostart() (
   marker="cf-vps-monitor:${BASE_ID}"
   if ! has crontab; then
     echo "crontab not found; agent is started now but reboot autostart is not configured."
@@ -1035,12 +1057,31 @@ install_user_autostart() {
     echo "[dry-run] add crontab @reboot $(cron_shell_quote "$INSTALL_DIR/start.sh") # ${marker}"
     return 0
   fi
-  tmp="$(mktemp "${TMPDIR:-/tmp}/cf-vps-monitor-cron.XXXXXX")"
-  ((crontab -l 2>/dev/null || true) | awk -v marker="$marker" 'NF < 2 || $(NF - 1) != "#" || $NF != marker'; printf '@reboot %s # %s\n' "$(cron_shell_quote "$INSTALL_DIR/start.sh")" "$marker") > "$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
+  if ! _cf_cron_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cf-vps-monitor-cron.XXXXXX")"; then
+    echo "Cannot prepare crontab; agent is started now but reboot autostart is not configured."
+    return 0
+  fi
+  trap 'rm -f "$_cf_cron_tmp/current" "$_cf_cron_tmp/error" "$_cf_cron_tmp/new" || :; rmdir "$_cf_cron_tmp" 2>/dev/null || :' EXIT
+  if LC_ALL=C crontab -l > "$_cf_cron_tmp/current" 2> "$_cf_cron_tmp/error"; then
+    :
+  elif [ ! -s "$_cf_cron_tmp/current" ] && [ "$(awk 'END { print NR }' "$_cf_cron_tmp/error")" = 1 ] &&
+    grep -Eq "^(no crontab for [^/]+|crontab: no crontab for [^/]+|crontab: can't open '[^/']+': No such file or directory)$" "$_cf_cron_tmp/error"; then
+    :
+  else
+    echo "Cannot read crontab; agent is started now but reboot autostart is not configured."
+    return 0
+  fi
+  if ! { awk -v marker="$marker" 'NF < 2 || $(NF - 1) != "#" || $NF != marker' "$_cf_cron_tmp/current" &&
+    printf '@reboot %s # %s\n' "$(cron_shell_quote "$INSTALL_DIR/start.sh")" "$marker"; } > "$_cf_cron_tmp/new"; then
+    echo "Cannot prepare crontab; agent is started now but reboot autostart is not configured."
+    return 0
+  fi
+  if ! crontab "$_cf_cron_tmp/new" 2> "$_cf_cron_tmp/error"; then
+    echo "Cannot update crontab; agent is started now but reboot autostart is not configured."
+    return 0
+  fi
   echo "Autostart: crontab @reboot configured."
-}
+)
 
 user_process_helpers() {
   cat <<'EOF'

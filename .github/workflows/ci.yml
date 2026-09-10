@@ -52,6 +52,11 @@ jobs:
       - name: Test
         run: npm test
 
+      # These four fixtures drop to nobody to check real filesystem access.
+      # Their service commands are isolated; the normal runner skips them.
+      - name: Installer service account permissions
+        run: sudo "$(command -v node)" --test --test-name-pattern='^compat (systemd|openrc) (default paths|must not open permissions)' agent/install-compat.test.mjs
+
       - name: Agent data race check
         working-directory: agent
         env:
