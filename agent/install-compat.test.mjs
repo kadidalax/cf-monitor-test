@@ -35,11 +35,41 @@ function sandboxSource(root) {
   return source.replace(pattern, path => `${base}/host${path}`);
 }
 
+function assertShellSyntax(path) {
+  const result = spawnSync('sh', ['-n', posix(path)], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `fixture must parse before testing installer behavior (${path}): ${result.stderr}`);
+}
+
+// External command names may contain hyphens; POSIX shell function names may not.
+// Keep production calls intact and isolate executable shims through PATH.
+function commandShims(root, commands) {
+  mkdirSync(join(root, 'bin'), { recursive: true });
+  for (const [name, body] of Object.entries(commands)) {
+    const path = join(root, 'bin', name);
+    writeFileSync(path, `#!/usr/bin/env sh\nset -eu\n${body}\n`, { mode: 0o755 });
+    assertShellSyntax(path);
+  }
+  return `
+FIXTURE_BIN="$(cd "$ROOT/bin" && pwd)"
+export PATH="$FIXTURE_BIN:$PATH"
+for fixture_command in ${Object.keys(commands).join(' ')}; do
+  [ "$(command -v "$fixture_command")" = "$FIXTURE_BIN/$fixture_command" ] || {
+    echo '[fixture-error] command did not resolve to its isolated shim' >&2
+    exit 90
+  }
+done
+`;
+}
+
 function shell(root, content, { sandbox = false, timeout = 15000 } = {}) {
   const script = join(root, 'case.sh');
-  writeFileSync(script, `${sandbox ? sandboxSource(root) : source}\nROOT=${quote(posix(root))}\nexport TMPDIR="$ROOT"\n${content}\n`);
+  writeFileSync(script, `${sandbox ? sandboxSource(root) : source}\nROOT=${quote(posix(root))}\nexport ROOT TMPDIR="$ROOT"\n${content}\n`);
+  assertShellSyntax(script);
   const result = spawnSync('sh', [posix(script)], { encoding: 'utf8', timeout, windowsHide: true });
   assert.ifError(result.error);
+  assert.equal(result.signal, null, result.stderr);
+  assert.doesNotMatch(result.stderr, /Syntax error:|Bad function name|\[fixture-error\]/i);
   return result;
 }
 
@@ -55,7 +85,16 @@ function detectionFixture(t, scenario) {
   }
   mkdirSync(join(root, 'host/proc/1'), { recursive: true });
   writeFileSync(join(root, 'host/proc/1/comm'), `${scenario.manager === 'systemd' ? 'systemd' : 'init'}\n`);
+  const pathSetup = commandShims(root, {
+    systemctl: scenario.manager === 'systemd'
+      ? (scenario.degraded ? "printf '%s\\n' degraded; exit 1" : "printf '%s\\n' running; exit 0")
+      : "echo 'System has not been booted with systemd as init system' >&2; exit 1",
+    'rc-status': "printf '%s\\n' default",
+    'rc-service': `exit ${scenario.manager === 'openrc' ? '0' : '1'}`,
+    'rc-update': `exit ${scenario.manager === 'openrc' ? '0' : '1'}`,
+  });
   const result = shell(root, `
+${pathSetup}
 OS_NAME=linux; INSTALL_MODE=${quote(scenario.mode ?? 'auto')}
 is_root() { return ${scenario.root === false ? '1' : '0'}; }
 has() {
@@ -65,12 +104,6 @@ has() {
     *) command -v "$1" >/dev/null 2>&1 ;;
   esac
 }
-systemctl() {
-  ${scenario.manager === 'systemd' ? (scenario.degraded ? "printf '%s\\n' degraded; return 1" : "printf '%s\\n' running; return 0") : "echo 'System has not been booted with systemd as init system' >&2; return 1"}
-}
-rc-status() { printf '%s\\n' default; }
-rc-service() { return ${scenario.manager === 'openrc' ? '0' : '1'}; }
-rc-update() { return ${scenario.manager === 'openrc' ? '0' : '1'}; }
 detect_service_mode
 `, { sandbox: true });
   return result;
@@ -261,20 +294,46 @@ function nativeSystemFixture(t, manager, custom = false) {
     chmodSync(privateParent, 0o700);
   }
   writeFileSync(join(root, 'agent-fixture'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const pathSetup = commandShims(root, {
+    systemctl: `
+case "$*" in
+  daemon-reload|'enable cf-vps-monitor-agent-fixture'|'restart cf-vps-monitor-agent-fixture') ;;
+  *) echo '[fixture-error] unexpected systemctl arguments' >&2; exit 91 ;;
+esac
+printf 'systemctl:%s\\n' "$*" >> "$ROOT/service-events"
+`,
+    'rc-service': `
+[ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent-fixture ] && [ "$2" = restart ] || {
+  echo '[fixture-error] unexpected rc-service arguments' >&2; exit 92
+}
+printf 'rc-service:%s\\n' "$*" >> "$ROOT/service-events"
+`,
+    'rc-update': `
+[ "$#" -eq 3 ] && [ "$1" = add ] && [ "$2" = cf-vps-monitor-agent-fixture ] && [ "$3" = default ] || {
+  echo '[fixture-error] unexpected rc-update arguments' >&2; exit 93
+}
+printf 'rc-update:%s\\n' "$*" >> "$ROOT/service-events"
+`,
+  });
   const result = shell(root, `
+${pathSetup}
 OS_NAME=linux; SERVICE_MODE=${quote(manager)}; AGENT_USER=${quote(nobodyUid.stdout.trim())}
 INSTALL_DIR=${quote(custom ? posix(join(privateParent, 'fixture')) : '')}; SERVICE_NAME=''; INSTANCE_ID=fixture; DRY_RUN=0
 SERVER=https://monitor.example.test; TOKEN=synthetic-token
 apply_defaults
 WORK_BIN="$ROOT/agent-fixture"
 ensure_agent_user() { :; }
-systemctl() { return 0; }
-rc-service() { return 0; }
-rc-update() { return 0; }
 umask 077
 install_${manager}
 `, { sandbox: true });
-  return { root, result, privateParent, installDir: join(root, 'host/opt/cf-vps-monitor/fixture') };
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Installed cf-vps-monitor-agent-fixture\./, 'permission assertions require an installation that actually completed');
+  assert.deepEqual(readFileSync(join(root, 'service-events'), 'utf8').trim().split('\n'), manager === 'systemd'
+    ? ['systemctl:daemon-reload', 'systemctl:enable cf-vps-monitor-agent-fixture', 'systemctl:restart cf-vps-monitor-agent-fixture']
+    : ['rc-update:add cf-vps-monitor-agent-fixture default', 'rc-service:cf-vps-monitor-agent-fixture restart']);
+  const installDir = custom ? join(privateParent, 'fixture') : join(root, 'host/opt/cf-vps-monitor/fixture');
+  assert.ok(existsSync(join(installDir, 'cf-vps-monitor-agent')), 'installation must create the actual Agent file before checking permissions');
+  return { root, result, privateParent, installDir };
 }
 
 for (const manager of ['systemd', 'openrc']) {
