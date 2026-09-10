@@ -93,20 +93,21 @@ var defaultExcludedNetworkInterfacePrefixes = []string{
 }
 
 var (
-	token               string
-	serverURL           string
-	reportInterval      int
-	clientName          string
-	reportMode          string
-	reconnectInterval   int
-	pingInterval        int
-	trafficResetDay     int
-	mountInclude        string
-	mountExclude        string
-	nicInclude          string
-	nicExclude          string
-	trafficTracker      *trafficResetTracker
-	publicIPv4ProbeURLs = []string{
+	token                   string
+	serverURL               string
+	reportInterval          int
+	clientName              string
+	reportMode              string
+	reconnectInterval       int
+	pingInterval            int
+	trafficResetDay         int
+	mountInclude            string
+	mountExclude            string
+	containerDiskTotalBytes containerDiskTotalValue
+	nicInclude              string
+	nicExclude              string
+	trafficTracker          *trafficResetTracker
+	publicIPv4ProbeURLs     = []string{
 		"https://api.ipify.org",
 		"https://ipv4.icanhazip.com",
 	}
@@ -175,10 +176,12 @@ type Report struct {
 	// Load 为空指针表示「本机负载不可取信」（例如 lxcfs 未虚拟化 loadavg 的 LXC
 	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
 	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
-	Load                *float64             `json:"load"`
-	Temp                *float64             `json:"temp"`
-	Disk                int64                `json:"disk"`
-	DiskTotal           int64                `json:"disk_total"`
+	Load *float64 `json:"load"`
+	Temp *float64 `json:"temp"`
+	// A nil disk or uptime value is unavailable, including host data that
+	// cannot be attributed to the current container. Keep JSON null explicit.
+	Disk                *int64               `json:"disk"`
+	DiskTotal           *int64               `json:"disk_total"`
 	NetIn               int64                `json:"net_in"`
 	NetOut              int64                `json:"net_out"`
 	NetTotalUp          int64                `json:"net_total_up"`
@@ -186,7 +189,7 @@ type Report struct {
 	ProcessCount        int                  `json:"process_count"`
 	Connections         int                  `json:"connections"`
 	ConnectionsUdp      int                  `json:"connections_udp"`
-	Uptime              int64                `json:"uptime"`
+	Uptime              *int64               `json:"uptime"`
 	Version             string               `json:"version"`
 	Name                string               `json:"name,omitempty"`
 	ReportInterval      int                  `json:"report_interval,omitempty"`
@@ -478,6 +481,7 @@ func init() {
 	flag.IntVar(&trafficResetDay, "traffic-reset-day", 1, "Monthly traffic reset day for network totals, from 1 to 31")
 	flag.StringVar(&mountInclude, "mount-include", "", "Comma-separated mountpoint/device patterns to include in disk totals, for example /,/data,/dev/sd*")
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
+	flag.Var(&containerDiskTotalBytes, "container-disk-total-bytes", "Verified container root disk allocation in decimal bytes, used only when automatic capacity is unavailable (0 = automatic)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
 }
@@ -518,6 +522,9 @@ func main() {
 	log.Printf("traffic reset day: %d", trafficResetDay)
 	logFilter("disk include", mountInclude)
 	logFilter("disk exclude", mountExclude)
+	if containerDiskTotalBytes > 0 {
+		log.Printf("configured container root disk allocation: %d bytes; this does not measure used space", containerDiskTotalBytes)
+	}
 	logFilter("network include", nicInclude)
 	logFilter("network exclude", nicExclude)
 
@@ -549,6 +556,13 @@ func applyEnvDefaults() {
 	}
 	if mountExclude == "" {
 		mountExclude = os.Getenv("CF_MONITOR_MOUNT_EXCLUDE")
+	}
+	if !flagWasSet("container-disk-total-bytes") {
+		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES")); value != "" {
+			if err := containerDiskTotalBytes.Set(value); err != nil {
+				log.Fatalf("invalid CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES: %v", err)
+			}
+		}
 	}
 	if nicInclude == "" {
 		nicInclude = os.Getenv("CF_MONITOR_NIC_INCLUDE")
@@ -1700,7 +1714,9 @@ func getBasicInfo() BasicInfo {
 			info.OS = linuxOSName("/etc/os-release")
 		}
 		info.Virtualization = detectVirtualization(hostInfo.VirtualizationSystem)
-		info.Uptime = int64(hostInfo.Uptime)
+	}
+	if uptime := nodeMetrics.uptime(); uptime != nil {
+		info.Uptime = *uptime
 	}
 	if cpuName, cpuCores := readCPUBasicInfo(); cpuName != "" || cpuCores > 0 {
 		info.CPUName = cpuName
@@ -1712,7 +1728,9 @@ func getBasicInfo() BasicInfo {
 			info.SwapTotal = int64(memory.swapTotal)
 		}
 	}
-	_, info.DiskTotal = diskUsageTotals()
+	if _, diskTotal := nodeMetrics.diskUsageTotals(mountInclude, mountExclude); diskTotal != nil {
+		info.DiskTotal = *diskTotal
+	}
 
 	// GPU detection
 	gpuName, gpuDetails := detectGPU()
@@ -2053,44 +2071,6 @@ func diskDeviceID(partition disk.PartitionStat) string {
 		}
 	}
 	return partition.Device
-}
-
-func diskUsageTotals() (int64, int64) {
-	partitions, err := disk.Partitions(true)
-	if err != nil {
-		return 0, 0
-	}
-	selected := selectDiskPartitions(partitions, mountInclude, mountExclude)
-	if strings.TrimSpace(mountInclude) != "" {
-		var usedDisk, totalDisk int64
-		for _, partition := range selected {
-			if usage, err := disk.Usage(partition.Mountpoint); err == nil {
-				usedDisk += int64(usage.Used)
-				totalDisk += int64(usage.Total)
-			}
-		}
-		return usedDisk, totalDisk
-	}
-
-	deviceMap := map[string]*disk.UsageStat{}
-	for _, partition := range selected {
-		usage, err := disk.Usage(partition.Mountpoint)
-		if err != nil {
-			continue
-		}
-		deviceID := diskDeviceID(partition)
-		if existing, ok := deviceMap[deviceID]; ok && existing.Total >= usage.Total {
-			continue
-		}
-		deviceMap[deviceID] = usage
-	}
-
-	var usedDisk, totalDisk int64
-	for _, usage := range deviceMap {
-		usedDisk += int64(usage.Used)
-		totalDisk += int64(usage.Total)
-	}
-	return usedDisk, totalDisk
 }
 
 func interfaceMatchesFilter(name string, filters []string) bool {
@@ -3041,8 +3021,8 @@ func collectReportWithInterval(intervalSec int) Report {
 		value := loadInfo.Load1
 		r.Load = &value
 	}
-	r.Temp = nodeTemperatureSampler.sample(context.Background())
-	r.Disk, r.DiskTotal = diskUsageTotals()
+	r.Temp = nodeMetrics.temperature(context.Background())
+	r.Disk, r.DiskTotal = nodeMetrics.diskUsageTotals(mountInclude, mountExclude)
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
 		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
 		selected := trafficInterfaceSelection(netIO)
@@ -3059,9 +3039,7 @@ func collectReportWithInterval(intervalSec int) Report {
 	}
 	r.ProcessCount = processCount()
 	r.Connections, r.ConnectionsUdp = connectionsCount()
-	if hostInfo, err := host.Info(); err == nil {
-		r.Uptime = int64(hostInfo.Uptime)
-	}
+	r.Uptime = nodeMetrics.uptime()
 
 	// GPU details
 	gpuDetailsMu.Lock()

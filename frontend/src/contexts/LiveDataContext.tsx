@@ -16,8 +16,11 @@ import {
 } from './livePolling';
 import { fetchPublicSettings, normalizePublicSettings, setCachedPublicSettings } from '../utils/publicSettings';
 import { fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
-import { normalizeLiveDataResponse, normalizeViewerTokenResponse } from '../utils/liveDataResponse';
+import { normalizeLastKnownRecord, normalizeLiveDataResponse, normalizeViewerTokenResponse } from '../utils/liveDataResponse';
 import { notifyPublicDataUpdated, subscribePublicDataUpdated } from '../utils/publicDataEvents';
+import type { PublicDataUpdateDetail } from '../utils/publicDataEvents';
+import { mergePublicClientPatch } from '../utils/publicClients';
+import type { ClientInfo } from '../types';
 import { notifyWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../utils/websiteMonitorEvents';
 import { useAuth } from './AuthContext';
 
@@ -28,8 +31,8 @@ export interface LiveRecord {
   ram_total: number;
   swap: number;
   swap_total: number;
-  disk: number;
-  disk_total: number;
+  disk: number | null;
+  disk_total: number | null;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -38,17 +41,26 @@ export interface LiveRecord {
   load: number | null;
   // null = 主机温度未采集或不可用；0 和负值仍是有效摄氏温度。
   temp: number | null;
-  uptime: number;
+  uptime: number | null;
   process_count: number;
   connections: number;
   connections_udp: number;
   message?: string;
+  lastReportTime?: number;
 }
+
+export type LastKnownRecord = Partial<LiveRecord> & {
+  uuid: string;
+  name: string;
+  lastReportTime: number;
+  sort_order?: number;
+};
 
 export interface LiveDataResponse {
   online: string[];
-  clients: Array<{ uuid: string; name: string; lastReportTime: number; region?: string } & Partial<LiveRecord>>;
+  clients: Array<{ uuid: string; name: string; lastReportTime: number; region?: string; sort_order?: number } & Partial<LiveRecord>>;
   data: Record<string, LiveRecord>;
+  last_known?: Record<string, LastKnownRecord>;
   count: number;
   timestamp: number;
   metadata_version?: string;
@@ -68,6 +80,8 @@ interface LiveDataRemoveMessage {
   type: 'remove';
   client: string;
   timestamp: number;
+  reason?: 'offline';
+  last_known?: LastKnownRecord;
 }
 
 interface LiveDataViewerExpiredMessage {
@@ -150,13 +164,16 @@ export function applyLiveUpdate(
   } as LiveRecord;
   const nextOnline = base.online.includes(uuid) ? base.online : [...base.online, uuid];
   const nextClient = {
+    ...previousClient,
     ...nextRecord,
     uuid,
     name: message.name || previousClient?.name || uuid,
     lastReportTime: message.timestamp,
   };
+  const { [uuid]: _lastKnown, ...lastKnown } = base.last_known || {};
 
   return {
+    ...base,
     online: nextOnline,
     clients: [
       ...base.clients.filter(client => client.uuid !== uuid),
@@ -166,6 +183,7 @@ export function applyLiveUpdate(
       ...base.data,
       [uuid]: nextRecord,
     },
+    last_known: lastKnown,
     count: nextOnline.length,
     timestamp: message.timestamp,
   };
@@ -175,15 +193,26 @@ export function applyLiveRemove(
   current: LiveDataResponse | null,
   message: LiveDataRemoveMessage,
 ): LiveDataResponse | null {
-  if (!current) return current;
-  const { [message.client]: _removed, ...data } = current.data;
-  const online = current.online.filter(uuid => uuid !== message.client);
+  const explicitLast = message.reason === 'offline' ? normalizeLastKnownRecord(message.last_known, message.client) : null;
+  if (!current && !explicitLast) return current;
+  const base: LiveDataResponse = current || { online: [], clients: [], data: {}, count: 0, timestamp: 0 };
+  const { [message.client]: removed, ...data } = base.data;
+  const online = base.online.filter(uuid => uuid !== message.client);
+  const { [message.client]: previousLast, ...lastKnown } = base.last_known || {};
+  if (message.reason === 'offline') {
+    const client = base.clients.find(client => client.uuid === message.client);
+    const previous = normalizeLastKnownRecord({ ...client, ...removed, uuid: message.client,
+      name: client?.name, lastReportTime: client?.lastReportTime ?? removed?.lastReportTime }, message.client) || previousLast;
+    const last = explicitLast && (!previous || explicitLast.lastReportTime >= previous.lastReportTime) ? explicitLast : previous;
+    if (last) lastKnown[message.client] = last;
+  }
 
   return {
-    ...current,
+    ...base,
     online,
-    clients: current.clients.filter(client => client.uuid !== message.client),
+    clients: base.clients.filter(client => client.uuid !== message.client),
     data,
+    last_known: lastKnown,
     count: online.length,
     timestamp: message.timestamp,
   };
@@ -225,7 +254,7 @@ export function createLiveSnapshotScope(owner: object = {}) {
     finishRead(request: LiveSnapshotRead) { if (pending === request) pending = null; },
     complete(request: LiveSnapshotRead, snapshot: LiveDataResponse) {
       if (!active || pending !== request) return undefined;
-      current = merge(mergePrior(snapshot, request.priorUpdates), request.updates);
+      current = merge(mergePrior({ ...snapshot, last_known: snapshot.last_known || {} }, request.priorUpdates), request.updates);
       hasSnapshot = true;
       initialUpdates = [];
       pending = null;
@@ -236,12 +265,12 @@ export function createLiveSnapshotScope(owner: object = {}) {
       pending = null;
       initialUpdates = [];
       hasSnapshot = true;
-      current = snapshot;
+      current = { ...snapshot, last_known: snapshot.last_known || {} };
       return current;
     },
     seed(snapshot: LiveDataResponse) {
       if (!active || hasSnapshot) return undefined;
-      current = mergePrior(snapshot, initialUpdates);
+      current = mergePrior({ ...snapshot, last_known: snapshot.last_known || {} }, initialUpdates);
       initialUpdates = [];
       hasSnapshot = true;
       return current;
@@ -264,6 +293,9 @@ export function createLiveSnapshotScope(owner: object = {}) {
 
 interface LiveDataContextType {
   liveData: LiveDataResponse | null;
+  snapshotReady: boolean;
+  clientMetadata: ClientInfo[] | undefined;
+  setClientMetadata: React.Dispatch<React.SetStateAction<ClientInfo[] | undefined>>;
   loading: boolean;
   error: string | null;
   refresh: () => void;
@@ -271,6 +303,9 @@ interface LiveDataContextType {
 
 const LiveDataContext = createContext<LiveDataContextType>({
   liveData: null,
+  snapshotReady: false,
+  clientMetadata: undefined,
+  setClientMetadata: () => {},
   loading: true,
   error: null,
   refresh: () => {},
@@ -287,11 +322,20 @@ interface LiveDataProviderProps {
 }
 
 export function LiveDataProvider({ children, enabled = true, viewer = true }: LiveDataProviderProps) {
-  const { authLoading, isAuthenticated } = useAuth();
+  const { authLoading, isAuthenticated, user } = useAuth();
   const includeHidden = !authLoading && isAuthenticated;
-  const scopeOwner = useMemo(() => ({}), [authLoading, enabled, includeHidden, viewer]);
+  const scopeOwner = useMemo(() => ({}), [authLoading, enabled, includeHidden, viewer, user?.uuid]);
   const liveScopeRef = useRef<ReturnType<typeof createLiveSnapshotScope> | null>(null);
   const [liveData, setLiveData] = useState<LiveDataResponse | null>(null);
+  const [clientMetadataState, setClientMetadataState] = useState<{ owner: object; clients: ClientInfo[] | undefined }>({ owner: scopeOwner, clients: undefined });
+  const setClientMetadata = useCallback<LiveDataContextType['setClientMetadata']>((update) => {
+    if (!liveScopeRef.current?.active || liveScopeRef.current.owner !== scopeOwner) return;
+    setClientMetadataState(current => {
+      if (!liveScopeRef.current?.active || liveScopeRef.current.owner !== scopeOwner) return current;
+      const previous = current.owner === scopeOwner ? current.clients : undefined;
+      return { owner: scopeOwner, clients: typeof update === 'function' ? update(previous) : update };
+    });
+  }, [scopeOwner]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -312,6 +356,8 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     liveScopeRef.current = scope;
     metadataVersionRef.current = null;
     setLiveData(null);
+    setClientMetadataState({ owner: scopeOwner,
+      clients: !authLoading && !includeHidden && enabled && viewer ? getCachedPublicBootstrap()?.clients : undefined });
     setError(null);
     return () => {
       scope.dispose();
@@ -382,6 +428,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
 
     let cancelled = false;
     let settingsRequest = 0;
+    let pendingMetadataUpdates: PublicDataUpdateDetail[] | null = null;
     const scope = liveScopeRef.current;
     if (!scope) return;
 
@@ -410,11 +457,16 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
 
     const loadSettings = (fresh = false) => {
       const request = ++settingsRequest;
+      const updates: PublicDataUpdateDetail[] = [];
+      pendingMetadataUpdates = updates;
       const liveRequest = scope.beginRead();
       const isCurrent = () => !cancelled && request === settingsRequest;
       fetchPublicBootstrap({ ...(fresh ? { cache: 'reload' as const, cacheBust: true } : {}), includeHidden })
         .then((payload) => {
           if (isCurrent()) {
+            if (payload.clients !== undefined) {
+              setClientMetadata(updates.reduce((clients, update) => mergePublicClientPatch(clients, update, { includeHidden }), payload.clients));
+            }
             applyBootstrap(payload, liveRequest);
           }
         })
@@ -431,7 +483,8 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
                 pollConfigRef.current = DEFAULT_LIVE_POLL_CONFIG;
               }
             });
-        });
+        })
+        .finally(() => { if (isCurrent()) pendingMetadataUpdates = null; });
     };
 
     const handleSettingsUpdated = (event: Event) => {
@@ -439,6 +492,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       const detail = event instanceof CustomEvent ? event.detail : null;
       if (detail && typeof detail === 'object') {
         settingsRequest += 1;
+        pendingMetadataUpdates = null;
         applySettings(detail);
       } else {
         loadSettings();
@@ -448,7 +502,16 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     loadSettings();
     window.addEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
     const unsubscribePublicData = subscribePublicDataUpdated((detail) => {
-      if (detail?.clients) return;
+      if (detail?.clients) {
+        pendingMetadataUpdates?.push(detail);
+        setClientMetadata(current => current === undefined ? undefined : mergePublicClientPatch(current, detail, { includeHidden }));
+        for (const client of detail.clients.remove || []) {
+          const patched = scope.patch({ type: 'remove', client, timestamp: Date.now() });
+          if (patched !== undefined) setLiveData(patched);
+        }
+        return;
+      }
+      setClientMetadata(undefined);
       loadSettings(true);
     });
 
@@ -457,7 +520,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       window.removeEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
       unsubscribePublicData();
     };
-  }, [authLoading, enabled, includeHidden, viewer]);
+  }, [authLoading, enabled, includeHidden, viewer, setClientMetadata]);
 
   useEffect(() => {
     if (authLoading) {
@@ -863,8 +926,11 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     };
   }, [authLoading, enabled, fetchLiveData, viewer]);
 
+  const ownsScope = !authLoading && liveScopeRef.current?.owner === scopeOwner;
   return (
-    <LiveDataContext.Provider value={{ liveData, loading, error, refresh }}>
+    <LiveDataContext.Provider value={{ liveData: ownsScope ? liveData : null, snapshotReady: Boolean(ownsScope && liveScopeRef.current?.hasSnapshot),
+      clientMetadata: ownsScope && clientMetadataState.owner === scopeOwner ? clientMetadataState.clients : undefined,
+      setClientMetadata, loading, error, refresh }}>
       {children}
     </LiveDataContext.Provider>
   );

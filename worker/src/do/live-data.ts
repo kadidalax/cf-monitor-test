@@ -36,6 +36,14 @@ interface ClientState {
   lastReportTime: number; // 服务端接收时间，用于判活；不采用 Agent 时钟。
   lastReport: MonitorReportPayload; // timestamp 保留采样时间，历史记录使用它。
   expiresAt?: number;
+  transport?: 'http' | 'ws'; // Absent on legacy HTTP snapshots.
+}
+
+interface ReportLifecycle {
+  clientId: string;
+  receivedAt: number;
+  removalVersion: number;
+  restoreVersion: number;
 }
 
 const RECORD_PERSIST_INTERVAL_MS = 120_000;
@@ -122,6 +130,7 @@ interface LiveSnapshot {
   online: string[];
   clients: LiveSnapshotClient[];
   data: Record<string, LiveSnapshotClient>;
+  last_known: Record<string, LiveSnapshotClient>;
   count: number;
   timestamp: number;
   metadata_version?: string;
@@ -400,6 +409,10 @@ export class LiveDataDO {
   private sessionRoles: Map<string, SessionRole>;
   private viewerExpiresAt: Map<string, number>;
   private clients: Map<string, ClientState>; // 在线客户端状态
+  private lastKnownClients = new Map<string, ClientState>();
+  private clientReportWrites = new Map<string, Promise<unknown>>();
+  private clientRemovalVersions = new Map<string, number>();
+  private restoreVersion = 0;
   private httpClientsReady: Promise<void>;
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
@@ -430,6 +443,8 @@ export class LiveDataDO {
   private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
   private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
+  private adminClientsSnapshot: AdminClientsSnapshot | null = null;
+  private adminClientMetadata = new Map<string, JsonObject>();
   private trafficResetDays = new Map<string, number>();
   private trafficResetDaysAt = 0;
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
@@ -450,24 +465,54 @@ export class LiveDataDO {
   }
 
   private async hydrateHttpClients(): Promise<void> {
+    await this.readAdminClientsSnapshot();
     const now = Date.now();
     const stored = await this.state.storage.list<ClientState>({ prefix: HTTP_LIVE_STATE_PREFIX });
     const obsolete: string[] = [];
     for (const [key, client] of stored) {
       if (
         !client || typeof client.uuid !== 'string' || key !== `${HTTP_LIVE_STATE_PREFIX}${client.uuid}` ||
-        !Number.isFinite(client.lastReportTime) || !Number.isFinite(client.expiresAt) ||
-        client.expiresAt! <= now || !isObjectPayload(client.lastReport) || this.clients.has(client.uuid)
+        !Number.isFinite(client.lastReportTime) || !isObjectPayload(client.lastReport) ||
+        (client.transport !== 'ws' && !Number.isFinite(client.expiresAt))
       ) {
         obsolete.push(key);
         continue;
       }
-      this.clients.set(client.uuid, {
+      const restored = this.controlledClientState({
         ...client,
         name: typeof client.name === 'string' ? client.name : client.uuid,
         hidden: Boolean(client.hidden),
         lastReport: compactLiveReport(client.lastReport),
       });
+      if (!restored) {
+        obsolete.push(key);
+        continue;
+      }
+      this.lastKnownClients.set(client.uuid, restored);
+      // A stored WebSocket report is historical state. Only an accepted socket
+      // attachment can restore its online presence.
+      if (client.transport !== 'ws' && client.expiresAt! > now && !this.clients.has(client.uuid)) {
+        this.clients.set(client.uuid, restored);
+      }
+    }
+    for (const [uuid, client] of this.clients) {
+      let current = this.controlledClientState(client);
+      if (!current) {
+        this.clients.delete(uuid);
+        continue;
+      }
+      const retained = this.lastKnownClients.get(uuid);
+      if (retained && retained.lastReportTime > current.lastReportTime) {
+        // A socket can remain attached while a newer HTTP fallback succeeds.
+        // Its attachment proves the connection, not that its metrics are newest.
+        current = { ...current, lastReport: retained.lastReport, lastReportTime: retained.lastReportTime };
+      }
+      this.clients.set(uuid, current);
+      if (!retained || retained.lastReportTime < current.lastReportTime) {
+        // Upgrade a pre-existing socket attachment to the same durable format.
+        await this.persistClientSnapshot(current);
+        this.lastKnownClients.set(uuid, current);
+      }
     }
     for (let offset = 0; offset < obsolete.length; offset += 128) {
       await this.state.storage.delete(obsolete.slice(offset, offset + 128));
@@ -475,7 +520,7 @@ export class LiveDataDO {
     if (stored.size) await this.scheduleExpiryAlarm(now);
   }
 
-  private async persistHttpClient(client: ClientState): Promise<void> {
+  private async persistClientSnapshot(client: ClientState): Promise<void> {
     await this.state.storage.put(`${HTTP_LIVE_STATE_PREFIX}${client.uuid}`, {
       ...client,
       lastReport: compactLiveReport(client.lastReport),
@@ -585,6 +630,7 @@ export class LiveDataDO {
           lastReportTime: attachment.lastReportTime,
           lastReport: attachment.lastReport,
           expiresAt: attachment.expiresAt,
+          transport: 'ws',
         });
       }
     }
@@ -627,25 +673,60 @@ export class LiveDataDO {
     return safeReport as MonitorReportPayload;
   }
 
+  private controlledClientState(client: ClientState): ClientState | null {
+    const metadata = this.adminClientMetadata.get(client.uuid);
+    if (this.adminClientsSnapshot && (this.adminClientsSnapshot.removed?.includes(client.uuid)
+      || (this.adminClientsSnapshot.complete !== false && !metadata))) return null;
+    return metadata ? {
+      ...client,
+      name: typeof metadata.name === 'string' ? metadata.name : client.name,
+      hidden: booleanField(metadata, 'hidden'),
+    } : client;
+  }
+
+  private projectSnapshotClient(client: ClientState, includeHidden: boolean, retained = false): LiveSnapshotClient | null {
+    const current = this.controlledClientState(client);
+    if (!current || (!includeHidden && current.hidden)) return null;
+    return {
+      ...this.projectViewerReport(current.uuid, current.lastReport, !retained && includeHidden),
+      uuid: current.uuid,
+      name: current.name,
+      lastReportTime: current.lastReportTime,
+    };
+  }
+
+  private projectViewerReport(uuid: string, report: MonitorReportPayload, includeHidden: boolean): JsonObject {
+    const projected: JsonObject = { ...(includeHidden ? report : toPublicReport(report)) };
+    // Agent extensions have no authority over administrative ordering.
+    delete projected.sort_order;
+    const order = this.adminClientMetadata.get(uuid)?.sort_order;
+    if (typeof order === 'number' && Number.isFinite(order)) projected.sort_order = order;
+    return projected;
+  }
+
   private buildSnapshot(includeHidden = false): LiveSnapshot {
     const now = Date.now();
     const onlineClients = Array.from(this.clients.values())
-      .filter(c => (includeHidden || !c.hidden) && (!c.expiresAt || c.expiresAt > now))
-      .map(c => ({
-        ...(includeHidden ? c.lastReport : toPublicReport(c.lastReport)),
-        uuid: c.uuid,
-        name: c.name,
-        lastReportTime: c.lastReportTime,
-      }));
+      .filter(c => !c.expiresAt || c.expiresAt > now)
+      .map(c => this.projectSnapshotClient(c, includeHidden))
+      .filter((client): client is LiveSnapshotClient => client !== null);
     const liveData = onlineClients.reduce<Record<string, LiveSnapshotClient>>((acc, client) => {
       acc[client.uuid] = client;
       return acc;
     }, {});
 
+    const onlineIds = new Set(onlineClients.map(client => client.uuid));
+    const lastKnown: Record<string, LiveSnapshotClient> = {};
+    for (const client of this.lastKnownClients.values()) {
+      if (onlineIds.has(client.uuid)) continue;
+      const projected = this.projectSnapshotClient(client, includeHidden, true);
+      if (projected) lastKnown[client.uuid] = projected;
+    }
     const snapshot: LiveSnapshot = {
       online: onlineClients.map(c => c.uuid),
       clients: onlineClients,
       data: liveData,
+      last_known: lastKnown,
       count: onlineClients.length,
       timestamp: Date.now(),
     };
@@ -692,56 +773,97 @@ export class LiveDataDO {
         hidden: booleanField(metadata, 'hidden'),
       };
     }
-    const current = this.clients.get(clientId);
+    const current = this.clients.get(clientId) || this.lastKnownClients.get(clientId);
     return current ? { name: current.name, hidden: current.hidden } : { name, hidden };
   }
 
+  private isReportCurrent(lifecycle: ReportLifecycle): boolean {
+    return lifecycle.removalVersion === (this.clientRemovalVersions.get(lifecycle.clientId) || 0)
+      && lifecycle.restoreVersion === this.restoreVersion;
+  }
+
+  private assertReportCurrent(lifecycle: ReportLifecycle): void {
+    if (!this.isReportCurrent(lifecycle)) throw new Error('Client authorization was replaced');
+  }
+
+  private async runClientReport<T>(clientId: string, work: (lifecycle: ReportLifecycle) => Promise<T>): Promise<T> {
+    const lifecycle: ReportLifecycle = {
+      clientId, receivedAt: Date.now(),
+      removalVersion: this.clientRemovalVersions.get(clientId) || 0,
+      restoreVersion: this.restoreVersion,
+    };
+    const previous = this.clientReportWrites.get(clientId) || Promise.resolve();
+    // Reserve the entire report/batch before its first external probe await.
+    // The final live write and ACK stay inside this same per-node reservation.
+    const pending = previous.catch(() => {}).then(() => {
+      this.assertReportCurrent(lifecycle);
+      return work(lifecycle);
+    });
+    this.clientReportWrites.set(clientId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.clientReportWrites.get(clientId) === pending) {
+        this.clientReportWrites.delete(clientId);
+        this.clientRemovalVersions.delete(clientId);
+      }
+    }
+  }
+
   private async updateClientReport(
-    clientId: string,
+    lifecycle: ReportLifecycle,
     clientName: string,
     hidden: boolean,
     data: unknown,
-    now: number,
     expiresAt?: number,
     ws?: WebSocket,
     network?: ReportNetworkMetadata,
   ): Promise<MonitorReportPayload> {
+    this.assertReportCurrent(lifecycle);
+    const { clientId, receivedAt: now } = lifecycle;
     const report = this.sanitizeReport(
       normalizeMonitorReport(data),
       network || (ws ? this.getSessionAttachment(ws) || undefined : undefined),
     );
-    const previous = this.clients.get(clientId);
-    const wasVisible = this.isVisibleClient(previous, now);
-    const next: ClientState = {
-      uuid: clientId,
-      name: clientName,
-      hidden,
-      lastReportTime: now,
-      lastReport: report,
-      expiresAt,
-    };
-
-    if (!ws && expiresAt !== undefined) await this.persistHttpClient(next);
-    this.clients.set(clientId, next);
-    if (ws) this.rememberAgentReportAttachment(ws, clientId, clientName, hidden, report, now, expiresAt);
-    this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, clientName, hidden, report, now));
-
-    if (this.isVisibleClient(next, now) || next.hidden) {
-      this.broadcastToViewers({
-        type: 'update',
-        client: clientId,
-        name: clientName,
-        data: report,
-        timestamp: now,
-      }, next.hidden ? 'admin' : 'all');
-    } else if (wasVisible) {
-      this.broadcastToViewers({
-        type: 'remove',
-        client: clientId,
-        timestamp: now,
-      }, 'public');
+    let wroteSnapshot = false;
+    let next: ClientState;
+    try {
+      const control = await this.resolveReportClientControl(clientId, clientName, hidden);
+      this.assertReportCurrent(lifecycle);
+      next = { uuid: clientId, ...control, lastReportTime: now, lastReport: report, expiresAt, transport: ws ? 'ws' : 'http' };
+      while (true) {
+        await this.persistClientSnapshot(next);
+        wroteSnapshot = true;
+        this.assertReportCurrent(lifecycle);
+        const current = await this.resolveReportClientControl(clientId, next.name, next.hidden);
+        this.assertReportCurrent(lifecycle);
+        if (current.name === next.name && current.hidden === next.hidden) break;
+        next = { ...next, ...current };
+      }
+    } catch (error) {
+      // A delete/restore may have completed while an old write was pending.
+      // Retire that write before a newer report in this node's queue proceeds.
+      if (wroteSnapshot) {
+        const previous = this.lastKnownClients.get(clientId);
+        const retained = this.isReportCurrent(lifecycle) && previous ? this.controlledClientState(previous) : null;
+        if (retained) await this.persistClientSnapshot(retained);
+        else await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${clientId}`);
+      }
+      throw error;
     }
 
+    this.lastKnownClients.set(clientId, { ...next, lastReport: compactLiveReport(next.lastReport) });
+    const online = !ws || (this.sessions.get(clientId) === ws && ws.readyState === WebSocket.READY_STATE_OPEN);
+    if (online) {
+      this.clients.set(clientId, next);
+      if (ws) this.rememberAgentReportAttachment(ws, clientId, next.name, next.hidden, report, now, expiresAt);
+      this.broadcastToViewers({
+        type: 'update', client: clientId, name: next.name, data: report, timestamp: now,
+      }, next.hidden ? 'admin' : 'all');
+    } else {
+      this.broadcastOfflineClient(next, Date.now());
+    }
+    this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, next.name, next.hidden, report, now));
     return report;
   }
 
@@ -788,8 +910,9 @@ export class LiveDataDO {
   }
 
   private applyInferredNetworkMetadataToLiveReport(clientId: string, patch: JsonObject, now: number): void {
-    const current = this.clients.get(clientId);
-    if (!current) return;
+    const source = this.clients.get(clientId);
+    const current = source ? this.controlledClientState(source) : null;
+    if (!current || (current.expiresAt !== undefined && current.expiresAt <= now)) return;
 
     const nextReport: MonitorReportPayload = { ...current.lastReport };
     let changed = false;
@@ -812,6 +935,7 @@ export class LiveDataDO {
 
     const next = { ...current, lastReport: nextReport };
     this.clients.set(clientId, next);
+    this.lastKnownClients.set(clientId, { ...next, lastReport: compactLiveReport(next.lastReport) });
     const session = this.sessions.get(clientId);
     if (session && this.sessionRoles.get(clientId) === 'agent') {
       this.rememberAgentReportAttachment(session, clientId, current.name, current.hidden, nextReport, current.lastReportTime, current.expiresAt);
@@ -1125,14 +1249,18 @@ export class LiveDataDO {
       if (!client.expiresAt || client.expiresAt > now) continue;
 
       this.clients.delete(uuid);
-      await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${uuid}`);
-      this.broadcastToViewers({
-        type: 'remove',
-        client: uuid,
-        timestamp: now,
-      }, client.hidden ? 'admin' : 'all');
+      this.broadcastOfflineClient(client, now);
     }
 
+  }
+
+  private broadcastOfflineClient(client: ClientState, now: number): void {
+    const current = this.controlledClientState(client);
+    if (!current) return;
+    this.broadcastToViewers({
+      type: 'remove', client: current.uuid, reason: 'offline', timestamp: now,
+      last_known: this.projectSnapshotClient(current, true, true),
+    }, current.hidden ? 'admin' : 'all');
   }
 
   private async scheduleExpiryAlarm(now: number) {
@@ -1174,11 +1302,13 @@ export class LiveDataDO {
       if (audience === 'public' && includeHidden) continue;
       try {
         if (includeHidden) {
-          adminPayload ||= JSON.stringify(message);
+          adminPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
+            ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, true) }
+            : message);
           session.send(adminPayload);
         } else {
           publicPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
-            ? { ...message, data: toPublicReport(message.data as MonitorReportPayload) }
+            ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, false) }
             : message);
           session.send(publicPayload);
         }
@@ -1308,11 +1438,7 @@ export class LiveDataDO {
 
     this.clients.delete(attachment.clientId);
     if (existing) {
-      this.broadcastToViewers({
-        type: 'remove',
-        client: attachment.clientId,
-        timestamp: Date.now(),
-      }, existing.hidden ? 'admin' : 'all');
+      this.broadcastOfflineClient(existing, Date.now());
     }
   }
 
@@ -1373,55 +1499,63 @@ export class LiveDataDO {
       if (client) this.broadcastMetadataChanged({ clients: { upsert: [client] } });
       return Response.json({ success: true });
     }
-    const current = this.clients.get(uuid);
-    if (current) {
-      const wasVisible = !current.hidden;
-      current.name = typeof meta.name === 'string' ? meta.name : current.name;
-      current.hidden = booleanField(meta, 'hidden');
-      if (current.expiresAt !== undefined) await this.persistHttpClient(current);
-      this.clients.set(uuid, current);
+    const previous = this.clients.get(uuid) || this.lastKnownClients.get(uuid);
+    const client = isObjectPayload(meta.client)
+      ? meta.client
+      : { uuid, name: typeof meta.name === 'string' ? meta.name : previous?.name || uuid, hidden: booleanField(meta, 'hidden') };
+    // The durable control row owns name/visibility for both live and retained
+    // reports, so rewriting a possibly newer metric snapshot is unnecessary.
+    await this.upsertAdminClientSnapshot(client);
+    const cached = this.clients.get(uuid);
+    const current = cached && (!cached.expiresAt || cached.expiresAt > Date.now()) ? cached : undefined;
+    if (cached && !current) this.clients.delete(uuid);
+    const retained = cached || this.lastKnownClients.get(uuid);
+    const next = retained ? this.controlledClientState(retained) : null;
+    if (next) {
+      this.lastKnownClients.set(uuid, { ...next, lastReport: compactLiveReport(next.lastReport) });
+      if (current) this.clients.set(uuid, next);
       const session = this.sessions.get(uuid);
-      if (session?.readyState === WebSocket.READY_STATE_OPEN) {
+      if (current && session?.readyState === WebSocket.READY_STATE_OPEN) {
         this.rememberAgentReportAttachment(
           session,
           uuid,
-          current.name,
-          current.hidden,
-          current.lastReport,
-          current.lastReportTime,
-          current.expiresAt,
+          next.name,
+          next.hidden,
+          next.lastReport,
+          next.lastReportTime,
+          next.expiresAt,
         );
       }
 
-      if (wasVisible && current.hidden) {
+      if (next.hidden) {
         this.broadcastToViewers({
           type: 'remove',
           client: uuid,
           timestamp: Date.now(),
         }, 'public');
-        if (current.lastReport) {
+        if (current) {
           this.broadcastToViewers({
             type: 'update',
             client: uuid,
-            name: current.name,
-            data: current.lastReport,
-            timestamp: current.lastReportTime,
+            name: next.name,
+            data: next.lastReport,
+            timestamp: next.lastReportTime,
           }, 'admin');
+        } else {
+          this.broadcastOfflineClient(next, Date.now());
         }
-      } else if (!current.hidden && current.lastReport) {
+      } else if (current) {
         this.broadcastToViewers({
           type: 'update',
           client: uuid,
-          name: current.name,
-          data: current.lastReport,
-          timestamp: current.lastReportTime,
+          name: next.name,
+          data: next.lastReport,
+          timestamp: next.lastReportTime,
         }, 'all');
+      } else {
+        this.broadcastOfflineClient(next, Date.now());
       }
     }
-    const client = isObjectPayload(meta.client)
-      ? meta.client
-      : { uuid, name: current?.name || uuid, hidden: booleanField(meta, 'hidden') };
-    await this.upsertAdminClientSnapshot(client);
     this.broadcastMetadataChanged({
       clients: { upsert: [{ ...client, hidden: booleanField(meta, 'hidden') }] },
     });
@@ -1443,7 +1577,10 @@ export class LiveDataDO {
     }
 
     const keepMetadata = meta.keepMetadata === true;
-    const existing = this.clients.get(meta.uuid);
+    if (this.clientReportWrites.has(meta.uuid)) {
+      this.clientRemovalVersions.set(meta.uuid, (this.clientRemovalVersions.get(meta.uuid) || 0) + 1);
+    }
+    const existing = this.clients.get(meta.uuid) || this.lastKnownClients.get(meta.uuid);
     const session = this.sessions.get(meta.uuid);
     if (session && session.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -1455,6 +1592,7 @@ export class LiveDataDO {
     this.sessions.delete(meta.uuid);
     this.sessionRoles.delete(meta.uuid);
     this.clients.delete(meta.uuid);
+    this.lastKnownClients.delete(meta.uuid);
     await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`);
     await this.removeAgentAuthByUuid(String(meta.uuid));
     if (!keepMetadata) {
@@ -1495,6 +1633,8 @@ export class LiveDataDO {
     const snapshot = await this.state.storage.get<AdminClientsSnapshot>(ADMIN_CLIENTS_SNAPSHOT_KEY);
     if (!snapshot || !Array.isArray(snapshot.clients)) {
       this.adminClientsUpdatedAt = 0;
+      this.adminClientsSnapshot = null;
+      this.adminClientMetadata.clear();
       return null;
     }
     const normalized = {
@@ -1505,8 +1645,19 @@ export class LiveDataDO {
         ? snapshot.removed.filter((uuid): uuid is string => typeof uuid === 'string' && uuid.trim() !== '')
         : [],
     };
-    this.adminClientsUpdatedAt = normalized.updatedAt;
+    this.rememberAdminClientsSnapshot(normalized);
     return normalized;
+  }
+
+  private rememberAdminClientsSnapshot(snapshot: AdminClientsSnapshot): void {
+    this.adminClientsSnapshot = snapshot;
+    this.adminClientsUpdatedAt = snapshot.updatedAt;
+    this.adminClientMetadata = new Map(snapshot.clients.map(client => [String(client.uuid), client]));
+  }
+
+  private async storeAdminClientsSnapshot(snapshot: AdminClientsSnapshot): Promise<void> {
+    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, snapshot);
+    this.rememberAdminClientsSnapshot(snapshot);
   }
 
   private async writeAdminClientsSnapshot(request: Request): Promise<Response> {
@@ -1537,8 +1688,7 @@ export class LiveDataDO {
       });
     }
     const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
-    this.adminClientsUpdatedAt = updatedAt;
-    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+    await this.storeAdminClientsSnapshot({
       clients: nextClients, updatedAt, removed, complete: reorder && previous ? previous.complete !== false : true,
     });
     return Response.json({ success: true, count: nextClients.length });
@@ -1551,8 +1701,7 @@ export class LiveDataDO {
     if (!snapshot) {
       if (!fromAgent) {
         const updatedAt = Math.max(Date.now(), (this.adminClientsUpdatedAt || 0) + 1);
-        this.adminClientsUpdatedAt = updatedAt;
-        await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+        await this.storeAdminClientsSnapshot({
           clients: [safe], updatedAt, removed: [], complete: false,
         });
         return safe;
@@ -1571,8 +1720,7 @@ export class LiveDataDO {
     const merged = { ...(previous || {}), ...safe };
     byUuid.set(String(safe.uuid), merged);
     const updatedAt = Math.max(Date.now(), (snapshot.updatedAt || 0) + 1);
-    this.adminClientsUpdatedAt = updatedAt;
-    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+    await this.storeAdminClientsSnapshot({
       clients: [...byUuid.values()],
       updatedAt,
       removed: (snapshot?.removed || []).filter(item => item !== safe.uuid),
@@ -1584,8 +1732,7 @@ export class LiveDataDO {
   private async removeAdminClientSnapshot(uuid: string): Promise<void> {
     const snapshot = await this.readAdminClientsSnapshot();
     const updatedAt = Math.max(Date.now(), (snapshot?.updatedAt || 0) + 1);
-    this.adminClientsUpdatedAt = updatedAt;
-    await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, {
+    await this.storeAdminClientsSnapshot({
       clients: (snapshot?.clients || []).filter(client => client.uuid !== uuid),
       updatedAt,
       removed: [uuid, ...(snapshot?.removed || []).filter(item => item !== uuid)].slice(0, 200),
@@ -1609,59 +1756,51 @@ export class LiveDataDO {
       });
     }
 
-    const network: ReportNetworkMetadata = {
-      sourceIp: stringField(payload, 'source_ip'),
-      region: stringField(payload, 'region'),
-    };
-    const now = Date.now();
-    const ttlMs = this.boundedHttpTtlMs(payload.ttl_ms);
-    const control = await this.resolveReportClientControl(payload.uuid,
-      typeof payload.name === 'string' && payload.name.trim() !== '' ? payload.name.trim() : payload.uuid,
-      booleanField(payload, 'hidden'));
-    const clientName = control.name;
-    const hidden = control.hidden;
-    const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
-    for (let index = 0; index < reports.length; index += 1) {
-      const rawReport = reports[index];
-      const reportTime = this.reportTimestamp(rawReport, now);
-      const isLast = index === reports.length - 1;
-      if (isLast) {
-        const report = await this.updateClientReport(
-          payload.uuid,
-          clientName,
-          hidden,
-          rawReport,
-          now,
-          now + ttlMs,
-          undefined,
-          network,
-        );
-        reportsToPersist.push({ report, reportTime });
-      } else {
-        reportsToPersist.push({ report: rawReport, reportTime });
+    const clientId = payload.uuid;
+    return this.runClientReport(clientId, async lifecycle => {
+      const network: ReportNetworkMetadata = {
+        sourceIp: stringField(payload, 'source_ip'),
+        region: stringField(payload, 'region'),
+      };
+      const now = lifecycle.receivedAt;
+      const ttlMs = this.boundedHttpTtlMs(payload.ttl_ms);
+      const control = await this.resolveReportClientControl(clientId,
+        typeof payload.name === 'string' && payload.name.trim() !== '' ? payload.name.trim() : clientId,
+        booleanField(payload, 'hidden'));
+      this.assertReportCurrent(lifecycle);
+      const clientName = control.name;
+      const hidden = control.hidden;
+      const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
+      for (let index = 0; index < reports.length; index += 1) {
+        this.assertReportCurrent(lifecycle);
+        const rawReport = reports[index];
+        const reportTime = this.reportTimestamp(rawReport, now);
+        const isLast = index === reports.length - 1;
+        if (isLast) {
+          const report = await this.updateClientReport(
+            lifecycle, clientName, hidden, rawReport, now + ttlMs, undefined, network,
+          );
+          reportsToPersist.push({ report, reportTime });
+        } else {
+          reportsToPersist.push({ report: rawReport, reportTime });
+        }
+        await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
+        this.assertReportCurrent(lifecycle);
+        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
+        this.assertReportCurrent(lifecycle);
       }
-      try {
-        await this.persistPingResultsFromReport(payload.uuid, rawReport, reportTime);
-        await this.persistWebsiteProbeResultsFromReport(payload.uuid, rawReport, reportTime);
-      } catch {
-        return Response.json({ error: 'Probe persistence failed; retry this report' }, { status: 503 });
-      }
-    }
 
-    await this.scheduleExpiryAlarm(now);
-    const basicInfoReport = this.latestBasicInfoReport(reports);
-    if (basicInfoReport) {
-      try {
-        await this.syncBasicInfoFromReport(payload.uuid, clientName, hidden, basicInfoReport);
-      } catch {
-        return Response.json({ error: 'Basic information persistence failed; retry this report' }, { status: 503 });
+      await this.scheduleExpiryAlarm(now);
+      this.assertReportCurrent(lifecycle);
+      const basicInfoReport = this.latestBasicInfoReport(reports);
+      if (basicInfoReport) {
+        await this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport, lifecycle);
+        this.assertReportCurrent(lifecycle);
       }
-    }
-    this.runBackground('do_record_persistence', this.persistReportsSequential(payload.uuid, reportsToPersist));
+      this.runBackground('do_record_persistence', this.persistReportsSequential(clientId, reportsToPersist));
 
-    return new Response(JSON.stringify({ success: true, persisted: false, queued: true }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
+      return Response.json({ success: true, persisted: false, queued: true });
+    }).catch(() => Response.json({ error: 'Report was not accepted; retry this report' }, { status: 503 }));
   }
 
   private reportTimestamp(report: JsonObject, fallback: number): number {
@@ -1691,7 +1830,8 @@ export class LiveDataDO {
     return text !== '' && !isUnknownRegionValue(text);
   }
 
-  private async syncBasicInfoFromReport(clientId: string, _clientName: string, _hidden: boolean, report: JsonObject): Promise<void> {
+  private async syncBasicInfoFromReport(clientId: string, _clientName: string, _hidden: boolean, report: JsonObject, lifecycle?: ReportLifecycle): Promise<void> {
+    if (lifecycle) this.assertReportCurrent(lifecycle);
     const basicInfo = report.basic_info;
     if (!isObjectPayload(basicInfo)) return;
     const patch: Record<string, unknown> = {};
@@ -1720,6 +1860,10 @@ export class LiveDataDO {
       }
     }
     for (const field of numberFields) {
+      if (field === 'disk_total' && (basicInfo[field] === null || basicInfo[field] === 0)) {
+        patch[field] = 0;
+        continue;
+      }
       const value = Number(basicInfo[field]);
       if (Number.isFinite(value) && (field === 'swap_total' ? value >= 0 : value > 0)) {
         patch[field] = value;
@@ -1729,10 +1873,12 @@ export class LiveDataDO {
     const signature = JSON.stringify(patch);
     try {
       await this.runClientMetadataSync(clientId, async () => {
+        if (lifecycle) this.assertReportCurrent(lifecycle);
         if (this.basicInfoSignatures.get(clientId) === signature) return;
         const database = this.getQueryDatabase();
         if (!database) return;
         await db.updateClient(database, clientId, patch as Partial<db.Client>);
+        if (lifecycle) this.assertReportCurrent(lifecycle);
         const clientPatch = await this.upsertAdminClientSnapshot({ uuid: clientId, ...patch }, true);
         this.basicInfoSignatures.set(clientId, signature);
         if (clientPatch) this.broadcastMetadataChanged({ clients: { upsert: [clientPatch] } });
@@ -1850,6 +1996,7 @@ export class LiveDataDO {
     // A restore is a rare whole-configuration transition. Only local storage is
     // awaited in this gate; no database or other external I/O can hold it open.
     return this.state.blockConcurrencyWhile(async () => {
+      this.restoreVersion += 1;
       const previous = await this.readAdminClientsSnapshot();
       const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
       for (const prefix of [HTTP_LIVE_STATE_PREFIX, AGENT_AUTH_SNAPSHOT_PREFIX, AGENT_AUTH_UUID_PREFIX]) {
@@ -1859,8 +2006,7 @@ export class LiveDataDO {
           await this.state.storage.delete([...entries.keys()]);
         }
       }
-      await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, { clients, updatedAt, removed: [], complete: true });
-      this.adminClientsUpdatedAt = updatedAt;
+      await this.storeAdminClientsSnapshot({ clients, updatedAt, removed: [], complete: true });
       for (const socket of new Set([...this.sessions.values(), ...this.state.getWebSockets()])) {
         const attachment = this.getSessionAttachment(socket);
         if (attachment?.role !== 'agent') continue;
@@ -1869,6 +2015,7 @@ export class LiveDataDO {
         this.sessionRoles.delete(attachment.clientId);
       }
       this.clients.clear();
+      this.lastKnownClients.clear();
       this.networkMetadataSignatures.clear();
       this.basicInfoSignatures.clear();
       this.trafficResetDays.clear();
@@ -2069,37 +2216,45 @@ export class LiveDataDO {
   }
 
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: Record<string, unknown>, ws: WebSocket) {
-    const now = Date.now();
-    const control = await this.resolveReportClientControl(clientId, clientName, hidden);
-    clientName = control.name;
-    hidden = control.hidden;
     if (data?.type === 'ping_result') {
-      this.runBackground('ping_persistence', this.persistPingResult(clientId, data, now));
+      await this.resolveReportClientControl(clientId, clientName, hidden);
+      this.runBackground('ping_persistence', this.persistPingResult(clientId, data, Date.now()));
       return;
     }
 
-    if (data?.type === 'reports' && Array.isArray(data.reports)) {
-      const reports = data.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload);
+    return this.runClientReport(clientId, async lifecycle => {
+      const now = lifecycle.receivedAt;
+      const control = await this.resolveReportClientControl(clientId, clientName, hidden);
+      this.assertReportCurrent(lifecycle);
+      clientName = control.name;
+      hidden = control.hidden;
+      const reports = data?.type === 'reports' && Array.isArray(data.reports)
+        ? data.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
+        : [unwrapMonitorReportEnvelope(data)];
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
       for (let index = 0; index < reports.length; index += 1) {
+        this.assertReportCurrent(lifecycle);
         const rawReport = reports[index];
         const reportTime = this.reportTimestamp(rawReport, now);
         const isLast = index === reports.length - 1;
         if (isLast) {
-          const report = await this.updateClientReport(clientId, clientName, hidden, rawReport, now, undefined, ws);
+          const report = await this.updateClientReport(lifecycle, clientName, hidden, rawReport, undefined, ws);
           reportsToPersist.push({ report, reportTime });
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
         await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
+        this.assertReportCurrent(lifecycle);
         await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
+        this.assertReportCurrent(lifecycle);
       }
 
       const basicInfoReport = this.latestBasicInfoReport(reports);
       if (basicInfoReport) {
-        await this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport);
+        await this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport, lifecycle);
       }
-      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
+      this.assertReportCurrent(lifecycle);
+      if (this.sessions.get(clientId) === ws && ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
           ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
         } catch {
@@ -2108,28 +2263,7 @@ export class LiveDataDO {
       }
       this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(ws, now, false, false, clientId));
       this.runBackground('do_record_persistence', this.persistReportsSequential(clientId, reportsToPersist));
-      return;
-    }
-
-    const rawReport = unwrapMonitorReportEnvelope(data);
-    const reportTime = this.reportTimestamp(rawReport, now);
-    const report = await this.updateClientReport(clientId, clientName, hidden, rawReport, now, undefined, ws);
-    await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
-    await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
-    await this.syncBasicInfoFromReport(clientId, clientName, hidden, rawReport);
-
-    if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-      try {
-        ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
-      } catch {
-        // 忽略 ack 发送错误
-      }
-    }
-
-    // Ordinary sampled history remains asynchronous; acknowledged probe results
-    // above must already be saved or intentionally skipped by recording policy.
-    this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(ws, now, false, false, clientId));
-    this.runBackground('do_record_persistence', this.persistReport(clientId, report, reportTime));
+    });
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {

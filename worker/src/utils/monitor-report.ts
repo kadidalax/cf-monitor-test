@@ -11,8 +11,8 @@ export type MonitorReportPayload = JsonObject & {
   swap_total: number;
   load: number | null;
   temp: number | null;
-  disk: number;
-  disk_total: number;
+  disk: number | null;
+  disk_total: number | null;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -20,7 +20,7 @@ export type MonitorReportPayload = JsonObject & {
   process_count: number;
   connections: number;
   connections_udp: number;
-  uptime: number;
+  uptime: number | null;
   version: string;
   gpus: GPUInfo[];
 };
@@ -130,8 +130,8 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
     load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
     temp: measuredTemperature(report.temp),
-    disk: boundedNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
-    disk_total: boundedNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
+    disk: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
+    disk_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
     net_in: boundedNumber(0, MAX_COUNTER_VALUE, report.net_in, network.down),
     net_out: boundedNumber(0, MAX_COUNTER_VALUE, report.net_out, network.up),
     net_total_up: boundedNumber(0, MAX_COUNTER_VALUE, report.net_total_up, network.totalUp),
@@ -139,7 +139,7 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     process_count: boundedInteger(0, MAX_COUNT_VALUE, report.process_count, report.process),
     connections: boundedInteger(0, MAX_COUNT_VALUE, report.connections, connections.tcp),
     connections_udp: boundedInteger(0, MAX_COUNT_VALUE, report.connections_udp, connections.udp),
-    uptime: boundedNumber(0, MAX_UPTIME_SECONDS, report.uptime),
+    uptime: boundedNullableNumber(0, MAX_UPTIME_SECONDS, report.uptime),
     version: boundedString(report.version, 64),
     gpus,
   };
@@ -147,6 +147,9 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
 
 export function toMonitorRecord(client: string, time: string, input: unknown): MonitorRecord {
   const report = normalizeMonitorReport(input);
+  // The existing history schema is numeric. A zero total marks an unavailable
+  // disk sample, including a known quota whose usage could not be measured.
+  const diskAvailable = report.disk !== null && report.disk_total !== null;
 
   return {
     client,
@@ -159,8 +162,8 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     swap_total: report.swap_total || 0,
     load: report.load ?? null,
     temp: report.temp,
-    disk: report.disk || 0,
-    disk_total: report.disk_total || 0,
+    disk: diskAvailable ? report.disk || 0 : 0,
+    disk_total: diskAvailable ? report.disk_total || 0 : 0,
     net_in: report.net_in || 0,
     net_out: report.net_out || 0,
     net_total_up: report.net_total_up || 0,

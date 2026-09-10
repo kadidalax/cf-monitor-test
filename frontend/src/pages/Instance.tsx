@@ -24,7 +24,9 @@ import {
   type PublicGpuRecord,
   type PublicMonitorRecord,
 } from '../utils/publicHistory';
-import type { ClientInfo } from '../types';
+import type { ClientInfo, LiveDataMap } from '../types';
+import { formatLastReport, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
+import { filterMonitorNodes } from '../utils/monitorView';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart
@@ -47,17 +49,6 @@ const formatSpeed = (bytes: number): string => {
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
-};
-
-const formatUptime = (seconds: number): string => {
-  if (!seconds || seconds < 0) return '0s';
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (d > 0) return `${d}d ${h}h ${m}m`;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  return `${m}m ${s}s`;
 };
 
 type TimeRange = '1h' | '4h' | '24h' | '3d';
@@ -120,16 +111,14 @@ export default function Instance() {
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
   const [gpuRecords, setGpuRecords] = useState<PublicGpuRecord[]>([]);
   const pingSectionRef = useRef<HTMLDivElement | null>(null);
-  const { liveData } = useLiveData();
-  const liveRecord = uuid ? liveData?.data?.[uuid] : undefined;
+  const { liveData, snapshotReady } = useLiveData();
+  const liveView: LiveDataMap = useMemo(() => ({ online: liveData?.online || [], data: liveData?.data || {},
+    clients: liveData?.clients || [], last_known: liveData?.last_known || {}, statusReady: snapshotReady }), [liveData, snapshotReady]);
+  const liveRecord = uuid ? getNodeDisplayRecord(uuid, liveView) : undefined;
+  const nodeStatus = uuid ? getNodeStatus(uuid, liveView) : 'unknown';
   const onlineSet = useMemo(() => new Set(liveData?.online || []), [liveData?.online]);
   const groupedClients = useMemo(() => {
-    const sorted = [...clients].sort((a, b) => {
-      const aOnline = onlineSet.has(a.uuid);
-      const bOnline = onlineSet.has(b.uuid);
-      if (aOnline !== bOnline) return aOnline ? -1 : 1;
-      return (a.name || '').localeCompare(b.name || '');
-    });
+    const sorted = filterMonitorNodes(clients, liveView, { offlinePosition: 'last' });
 
     const groups = new Map<string, ClientInfo[]>();
     sorted.forEach((node) => {
@@ -145,7 +134,7 @@ export default function Instance() {
         return a.localeCompare(b);
       })
       .map(([group, nodes]) => ({ group, nodes }));
-  }, [clients, onlineSet]);
+  }, [clients, liveView]);
 
   // Load public client info.
   const loadClient = useCallback(async (signal?: AbortSignal) => {
@@ -295,17 +284,9 @@ export default function Instance() {
   if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
 
   const latestHistory = records.length > 0 ? records[records.length - 1] : null;
-  const liveRecordWithTime = liveRecord as { time?: unknown } | undefined;
-  const latestRecordTime = typeof liveRecordWithTime?.time === 'string'
-    ? liveRecordWithTime.time
-    : new Date(liveData?.timestamp || Date.now()).toISOString();
-  const latest = liveRecord
-    ? ({
-      ...(latestHistory || {}),
-      ...liveRecord,
-      time: latestRecordTime,
-    } as PublicMonitorRecord)
-    : latestHistory;
+  const latest = liveRecord || latestHistory;
+  const latestRecordTime = liveRecord ? getNodeLastReportTime(uuid || '', liveView)
+    : latestHistory ? Date.parse(latestHistory.time) : undefined;
 
   const chartTimeFormatter = (value: unknown) => {
     const dateInput = typeof value === 'string' || typeof value === 'number' || value instanceof Date ? value : '';
@@ -339,6 +320,7 @@ export default function Instance() {
           groups={groupedClients}
           activeUuid={uuid || ''}
           onlineSet={onlineSet}
+          statusReady={snapshotReady}
           liveData={liveData?.data || {}}
           onSelect={(nextUuid) => navigate(`/instance/${nextUuid}`)}
         />
@@ -358,13 +340,12 @@ export default function Instance() {
           <Heading size="5">{client.name}</Heading>
           {client.region && <Badge color="gray"><Globe size={12} /> {client.region}</Badge>}
           {client.group && <Badge color="purple"><Layers size={12} /> {client.group}</Badge>}
-          {latest && (
-            <Badge color="green" variant="solid">
-              <Activity size={12} /> 已运行 {formatUptime(latest.uptime)}
-            </Badge>
-          )}
+          <Badge color={nodeStatus === 'online' ? 'green' : nodeStatus === 'offline' ? 'red' : 'gray'} variant="solid">
+            <Activity size={12} /> {nodeStatus === 'online' ? `在线 · 已运行 ${formatMetricUptime(latest?.uptime)}` : nodeStatus === 'offline' ? '离线' : '确认中'}
+          </Badge>
+          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(latestRecordTime)} · 上报时已运行 {formatMetricUptime(latest?.uptime)}</Text>}
         </Flex>
-        <DetailsGrid client={client} live={latest} compact remark={client.public_remark} />
+        <DetailsGrid client={client} live={latest || undefined} compact remark={client.public_remark} />
       </Card>
 
       {/* Chart section */}
@@ -400,9 +381,9 @@ export default function Instance() {
           </Flex>
 
           <Box pt="3">
-            {chartTab === 'temp' && !recordsLoading && !recordsError && !chartData.some((point) => point.temp !== null) ? (
+            {(chartTab === 'temp' || chartTab === 'disk') && !recordsLoading && !recordsError && !chartData.some((point) => point[chartTab] !== null) ? (
               <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
-                <Text role="status" color="gray">温度数据不可用</Text>
+                <Text role="status" color="gray">{chartTab === 'temp' ? '温度数据不可用' : '磁盘使用量数据不可用'}</Text>
               </Flex>
             ) : chartTab === 'gpu' && gpuLoading ? (
               <Text role="status" color="gray">正在加载 GPU 历史…</Text>
@@ -532,7 +513,7 @@ export default function Instance() {
                       return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
                     }}
                   />
-                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
+                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' || chartTab === 'disk' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -660,12 +641,14 @@ function InstanceNodeSidebar({
   groups,
   activeUuid,
   onlineSet,
+  statusReady,
   liveData,
   onSelect,
 }: {
   groups: Array<{ group: string; nodes: ClientInfo[] }>;
   activeUuid: string;
   onlineSet: Set<string>;
+  statusReady: boolean;
   liveData: Record<string, Partial<PublicMonitorRecord>>;
   onSelect: (uuid: string) => void;
 }) {
@@ -678,7 +661,7 @@ function InstanceNodeSidebar({
           <Flex justify="between" align="center" className="instance-sidebar-header">
             <Box>
               <Text size="2" weight="bold" style={{ display: 'block' }}>节点列表</Text>
-              <Text size="1" color="gray">{onlineSet.size} / {total} 在线</Text>
+              <Text size="1" color="gray">{statusReady ? onlineSet.size : '—'} / {total} 在线</Text>
             </Box>
           </Flex>
 
@@ -702,14 +685,14 @@ function InstanceNodeSidebar({
                       title={node.name}
                     >
                       <span
-                        className={`instance-sidebar-status${isOnline ? ' is-online' : ' is-offline'}`}
+                        className={`instance-sidebar-status${isOnline ? ' is-online' : statusReady ? ' is-offline' : ''}`}
                         aria-hidden="true"
                       />
                       <Flag region={node.region} size={16} />
                       <span className="instance-sidebar-node-main">
                         <span className="instance-sidebar-node-name">{node.name}</span>
                         <span className="instance-sidebar-node-meta">
-                          {isOnline ? `CPU ${(live?.cpu ?? 0).toFixed(0)}%` : '离线'}
+                          {isOnline ? `CPU ${typeof live?.cpu === 'number' ? `${live.cpu.toFixed(0)}%` : '—'}` : statusReady ? '离线' : '确认中'}
                         </span>
                       </span>
                     </button>

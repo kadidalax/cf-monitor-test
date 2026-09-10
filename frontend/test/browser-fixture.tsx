@@ -12,8 +12,8 @@ import { AuthProvider, useAuth } from '../src/contexts/AuthContext';
 import { LiveDataProvider, useLiveData } from '../src/contexts/LiveDataContext';
 
 function LiveProbe() {
-  const { liveData, loading, error, refresh } = useLiveData();
-  return <><pre id="live-result">{JSON.stringify({ liveData, loading, error })}</pre><button id="live-refresh" onClick={refresh}>刷新实时快照</button></>;
+  const { liveData, clientMetadata, snapshotReady, loading, error, refresh } = useLiveData();
+  return <><pre id="live-result">{JSON.stringify({ liveData, clientMetadata, snapshotReady, loading, error })}</pre><button id="live-refresh" onClick={refresh}>刷新实时快照</button></>;
 }
 
 function LiveControls() {

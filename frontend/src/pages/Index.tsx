@@ -11,10 +11,10 @@ import {
   defaultStatusCardVisibility,
   StatusCardKey,
 } from '../utils/dashboardStatus';
-import { fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
+import { fetchPublicBootstrap } from '../utils/publicBootstrap';
 import { mergePublicClientPatch, normalizePublicClients } from '../utils/publicClients';
 import { fetchWithBootstrapRetry } from '../utils/api';
-import { getLocalStorageItem } from '../utils/browserStorage';
+import { getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
 import WebsiteMonitorList, { WebsiteMonitorSummary } from '../components/WebsiteMonitorList';
 import { subscribeWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../utils/websiteMonitorEvents';
 import { notifyPublicDataReady, subscribePublicDataUpdated } from '../utils/publicDataEvents';
@@ -28,8 +28,6 @@ type StatusCardsVisibility = Record<StatusCardKey, boolean>;
 
 const fallbackVisibility: StatusCardsVisibility = { ...defaultStatusCardVisibility };
 
-type OfflinePosition = 'first' | 'keep' | 'last';
-
 export const nodeCardGridTemplateColumns = 'repeat(auto-fill, 320px)';
 export const mobileNodeCardGridTemplateColumns = '1fr';
 
@@ -40,44 +38,12 @@ const nodeCardGridStyle = {
 const WEBSITE_MONITOR_REFRESH_MS = 120_000;
 const WEBSITE_MONITOR_PERIODS = [1, 24, 72] as const;
 
-function loadOfflinePosition(): OfflinePosition {
-  const saved = getLocalStorageItem('offlineServerPosition');
-  if (saved === 'first' || saved === 'keep' || saved === 'last') return saved;
-  return 'keep';
-}
-
 const statusIconByKey: Record<StatusCardKey, React.ReactNode> = {
   currentOnline: <RadioTower size={18} />,
   regionOverview: <Globe2 size={18} />,
   trafficOverview: <UploadCloud size={18} />,
   networkSpeed: <Signal size={18} />,
 };
-
-function liveClientsAsPublicClients(liveClients: LiveDataMap['clients'] = []): ClientInfo[] {
-  return liveClients
-    .filter((client): client is NonNullable<LiveDataMap['clients']>[number] => Boolean(client?.uuid))
-    .map((client) => ({
-      uuid: client.uuid,
-      name: client.name || client.uuid,
-      cpu_name: '',
-      cpu_cores: 0,
-      os: '',
-      arch: '',
-      region: client.region || '',
-      mem_total: 0,
-      swap_total: 0,
-      disk_total: 0,
-      group: '',
-      tags: '',
-      hidden: false,
-      price: 0,
-      billing_cycle: 0,
-      currency: '',
-      expired_at: '',
-      traffic_limit: 0,
-      traffic_limit_type: '',
-    }));
-}
 
 function mergeLiveClientMetadata(clients: ClientInfo[], liveClients: LiveDataMap['clients'] = []): ClientInfo[] {
   const liveByUuid = new Map((liveClients || []).map((client) => [client.uuid, client]));
@@ -231,17 +197,16 @@ export function ApiUnavailableNotice({ error }: { error: string }) {
 export default function Index() {
   const location = useLocation();
   const { authLoading, isAuthenticated } = useAuth();
-  const { liveData, error } = useLiveData();
+  const { liveData, error, snapshotReady, clientMetadata: clients, setClientMetadata: setClients } = useLiveData();
   const monitorMode = new URLSearchParams(location.search).get('view') === 'websites' ? 'websites' : 'servers';
-  const initialBootstrap = useMemo(() => getCachedPublicBootstrap(), []);
-  const [clients, setClients] = useState<ClientInfo[]>(() => initialBootstrap?.clients || []);
-  const [clientsLoading, setClientsLoading] = useState(initialBootstrap?.clients === undefined);
+  const [clientsLoading, setClientsLoading] = useState(clients === undefined);
   const [clientsError, setClientsError] = useState<string | null>(null);
   const [websites, setWebsites] = useState<WebsiteMonitorSummary[]>([]);
   const [websitesLoading, setWebsitesLoading] = useState(monitorMode === 'websites' && websites.length === 0);
   const [websitesError, setWebsitesError] = useState<string | null>(null);
   const [websitePeriodHours, setWebsitePeriodHours] = useState(24);
-  const offlinePosition = useMemo(loadOfflinePosition, []);
+  // The public view always keeps offline nodes last, including older saved preferences.
+  const offlinePosition = 'last';
 
   const handleWebsitePeriodChange = (hours: number) => {
     if (hours === websitePeriodHours) return;
@@ -319,7 +284,7 @@ export default function Index() {
       loadClients();
     };
     const refreshPublicClients = (detail?: PublicDataUpdateDetail) => {
-      setClients((current) => applyPublicClientUpdate(current, detail, isAuthenticated));
+      setClients((current) => current === undefined ? undefined : applyPublicClientUpdate(current, detail, isAuthenticated));
       if (detail?.clients) {
         // A delta cannot replace the pending full list. Replay it after that
         // list arrives, including in the authorized view without public caching.
@@ -359,7 +324,7 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [authLoading, monitorMode, isAuthenticated]);
+  }, [authLoading, monitorMode, isAuthenticated, setClients]);
 
   useEffect(() => {
     let cancelled = false;
@@ -439,32 +404,21 @@ export default function Index() {
 
   // Normalize live data for the LiveDataMap type
   const liveMap: LiveDataMap = useMemo(() => {
-    if (!liveData) return { online: [], data: {} };
+    if (!liveData) return { online: [], data: {}, last_known: {}, statusReady: false };
     return {
       online: liveData.online || [],
       data: liveData.data || {},
       clients: liveData.clients || [],
+      last_known: liveData.last_known || {},
+      statusReady: snapshotReady,
     };
-  }, [liveData]);
+  }, [liveData, snapshotReady]);
 
-  const displayClients = clients.length > 0 ? mergeLiveClientMetadata(clients, liveMap.clients) : liveClientsAsPublicClients(liveMap.clients);
+  const displayClients = mergeLiveClientMetadata(clients || [], liveMap.clients);
 
   const stats = useMemo(() => {
     return getNodeStatsSummary(displayClients, liveMap);
   }, [displayClients, liveMap]);
-
-  // Apply offline server position sorting
-  const sortedClients = useMemo(() => {
-    if (offlinePosition === 'keep') return displayClients;
-    const onlineSet = liveMap.online;
-    return [...displayClients].sort((a, b) => {
-      const aOnline = onlineSet.includes(a.uuid);
-      const bOnline = onlineSet.includes(b.uuid);
-      if (aOnline === bOnline) return 0;
-      if (offlinePosition === 'first') return aOnline ? 1 : -1;
-      return aOnline ? -1 : 1;
-    });
-  }, [displayClients, offlinePosition, liveMap.online]);
 
   const apiError = !clientsLoading ? (clientsError || error) : null;
 
@@ -476,8 +430,10 @@ export default function Index() {
         <NodeCard
           key={client.uuid}
           client={client}
-          live={ld.data[client.uuid]}
+          live={getNodeDisplayRecord(client.uuid, ld)}
           online={ld.online.includes(client.uuid)}
+          status={getNodeStatus(client.uuid, ld)}
+          lastReportTime={getNodeLastReportTime(client.uuid, ld)}
           includeHidden={isAuthenticated}
         />
       ))}
@@ -493,11 +449,11 @@ export default function Index() {
               <TopCard
                 key={card.key}
                 title={card.title}
-                value={card.value}
+                value={snapshotReady && clients !== undefined ? card.value : '—'}
                 detail={card.detail}
                 icon={statusIconByKey[card.key]}
                 oneLine={card.oneLine}
-                inlineValues={card.inlineValues}
+                inlineValues={snapshotReady && clients !== undefined ? card.inlineValues : undefined}
                 className={card.key === 'currentOnline' ? 'is-centered' : ''}
               />
             ))}
@@ -510,8 +466,10 @@ export default function Index() {
       {monitorMode === 'servers' ? (
         <React.Suspense fallback={null}>
           <NodeDisplay
-            nodes={sortedClients}
+            nodes={displayClients}
             liveData={liveMap}
+            loading={clients === undefined && clientsLoading}
+            dataAvailable={clients !== undefined}
             gridRenderer={renderGrid}
             offlinePosition={offlinePosition}
             includeHidden={isAuthenticated}

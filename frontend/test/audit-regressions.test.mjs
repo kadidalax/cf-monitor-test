@@ -513,6 +513,7 @@ test('AUD-42 LiveDataProvider keeps newer live/settings when an earlier bootstra
     const settingsModule = productionModule('src/utils/publicSettings.ts');
     let current;
     let title;
+    let clientMetadata;
     let refresh;
     let fallbackCalls = 0;
     const effect = productionEffect('src/contexts/LiveDataContext.tsx', 'const applyBootstrap', {
@@ -524,6 +525,8 @@ test('AUD-42 LiveDataProvider keeps newer live/settings when an earlier bootstra
       normalizeLivePollConfig: () => ({}), pollConfigRef: { current: {} }, DEFAULT_LIVE_POLL_CONFIG: {},
       normalizeLiveDataResponse, rememberInitialLiveMetadataVersion() {}, setLoading() {}, setError() {},
       setLiveData: value => { current = value; },
+      setClientMetadata: update => { clientMetadata = typeof update === 'function' ? update(clientMetadata) : update; },
+      mergePublicClientPatch: productionModule('src/utils/publicClients.ts').mergePublicClientPatch,
       fetchPublicBootstrap: (...args) => { const pending = bootstrap.fetchPublicBootstrap(...args); promises.push(pending); return pending; },
       fetchPublicSettings: () => { fallbackCalls += 1; return Promise.reject(new Error('Unexpected obsolete settings fallback')); },
       subscribePublicDataUpdated: callback => { refresh = callback; return () => {}; },
@@ -546,6 +549,7 @@ test('AUD-42 LiveDataProvider keeps newer live/settings when an earlier bootstra
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(bootstrap.getCachedPublicBootstrap().clients[0].name, 'new B', 'cache control');
       assert.deepEqual([current.clients[0].name, title], ['new B', 'new B'], 'live state and settings must belong to the latest request');
+      assert.equal(clientMetadata[0].name, 'new B', 'the retained metadata list also belongs to the latest request');
       assert.equal(fallbackCalls, 0, 'an obsolete response must not refresh settings again');
     } finally { cleanup(); }
     });

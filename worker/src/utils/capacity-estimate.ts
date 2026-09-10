@@ -44,8 +44,8 @@ export function buildResourceEstimates(input: CapacityResourceInput) {
   const workerHttp = input.cronInvocationsPerDay + messages;
   const doWs = input.connectionsPerDay + Math.ceil(messages / 20);
   const doHttp = messages;
-  const wsWrites = input.monitorRecordsPerDay + input.pingTaskStateWritesPerDay;
-  const httpWrites = wsWrites + monitorReports;
+  const wsWrites = input.monitorRecordsPerDay + input.pingTaskStateWritesPerDay + monitorReports;
+  const httpWrites = wsWrites;
   const resources: ResourceEstimate[] = [];
   const add = (key: ResourceKey, period: ResourceEstimate['period'], websocket: number | null, http: number | null,
     estimate: ResourceEstimate['estimate'], free: number, paid: number, notes: string[]) => {
@@ -65,7 +65,7 @@ export function buildResourceEstimates(input: CapacityResourceInput) {
   add('durable_object_requests', 'day', doWs, doHttp, 'lower_bound', quota.durable_objects.requests.daily_free, quota.durable_objects.requests.monthly_included,
     ['包含monitor报告、Ping拉取/结果及basic_info；20:1仅用于入站WebSocket消息的计费请求，不适用于行写入。未含闹钟、访客与其他内部调用。']);
   add('durable_object_rows_written', 'day', wsWrites, httpWrites, 'lower_bound', quota.durable_objects.rows_written.daily_free, quota.durable_objects.rows_written.monthly_included,
-    ['历史启用时包含落库标记和每节点每到期Ping任务状态；关闭历史后这两项为0。HTTP每条monitor报告仍额外持久化1行。其他元数据、闹钟与过期删除仍有额外开销。']);
+    ['HTTP和WebSocket每次monitor上报均持久化1行最后快照，关闭历史仍然写入；批量上报只为最后一条写1行。历史启用时另计落库标记和每节点每到期Ping任务状态。消息20:1折算不适用于行写入，其他元数据、闹钟和节点删除仍有额外开销。']);
   add('durable_object_rows_read', 'day', null, null, 'unknown', quota.durable_objects.rows_read.daily_free, quota.durable_objects.rows_read.monthly_included,
     ['冷启动恢复list/get、设置和状态读取依运行情况而变；需从Cloudflare实际用量核对。']);
   add('durable_object_duration_gb_seconds', 'day', null, null, 'unknown', quota.durable_objects.duration_gb_seconds.daily_free, quota.durable_objects.duration_gb_seconds.monthly_included,
@@ -83,7 +83,10 @@ export function buildResourceEstimates(input: CapacityResourceInput) {
     estimated_worker_requests_http_per_day: workerHttp,
     estimated_durable_object_requests_per_day: doWs,
     estimated_durable_object_requests_http_per_day: doHttp,
-    do_write_breakdown: { history_markers: input.monitorRecordsPerDay, ping_task_state: input.pingTaskStateWritesPerDay, http_live_state: monitorReports },
+    do_write_breakdown: {
+      history_markers: input.monitorRecordsPerDay, ping_task_state: input.pingTaskStateWritesPerDay,
+      websocket_live_state: monitorReports, http_live_state: monitorReports,
+    },
     free_tier_assessment: resources.some(row => row.within_free_websocket === false || row.within_free_http === false)
       ? 'exceeds' as const : 'unverified' as const,
   };

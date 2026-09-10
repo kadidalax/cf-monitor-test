@@ -3,13 +3,18 @@ import test from 'node:test';
 import { createDurableState, createSocket, createWorkerLoader } from '../../test-support/worker-module.mjs';
 
 for (const count of [128, 129, 257]) {
-  test(`AUD-32 ${count} expired HTTP nodes recover within the 128-key storage limit`, async () => {
+  test(`AUD-32 ${count} expired HTTP reports remain available while invalid snapshots respect the 128-key deletion limit`, async () => {
     const now = Date.now();
     const entries = Array.from({ length: count }, (_, index) => {
       const uuid = `expired-${index}`;
       return [`http-live:${uuid}`, { uuid, name: uuid, hidden: false, lastReportTime: now - 10000,
         expiresAt: now - 1, lastReport: { cpu: 1 } }];
     });
+    entries.push(...Array.from({ length: count }, (_, index) => {
+      const uuid = `invalid-${index}`;
+      return [`http-live:${uuid}`, { uuid, name: uuid, hidden: false, lastReportTime: 'invalid',
+        expiresAt: now - 1, lastReport: { cpu: 1 } }];
+    }));
     entries.push(['http-live:valid-node', { uuid: 'valid-node', name: 'Valid node', hidden: false,
       lastReportTime: now, expiresAt: now + 600000, lastReport: { cpu: 9 } }]);
     const state = createDurableState(entries);
@@ -26,7 +31,9 @@ for (const count of [128, 129, 257]) {
     assert.deepEqual(live.online, ['valid-node']);
     assert.equal(live.data['valid-node'].cpu, 9);
     assert.ok(state.values.has('http-live:valid-node'));
-    assert.ok(![...state.values.keys()].some(key => key.startsWith('http-live:expired-')));
+    assert.equal(Object.keys(live.last_known).length, count);
+    assert.equal(live.last_known['expired-0'].cpu, 1);
+    assert.ok(![...state.values.keys()].some(key => key.startsWith('http-live:invalid-')));
   });
 }
 

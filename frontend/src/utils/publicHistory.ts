@@ -5,8 +5,8 @@ export interface PublicMonitorRecord {
   ram_total: number;
   swap: number;
   swap_total: number;
-  disk: number;
-  disk_total: number;
+  disk: number | null;
+  disk_total: number | null;
   // null = 探针报告本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
   temp: number | null;
@@ -17,7 +17,7 @@ export interface PublicMonitorRecord {
   process_count: number;
   connections: number;
   connections_udp: number;
-  uptime: number;
+  uptime: number | null;
 }
 
 export interface PublicGpuRecord {
@@ -55,6 +55,11 @@ function allNumbers<K extends string>(values: Record<K, number | null>): values 
   return Object.values(values).every((value): value is number => value !== null);
 }
 
+function optionalMetric(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 // 负载允许显式为 null（不可用）。这里必须与 numberField 分开：
 // numberField 把 null 当作「字段非法」，会让 allNumbers 判否而**整条记录被丢弃**——
 // 后果是那台节点的历史图表整段消失，而不是负载一项缺失。
@@ -80,8 +85,6 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     ram_total: numberField(record, 'ram_total'),
     swap: numberField(record, 'swap'),
     swap_total: numberField(record, 'swap_total'),
-    disk: numberField(record, 'disk'),
-    disk_total: numberField(record, 'disk_total'),
     net_in: numberField(record, 'net_in'),
     net_out: numberField(record, 'net_out'),
     net_total_up: numberField(record, 'net_total_up'),
@@ -89,7 +92,6 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     process_count: numberField(record, 'process_count'),
     connections: numberField(record, 'connections'),
     connections_udp: numberField(record, 'connections_udp'),
-    uptime: numberField(record, 'uptime'),
   };
   if (!allNumbers(values)) return null;
 
@@ -100,8 +102,8 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     ram_total: values.ram_total,
     swap: values.swap,
     swap_total: values.swap_total,
-    disk: values.disk,
-    disk_total: values.disk_total,
+    disk: optionalMetric(record, 'disk'),
+    disk_total: optionalMetric(record, 'disk_total'),
     load,
     temp,
     net_in: values.net_in,
@@ -111,7 +113,7 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     process_count: values.process_count,
     connections: values.connections,
     connections_udp: values.connections_udp,
-    uptime: values.uptime,
+    uptime: optionalMetric(record, 'uptime'),
   };
 }
 
