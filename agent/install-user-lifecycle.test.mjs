@@ -9,13 +9,13 @@ const source = readFileSync(new URL('./install.sh', import.meta.url), 'utf8').sp
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 const shellAvailable = spawnSync('sh', ['-c', ':'], { windowsHide: true }).status === 0;
 
-function userFixture(t, scenario) {
+function userFixture(t, scenario, diskOptions = '') {
   const root = mkdtempSync(path.join(tmpdir(), 'cf-agent-user-test-'));
   const posix = root.replaceAll('\\', '/');
   mkdirSync(path.join(root, 'bin'));
   writeFileSync(path.join(root, 'cron.txt'), '15 * * * * unrelated-job # keep-me\n');
   writeFileSync(path.join(root, 'bin', 'crontab'), '#!/bin/sh\nif [ "$1" = "-l" ]; then cat "$CF_MONITOR_TEST_CRON"; else cp "$1" "$CF_MONITOR_TEST_CRON"; fi\n', { mode: 0o755 });
-  const agent = marker => `#!/bin/sh\nprintf '${marker}|%s\\n' "$CF_MONITOR_TOKEN" > "$CF_MONITOR_TEST_OUTPUT"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n`;
+  const agent = marker => `#!/bin/sh\nprintf '%s\\n' "\${CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES-unset}" "\${CF_MONITOR_DISK_USAGE_FILE-unset}" > "$CF_MONITOR_TEST_DISK_OUTPUT"\nprintf '${marker}|%s\\n' "$CF_MONITOR_TOKEN" > "$CF_MONITOR_TEST_OUTPUT"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n`;
   writeFileSync(path.join(root, 'old-agent'), agent('old'), { mode: 0o755 });
   writeFileSync(path.join(root, 'new-agent'), agent('new'), { mode: 0o755 });
   writeFileSync(path.join(root, 'bad-agent'), '#!/bin/sh\nexit 7\n', { mode: 0o755 });
@@ -23,6 +23,7 @@ function userFixture(t, scenario) {
 ROOT=${quote(posix)}
 export XDG_DATA_HOME="$ROOT/data" XDG_CONFIG_HOME="$ROOT/config" XDG_STATE_HOME="$ROOT/state"
 export CF_MONITOR_TEST_CRON="$ROOT/cron.txt" CF_MONITOR_TEST_OUTPUT="$ROOT/running.txt"
+export CF_MONITOR_TEST_DISK_OUTPUT="$ROOT/disk-environment.txt"
 FIXTURE_BIN="$(cd "$ROOT/bin" && pwd)"
 export PATH="$FIXTURE_BIN:$PATH"
 [ "$(command -v crontab)" = "$FIXTURE_BIN/crontab" ] || { echo 'Unsafe crontab fixture path' >&2; exit 90; }
@@ -31,6 +32,7 @@ SERVICE_MODE=user; DRY_RUN=0; YES=1; KEEP_FILES=0; INSTALL_DIR=''; SERVICE_NAME=
 SERVER=https://monitor.example.test; TOKEN=old-token; NODE_NAME=fixture; MODE=websocket
 MOUNT_INCLUDE=''; MOUNT_EXCLUDE=''; NIC_INCLUDE=''; NIC_EXCLUDE=''
 INTERVAL=3; PING_INTERVAL=120; TRAFFIC_RESET_DAY=1
+${diskOptions}
 apply_defaults
 test_pids=''
 cleanup_fixture() {
@@ -65,7 +67,7 @@ ${scenario}
     rmSync(root, { recursive: true, force: true });
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  return { output: result.stdout, cron: readFileSync(path.join(root, 'cron.txt'), 'utf8') };
+  return { output: result.stdout, cron: readFileSync(path.join(root, 'cron.txt'), 'utf8'), diskEnvironment: readFileSync(path.join(root, 'disk-environment.txt'), 'utf8') };
 }
 
 test('AUD-27 user-mode reinstall replaces the running image and inherited environment', { skip: !shellAvailable }, t => {
@@ -82,6 +84,18 @@ printf 'RESULT:%s:%s:%s:%s\\n' "$old_alive" "$old_pid" "$new_pid" "$(cat "$CF_MO
   assert.equal(match[1], '0', 'old process is still alive');
   assert.notEqual(match[2], match[3], 'upgrade retained the old PID');
   assert.equal(match[4], 'new|new-token');
+});
+
+test('user-mode reinstall exports and preserves administrator disk options into the actual child', { skip: !shellAvailable }, t => {
+  const result = userFixture(t, `
+WORK_BIN="$ROOT/new-agent"; TOKEN=new-token
+CONTAINER_DISK_TOTAL_SET=0; CONTAINER_DISK_TOTAL_BYTES=0
+DISK_USAGE_FILE_SET=0; DISK_USAGE_FILE=''; DISK_USAGE_FILE_PRESENT=0
+install_user_mode
+test_pids="$test_pids $(cat "$PID_FILE")"
+wait_marker 'new|new-token'
+`, "CONTAINER_DISK_TOTAL_SET=1; CONTAINER_DISK_TOTAL_BYTES=5024000000; DISK_USAGE_FILE_SET=1; DISK_USAGE_FILE='/run/admin cache/usage.json'");
+  assert.equal(result.diskEnvironment, '5024000000\n/run/admin cache/usage.json\n');
 });
 
 test('AUD-27 a failed user-mode replacement restores the old running version', { skip: !shellAvailable }, t => {

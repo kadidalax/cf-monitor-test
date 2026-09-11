@@ -5,7 +5,7 @@ import { Activity, ArrowDown, ArrowUp, BarChart3, TrendingUp } from 'lucide-reac
 import Flag from './Flag';
 import PriceTags from './PriceTags';
 import MiniPingChartFloat from './MiniPingChartFloat';
-import { formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic';
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
@@ -105,9 +105,11 @@ function formatPercent(value: number | null) {
 function RingMetric({
   label,
   percent,
+  estimated = false,
 }: {
   label: string;
   percent: number | null;
+  estimated?: boolean;
 }) {
   const clamped = clampPercent(percent ?? 0);
   const ringStyle = {
@@ -122,7 +124,7 @@ function RingMetric({
     >
       <div className="node-resource-ring-chart" style={ringStyle}>
         <Text className="node-resource-ring-value" weight="bold">
-          {formatPercent(percent === null ? null : clamped)}
+          {estimated && percent !== null ? '≈ ' : ''}{formatPercent(percent === null ? null : clamped)}
         </Text>
       </div>
       <Text className="node-resource-ring-label" weight="bold">{label}</Text>
@@ -218,7 +220,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const nodeStatus = status ?? (online ? 'online' : 'offline');
   const cpuPct = metricNumber(d.cpu);
   const memory = resourceUsage(d.ram, d.ram_total, client.mem_total);
-  const disk = resourceUsage(d.disk, d.disk_total, client.disk_total);
+  const disk = diskUsagePresentation(d, client.disk_total);
   const memPct = memory.percent;
   const diskPct = disk.percent;
   const totalUp = metricNumber(d.net_total_up);
@@ -229,7 +231,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
   const uptimeLabel = formatMetricUptime(d.uptime);
   const memDetail = `${formatMetricBytes(memory.used)} / ${formatMetricBytes(memory.total)}`;
-  const diskDetail = `${formatMetricBytes(disk.used)} / ${formatMetricBytes(disk.total)}`;
+  const diskDetail = disk.detail;
   const cpuDetail = formatCpuCardLabel(client.cpu_name, client.cpu_cores);
   const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
 
@@ -358,7 +360,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               <div className="node-metric-grid">
                 <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
                 <CompactMetric label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
-                <CompactMetric label="磁盘" value={formatPercent(diskPct)} detail={diskDetail} percent={diskPct} />
+                <CompactMetric label={disk.estimated ? '磁盘（估算）' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} detail={diskDetail} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
                 <CompactMetric
                   label="月度"
                   value={trafficLimitLabel ? trafficPct === undefined ? '—' : `${trafficPct.toFixed(0)}%` : '-'}
@@ -380,7 +382,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               <div className="node-resource-ring-grid">
                 <RingMetric label="CPU" percent={cpuPct} />
                 <RingMetric label="RAM" percent={memPct} />
-                <RingMetric label="Disk" percent={diskPct} />
+                <RingMetric label={disk.estimated ? 'Disk（估算）' : 'Disk'} percent={diskPct} estimated={disk.estimated} />
               </div>
 
               <NetworkSummary
@@ -392,6 +394,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                 historical={nodeStatus === 'offline'}
               />
             </div>
+            {disk.estimated && <Text as="p" size="1" color="gray" title={disk.description} className="node-disk-estimate">文件占用估算 · {disk.detail} · {disk.sampleLabel}</Text>}
           </Flex>
         </Flex>
       </Link>

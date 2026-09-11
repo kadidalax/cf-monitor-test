@@ -381,6 +381,7 @@ export default function Instance() {
           </Flex>
 
           <Box pt="3">
+            {chartTab === 'disk' && <Text as="p" size="1" color="gray" mb="2">按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。</Text>}
             {(chartTab === 'temp' || chartTab === 'disk') && !recordsLoading && !recordsError && !chartData.some((point) => point[chartTab] !== null) ? (
               <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
                 <Text role="status" color="gray">{chartTab === 'temp' ? '温度数据不可用' : '磁盘使用量数据不可用'}</Text>

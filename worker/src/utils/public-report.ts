@@ -2,7 +2,7 @@ import type { MonitorReportPayload } from './monitor-report';
 
 const METRIC_FIELDS = [
   'cpu', 'gpu', 'ram', 'ram_total', 'swap', 'swap_total', 'load', 'temp',
-  'disk', 'disk_total', 'net_in', 'net_out', 'net_total_up', 'net_total_down',
+  'disk', 'disk_total', 'disk_source', 'disk_sampled_at', 'net_in', 'net_out', 'net_total_up', 'net_total_down',
   'process_count', 'connections', 'connections_udp', 'uptime', 'version', 'timestamp',
 ] as const;
 const BASIC_FIELDS = [

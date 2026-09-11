@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { formatCpuSpec } from '../utils/cpuFormat';
 import type { LiveRecord } from '../types';
-import { formatMetricBytes, resourceTotal } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatMetricBytes, resourceTotal } from '../utils/nodeMetrics';
 
 interface DetailsGridProps {
   client: {
@@ -122,6 +122,7 @@ export default function DetailsGrid({ client, live, box, align, compact, remark 
   const Container: any = box ? Card : 'div';
   const ipValue = `IPv4 ${formatSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatSupport(client.has_ipv6, client.ipv6)}`;
   const normalizedRemark = remark?.trim();
+  const disk = diskUsagePresentation(live, client.disk_total);
   const agentItem = {
     label: 'Agent',
     value: client.version || '-',
@@ -185,6 +186,7 @@ export default function DetailsGrid({ client, live, box, align, compact, remark 
       icon: <Globe size={16} />,
     },
     agentItem,
+    ...(disk.estimated ? [{ label: '磁盘占用（估算）', value: disk.detail, icon: <HardDrive size={16} /> }] : []),
   ];
   const firstRowItems = normalizedRemark ? items.slice(0, 5) : [];
   const resourceRowItems = normalizedRemark ? items.slice(5, 10) : [];
@@ -218,6 +220,7 @@ export default function DetailsGrid({ client, live, box, align, compact, remark 
           ))}
         </div>
       )}
+      {disk.estimated && <Text as="p" size="1" color="gray" mt="2">{disk.description} {disk.sampleLabel}</Text>}
     </Container>
   );
 }

@@ -1571,6 +1571,7 @@ export default function AdminNotifications() {
                   <Select.Item value="temp">温度</Select.Item>
                 </Select.Content>
               </Select.Root>
+              {loadForm.metric === 'disk' && <Text as="p" size="1" color="gray" mt="1">阈值使用节点上报的磁盘占用；容器文件占用估算可能不含快照、隐藏文件等空间。</Text>}
             </label>
             <Flex gap="3">
               <label style={{ flex: 1 }}>

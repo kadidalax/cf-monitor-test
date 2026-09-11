@@ -33,6 +33,8 @@ export interface LiveRecord {
   swap_total: number;
   disk: number | null;
   disk_total: number | null;
+  disk_source?: 'directory';
+  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;

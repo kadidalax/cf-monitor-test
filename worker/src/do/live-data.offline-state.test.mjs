@@ -69,6 +69,34 @@ async function wsReport(f, socket, report = {}) {
   await f.storage.drain();
 }
 
+for (const transport of ['http', 'websocket']) {
+  test(`${transport} directory disk source and sampling time survive offline state and cold restart`, async () => {
+    const f = fixture();
+    const receivedAt = f.now;
+    const measuredAt = receivedAt - 300_000;
+    const report = { disk: 8_388_608, disk_total: 5_024_000_000, disk_source: 'directory', disk_sampled_at: measuredAt };
+    if (transport === 'http') {
+      await httpReport(f, report);
+      f.advance(180001);
+      await f.object.alarm();
+    } else {
+      const agent = f.agent();
+      await wsReport(f, agent, report);
+      agent.ws.close();
+      await f.object.webSocketClose(agent.ws);
+    }
+    await f.storage.drain();
+    for (const object of [f.object, f.cold()]) {
+      const live = await snapshot(object);
+      assert.deepEqual(live.online, []);
+      assert.equal(live.last_known.node.disk, 8_388_608);
+      assert.equal(live.last_known.node.disk_source, 'directory');
+      assert.equal(live.last_known.node.disk_sampled_at, measuredAt);
+      assert.equal(live.last_known.node.lastReportTime, receivedAt);
+    }
+  });
+}
+
 test('an expired HTTP node keeps its final metrics for new viewers and cold reconstruction', async () => {
   const f = fixture();
   const receivedAt = f.now;

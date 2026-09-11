@@ -13,6 +13,8 @@ export type MonitorReportPayload = JsonObject & {
   temp: number | null;
   disk: number | null;
   disk_total: number | null;
+  disk_source?: 'directory';
+  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -120,7 +122,7 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
   const gpuData = asObject(report.gpu);
   const gpus = normalizeGpuList(gpuData, report.gpus);
 
-  return {
+  const normalized: MonitorReportPayload = {
     ...report,
     cpu: boundedNumber(0, MAX_PERCENT, report.cpu, cpu.usage),
     gpu: boundedNumber(0, MAX_PERCENT, report.gpu, gpuData.average_usage),
@@ -143,12 +145,29 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     version: boundedString(report.version, 64),
     gpus,
   };
+  // Cached measurements carry their own sampling clock, independent of the
+  // Agent report/Worker receipt clocks. An invalid pair must not look native.
+  delete normalized.disk_source;
+  delete normalized.disk_sampled_at;
+  if (report.disk_source !== undefined || report.disk_sampled_at !== undefined) {
+    const sampledAt = report.disk_sampled_at;
+    const measuredUsed = numberFrom(report.disk) ?? numberFrom(disk.used);
+    if (report.disk_source === 'directory' && normalized.disk !== null && measuredUsed !== undefined
+        && measuredUsed >= 0 && measuredUsed <= MAX_COUNTER_VALUE && typeof sampledAt === 'number'
+        && Number.isSafeInteger(sampledAt) && sampledAt > 0 && sampledAt <= 8_640_000_000_000_000) {
+      normalized.disk_source = 'directory';
+      normalized.disk_sampled_at = sampledAt;
+    } else {
+      normalized.disk = null;
+    }
+  }
+  return normalized;
 }
 
 export function toMonitorRecord(client: string, time: string, input: unknown): MonitorRecord {
   const report = normalizeMonitorReport(input);
-  // The existing history schema is numeric. A zero total marks an unavailable
-  // disk sample, including a known quota whose usage could not be measured.
+  // Keep measured bytes independently. The numeric schema uses a zero total
+  // to leave the percentage unavailable when either input is unknown.
   const diskAvailable = report.disk !== null && report.disk_total !== null;
 
   return {
@@ -162,7 +181,7 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     swap_total: report.swap_total || 0,
     load: report.load ?? null,
     temp: report.temp,
-    disk: diskAvailable ? report.disk || 0 : 0,
+    disk: report.disk ?? 0,
     disk_total: diskAvailable ? report.disk_total || 0 : 0,
     net_in: report.net_in || 0,
     net_out: report.net_out || 0,

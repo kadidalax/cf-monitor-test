@@ -37,7 +37,7 @@ for (const [disk, total] of [[null, 5024_000_000], [123, null]]) {
     assert.equal(report.disk, disk);
     assert.equal(report.disk_total, total);
     const record = toMonitorRecord('node', '2026-09-10T00:00:00Z', report);
-    assert.equal(record.disk, 0);
+    assert.equal(record.disk, disk ?? 0, 'known used bytes survive even without capacity');
     assert.equal(record.disk_total, 0);
     assert.equal(record.uptime, 45);
   });

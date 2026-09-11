@@ -9,7 +9,7 @@ import UsageBar from './UsageBar';
 import Flag from './Flag';
 import MiniPingChart from './MiniPingChart';
 import PriceTags from './PriceTags';
-import { formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { comparePublicClients } from '../utils/publicClients';
 import { getOSImage, getOSName } from '../utils/osIcon';
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
@@ -133,7 +133,8 @@ function ExpandedNodeDetails({
             <DetailRow label="CPU" value={formatCpuSpec(node.cpu_name, node.cpu_cores)} />
             <DetailRow label="内存" value={formatMetricBytes(resourceTotal(live?.ram_total, node.mem_total))} />
             <DetailRow label="交换" value={formatMetricBytes(live?.swap_total ?? node.swap_total)} />
-            <DetailRow label="磁盘" value={`${formatMetricBytes(live?.disk)} / ${formatMetricBytes(resourceTotal(live?.disk_total, node.disk_total))}`} />
+            <DetailRow label="磁盘" value={diskUsagePresentation(live, node.disk_total).detail} />
+            {diskUsagePresentation(live).estimated && <DetailRow label="文件占用估算" value={diskUsagePresentation(live).sampleLabel} />}
           </DetailSection>
 
           <DetailSection title="系统环境">
@@ -305,7 +306,8 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
             const live = getNodeDisplayRecord(node.uuid, liveData);
             const cpuVal = metricNumber(live?.cpu);
             const ramPct = resourceUsage(live?.ram, live?.ram_total, node.mem_total).percent;
-            const diskPct = resourceUsage(live?.disk, live?.disk_total, node.disk_total).percent;
+            const disk = diskUsagePresentation(live, node.disk_total);
+            const diskPct = disk.percent;
             const isExpanded = expandedRows.includes(node.uuid);
             const uptimeLabel = formatMetricUptime(live?.uptime);
 
@@ -376,7 +378,7 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
                   <Table.Cell>
                     <Box className="node-table-resource-cell">
                       {diskPct !== null && <UsageBar value={diskPct} showLabel={false} />}
-                      <Text size="1" color="gray" title={diskPct === null ? '磁盘使用量或容量未提供' : undefined}>{diskPct === null ? '—' : `${diskPct.toFixed(1)}%`}</Text>
+                      <Text size="1" color="gray" title={disk.estimated ? `${disk.detail}；${disk.description} ${disk.sampleLabel}` : diskPct === null ? '磁盘使用量或容量未提供' : undefined}>{diskPct === null ? '—' : `${disk.estimated ? '≈ ' : ''}${diskPct.toFixed(1)}%`}</Text>
                     </Box>
                   </Table.Cell>
                   <Table.Cell>

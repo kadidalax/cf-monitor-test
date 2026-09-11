@@ -182,6 +182,8 @@ type Report struct {
 	// cannot be attributed to the current container. Keep JSON null explicit.
 	Disk                *int64               `json:"disk"`
 	DiskTotal           *int64               `json:"disk_total"`
+	DiskSource          string               `json:"disk_source,omitempty"`
+	DiskSampledAt       int64                `json:"disk_sampled_at,omitempty"`
 	NetIn               int64                `json:"net_in"`
 	NetOut              int64                `json:"net_out"`
 	NetTotalUp          int64                `json:"net_total_up"`
@@ -482,11 +484,18 @@ func init() {
 	flag.StringVar(&mountInclude, "mount-include", "", "Comma-separated mountpoint/device patterns to include in disk totals, for example /,/data,/dev/sd*")
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
 	flag.Var(&containerDiskTotalBytes, "container-disk-total-bytes", "Verified container root disk allocation in decimal bytes, used only when automatic capacity is unavailable (0 = automatic)")
+	flag.StringVar(&diskUsageFile, "disk-usage-file", "", "Read a root-owned container file allocation cache (empty = disabled)")
+	flag.String("disk-usage-collector", "", "Local-only root disk collector for SERVICE_NAME; does not start the Agent")
+	flag.Bool("disk-usage-once", false, "With --disk-usage-collector, collect one sample and exit")
+	flag.Bool("disk-usage-check", false, "Check whether root directory collection is required (exit 0 required, 3 not required)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
 }
 
 func main() {
+	if handled, code := handleDirectoryCollectorCLI(os.Args[1:], os.Stderr); handled {
+		os.Exit(code)
+	}
 	flag.Parse()
 	applyEnvDefaults()
 
@@ -563,6 +572,9 @@ func applyEnvDefaults() {
 				log.Fatalf("invalid CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES: %v", err)
 			}
 		}
+	}
+	if !flagWasSet("disk-usage-file") {
+		diskUsageFile = os.Getenv("CF_MONITOR_DISK_USAGE_FILE")
 	}
 	if nicInclude == "" {
 		nicInclude = os.Getenv("CF_MONITOR_NIC_INCLUDE")
@@ -3022,7 +3034,9 @@ func collectReportWithInterval(intervalSec int) Report {
 		r.Load = &value
 	}
 	r.Temp = nodeMetrics.temperature(context.Background())
-	r.Disk, r.DiskTotal = nodeMetrics.diskUsageTotals(mountInclude, mountExclude)
+	diskSnapshot := nodeMetrics.diskSnapshot(mountInclude, mountExclude)
+	r.Disk, r.DiskTotal = diskSnapshot.used, diskSnapshot.total
+	r.DiskSource, r.DiskSampledAt = diskSnapshot.source, diskSnapshot.sampledAt
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
 		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
 		selected := trafficInterfaceSelection(netIO)

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -45,6 +46,7 @@ type nodeMetricSource struct {
 	root       string
 	partitions func(bool) ([]disk.PartitionStat, error)
 	diskUsage  func(string) (*disk.UsageStat, error)
+	diskCache  func(string, string, time.Time) (diskUsageSnapshot, error)
 	hostUptime func() (uint64, error)
 }
 
@@ -53,6 +55,7 @@ var nodeMetrics = nodeMetricSource{
 	root:       "/",
 	partitions: disk.Partitions,
 	diskUsage:  disk.Usage,
+	diskCache:  readDirectoryDiskCache,
 	hostUptime: func() (uint64, error) {
 		info, err := host.Info()
 		if err != nil {
@@ -175,25 +178,30 @@ func containerDiskMountReportable(partition disk.PartitionStat, mounts []nodeMet
 }
 
 func (s nodeMetricSource) diskUsageTotals(include, exclude string) (*int64, *int64) {
+	snapshot := s.diskSnapshot(include, exclude)
+	return snapshot.used, snapshot.total
+}
+
+func (s nodeMetricSource) diskSnapshot(include, exclude string) diskUsageSnapshot {
 	container := s.containerized()
 	partitions, err := s.partitions(true)
 	if err != nil {
 		if container {
-			return nil, nil
+			return diskUsageSnapshot{}
 		}
 		used, total := int64(0), int64(0)
-		return &used, &total
+		return diskUsageSnapshot{used: &used, total: &total}
 	}
 	selected := selectDiskPartitions(partitions, include, exclude)
-	unavailable := func() (*int64, *int64) {
+	unavailable := func() diskUsageSnapshot {
 		// The optional allocation belongs to the container root disk. It
 		// cannot replace another selected mount, a partial multi-disk total,
 		// or real filesystem usage. Never combine it with host statfs Used.
 		if container && containerDiskTotalBytes > 0 && len(selected) == 1 && selected[0].Mountpoint == "/" {
 			total := int64(containerDiskTotalBytes)
-			return nil, &total
+			return diskUsageSnapshot{total: &total}
 		}
-		return nil, nil
+		return diskUsageSnapshot{}
 	}
 	if container {
 		mounts, ok := s.mounts()
@@ -202,6 +210,15 @@ func (s nodeMetricSource) diskUsageTotals(include, exclude string) (*int64, *int
 		}
 		for _, partition := range selected {
 			if !containerDiskMountReportable(partition, mounts) {
+				if rootDiskNeedsDirectoryCache(selected, mounts) && diskUsageFile != "" && s.diskCache != nil {
+					if cached, err := s.diskCache(s.root, diskUsageFile, time.Now()); err == nil && cached.used != nil {
+						if containerDiskTotalBytes > 0 {
+							total := int64(containerDiskTotalBytes)
+							cached.total = &total
+						}
+						return cached
+					}
+				}
 				return unavailable()
 			}
 		}
@@ -243,7 +260,19 @@ func (s nodeMetricSource) diskUsageTotals(include, exclude string) (*int64, *int
 		usedDisk += int64(usage.Used)
 		totalDisk += int64(usage.Total)
 	}
-	return &usedDisk, &totalDisk
+	return diskUsageSnapshot{used: &usedDisk, total: &totalDisk}
+}
+
+func rootDiskNeedsDirectoryCache(selected []disk.PartitionStat, mounts []nodeMetricMount) bool {
+	if len(selected) != 1 || selected[0].Mountpoint != "/" || containerDiskMountReportable(selected[0], mounts) {
+		return false
+	}
+	for _, mount := range mounts {
+		if mount.point == "/" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s nodeMetricSource) uptime() *int64 {
