@@ -106,10 +106,12 @@ function RingMetric({
   label,
   percent,
   estimated = false,
+  title,
 }: {
   label: string;
   percent: number | null;
   estimated?: boolean;
+  title?: string;
 }) {
   const clamped = clampPercent(percent ?? 0);
   const ringStyle = {
@@ -121,6 +123,7 @@ function RingMetric({
       className="node-resource-ring"
       data-monitor-role="resource-ring"
       data-load={percent === null ? undefined : getUsageLevel(clamped)}
+      title={title}
     >
       <div className="node-resource-ring-chart" style={ringStyle}>
         <Text className="node-resource-ring-value" weight="bold">
@@ -382,7 +385,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               <div className="node-resource-ring-grid">
                 <RingMetric label="CPU" percent={cpuPct} />
                 <RingMetric label="RAM" percent={memPct} />
-                <RingMetric label={disk.estimated ? 'Disk（估算）' : 'Disk'} percent={diskPct} estimated={disk.estimated} />
+                <RingMetric label={disk.estimated ? 'Disk（估算）' : 'Disk'} percent={diskPct} estimated={disk.estimated} title={disk.estimated ? `${disk.description} ${disk.detail} ${disk.sampleLabel}` : undefined} />
               </div>
 
               <NetworkSummary
@@ -394,7 +397,6 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                 historical={nodeStatus === 'offline'}
               />
             </div>
-            {disk.estimated && <Text as="p" size="1" color="gray" title={disk.description} className="node-disk-estimate">文件占用估算 · {disk.detail} · {disk.sampleLabel}</Text>}
           </Flex>
         </Flex>
       </Link>

@@ -627,6 +627,11 @@ body {
   overflow: hidden;
 }
 
+.node-card::before {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .node-card .rt-CardInner {
   padding: 7px !important;
   height: 100%;

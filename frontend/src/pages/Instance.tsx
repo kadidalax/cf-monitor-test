@@ -43,6 +43,7 @@ import {
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
 import { monitorYAxisProps, pingYAxisProps, wideYAxisProps } from '../utils/monitorChartAxis';
+import { chartTooltipProps } from '../utils/chartTooltip';
 
 const formatSpeed = (bytes: number): string => {
   if (!bytes || bytes === 0) return '0 B/s';
@@ -406,6 +407,7 @@ export default function Instance() {
                   />
                   <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [
                       `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
@@ -433,6 +435,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} tickFormatter={(value) => formatSpeed(Number(value))} unit="" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
                   />
@@ -456,6 +459,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [Number(value).toFixed(0), name]}
                   />
@@ -479,6 +483,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
                   />
@@ -508,6 +513,7 @@ export default function Instance() {
                     }}
                   />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => {
                       if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
@@ -570,6 +576,7 @@ export default function Instance() {
                   tick={<PingYAxisTick />}
                 />
                 <Tooltip
+                  {...chartTooltipProps}
                   labelFormatter={chartTimeFormatter}
                   formatter={(value: number, name) => [
                     formatPingMs(value),

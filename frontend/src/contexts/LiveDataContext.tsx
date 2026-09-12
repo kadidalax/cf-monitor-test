@@ -513,7 +513,9 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         }
         return;
       }
-      setClientMetadata(undefined);
+      // Revalidation is not an empty list. Keep this authorization scope's
+      // confirmed cards until the fresh list arrives; auth changes and explicit
+      // removals still clear their data through the existing scope/delta paths.
       loadSettings(true);
     });
 

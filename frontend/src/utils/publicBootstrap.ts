@@ -48,6 +48,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: boolean } = {}): PublicBootstrapPayload {
   const record = asRecord(payload);
   if (!record) throw new Error('Invalid public bootstrap response');
+  for (const field of ['clients', 'nodes'] as const) {
+    const value = record[field];
+    if (value !== undefined && !Array.isArray(value) && !Array.isArray(asRecord(value)?.data)) {
+      throw new Error(`Invalid public bootstrap ${field} list`);
+    }
+  }
   const normalized = {
     settings: record.settings === undefined ? undefined : normalizePublicSettings(record.settings) || undefined,
     clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients, options),
