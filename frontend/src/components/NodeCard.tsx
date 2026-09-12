@@ -304,7 +304,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                 chartWidth={460}
                 chartHeight={260}
                 limit={360}
-                rangeHours={1}
+                rangeHours={4}
                 includeHidden={includeHidden}
                 trigger={
                   <IconButton className="node-card-action" data-node-card-action="true" variant="ghost" size="2" aria-label="查看 Ping 延迟" title="查看 Ping 延迟走势">

@@ -13,6 +13,7 @@ const requiredSecrets = ['JWT_SECRET'];
 const supabaseSecretNames = ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
+const isWorkersBuild = process.env.WORKERS_CI === '1';
 const keepsExistingVars = deployArgs.includes('--keep-vars');
 const wranglerDeployArgs = deployArgs.filter(arg => arg !== '--skip-migrations');
 const deployCommand = process.env.CF_MONITOR_DEPLOY_COMMAND === 'versions-upload'
@@ -20,8 +21,25 @@ const deployCommand = process.env.CF_MONITOR_DEPLOY_COMMAND === 'versions-upload
   : ['deploy'];
 
 // This is also the entrypoint used by the Wrangler wrapper and Workers Builds.
-// Run checks before reading deployment secrets, writing config, or remote calls.
-if (!isDryRun) {
+// Reuse the same commit's GitHub verification in Workers Builds. Local deploys
+// still verify locally. Neither path may publish before its checks pass.
+if (!isDryRun && isWorkersBuild) {
+  const verifiedCommit = currentGitCommit();
+  const ci = spawnSync(process.execPath, [join(root, 'scripts', 'github-ci-gate.mjs')], {
+    cwd: root, env: process.env, stdio: 'inherit', windowsHide: true,
+  });
+  if (ci.status !== 0) fail('Deployment stopped: GitHub CI for this commit did not pass.');
+
+  console.log('GitHub CI passed. Building deployment assets without repeating the test suite.');
+  const build = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
+    cwd: root, env: process.env, stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true,
+  });
+  if (build.status !== 0) fail('Deployment stopped: build did not pass.');
+  const unchanged = spawnSync('git', ['diff', '--quiet', 'HEAD', '--'], { cwd: root, windowsHide: true });
+  if (!verifiedCommit || currentGitCommit() !== verifiedCommit || unchanged.status !== 0) {
+    fail('Deployment stopped: source changed after GitHub CI verification.');
+  }
+} else if (!isDryRun) {
   let verificationEnv;
   try {
     verificationEnv = prepareCloudflareVerificationEnv({ root });
@@ -58,8 +76,8 @@ function fail(message) {
 /**
  * 解析本次部署的目标 Worker 名。优先级：--name 参数 > CF_WORKER_NAME 环境变量 > wrangler.toml 的 name。
  *
- * Workers Builds 只注入 CI / WORKERS_CI / WORKERS_CI_BUILD_UUID / WORKERS_CI_COMMIT_SHA /
- * WORKERS_CI_BRANCH，不提供 Worker 名，因此当实际 Worker 名与仓库默认名不同时，
+ * Workers Builds 文档保证 CI / WORKERS_CI / WORKERS_CI_BUILD_UUID，不保证 Worker 名，
+ * 因此当实际 Worker 名与仓库默认名不同时，
  * 必须由部署命令的 --name 或 CF_WORKER_NAME 指定。
  */
 function resolveWorkerName() {
