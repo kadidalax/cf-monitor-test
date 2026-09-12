@@ -317,7 +317,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               </Badge>
             </Flex>
           </Flex>
-          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(lastReportTime)} · {live ? '显示最后状态' : '暂无上报数据'}</Text>}
+          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(lastReportTime)}{!live && ' · 暂无上报数据'}</Text>}
           <Flex className="node-card-title-meta" align="center" gap="2">
             <span className="node-os-chip">
               <img src={osConfig.image} alt="" aria-hidden="true" />
