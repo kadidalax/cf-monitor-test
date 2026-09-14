@@ -522,7 +522,7 @@ function Get-AgentInstanceProcesses {
 function Stop-AgentInstanceProcesses {
   param([string]$Executable)
   foreach ($process in (Get-AgentInstanceProcesses $Executable)) {
-    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+    Stop-Process -InputObject $process -Force -ErrorAction Stop
     if (-not $process.WaitForExit(15000)) { throw "Agent process $($process.Id) did not exit; replacement aborted." }
   }
 }

@@ -1235,25 +1235,25 @@ func TestResolvePublicIPsBlocksLocalTargets(t *testing.T) {
 func TestExecuteICMPPingUsesResolvedPublicIP(t *testing.T) {
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "ping-args.txt")
-	var script string
 	if runtime.GOOS == "windows" {
-		script = filepath.Join(dir, "ping.bat")
+		script := filepath.Join(dir, "ping.bat")
 		if err := os.WriteFile(script, []byte("@echo off\r\necho %* > \"%PING_ARGS_FILE%\"\r\nexit /b 0\r\n"), 0o755); err != nil {
 			t.Fatalf("write fake ping: %v", err)
 		}
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	} else {
-		script = filepath.Join(dir, "ping")
-		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$PING_ARGS_FILE\"\nexit 0\n"), 0o755); err != nil {
-			t.Fatalf("write fake ping: %v", err)
+		for _, name := range []string{"ping", "ping6"} {
+			script := filepath.Join(dir, name)
+			if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$PING_ARGS_FILE\"\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write fake ping: %v", err)
+			}
+			if err := os.Chmod(script, 0o755); err != nil {
+				t.Fatalf("chmod fake ping: %v", err)
+			}
 		}
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(script, 0o755); err != nil {
-			t.Fatalf("chmod fake ping: %v", err)
-		}
+		t.Setenv("PATH", dir)
 	}
 	t.Setenv("PING_ARGS_FILE", argsFile)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if elapsed := executeICMPPing("[2606:4700:4700::1111]"); elapsed < 0 {
 		t.Fatalf("executeICMPPing() = %v, want successful fake ping", elapsed)
