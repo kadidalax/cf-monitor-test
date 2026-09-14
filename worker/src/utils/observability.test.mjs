@@ -53,6 +53,9 @@ function createScheduledHealthFixture({ failLoad = false } = {}) {
       return Response.json({ allowed: true, limit: 1000, remaining: 999, reset: now / 1000 + 60, retry_after: 60 });
     } }) },
   };
+  const { ScheduledTasksDO } = loader.load('worker/src/index.ts');
+  const scheduledTasks = new ScheduledTasksDO({}, env);
+  env.SCHEDULED_TASKS = { getByName: () => scheduledTasks };
   return {
     loader, settings, errors, audits,
     run: () => loader.load('worker/src/index.ts').default.scheduled({}, env, {}),

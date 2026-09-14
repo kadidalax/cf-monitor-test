@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createWorkerLoader } from '../../test-support/worker-module.mjs';
+import { createDurableState, createWorkerLoader } from '../../test-support/worker-module.mjs';
 
 const env = { JWT_SECRET: 'synthetic-audit-jwt-key-at-least-32-bytes', SUPABASE_SECRET_KEY: 'sb_secret_synthetic_owner_proof' };
 const input = { username: 'synthetic-admin', password: 'synthetic-passphrase-937' };
@@ -27,14 +27,22 @@ function fixture({ initial = null, race = false } = {}) {
     },
     insertAuditLog: async () => {},
   };
-  const { publicRoutes } = createWorkerLoader({ db }).load('worker/src/routes/public.ts');
+  const loader = createWorkerLoader({ db });
+  const { publicRoutes } = loader.load('worker/src/routes/public.ts');
+  const { RateLimitDO } = loader.load('worker/src/do/rate-limit.ts');
+  const objects = new Map();
+  const getByName = (name) => {
+    if (!objects.has(name)) objects.set(name, new RateLimitDO(createDurableState().state, fixtureEnv));
+    return objects.get(name);
+  };
+  const fixtureEnv = { ...env, RATE_LIMIT: { idFromName: name => name, get: getByName, getByName } };
   return {
     get user() { return user; }, get resetCalls() { return resetCalls; },
     async request(body) {
       const response = await publicRoutes.fetch(new Request('https://panel.example.test/admin/recovery', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '1.1.1.1' },
         body: JSON.stringify(body),
-      }), env, { waitUntil: job => jobs.push(job), passThroughOnException() {} });
+      }), fixtureEnv, { waitUntil: job => jobs.push(job), passThroughOnException() {} });
       await Promise.all(jobs.splice(0));
       return response;
     },
