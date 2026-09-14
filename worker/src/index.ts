@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { DurableObject } from 'cloudflare:workers';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
 import { shortGitSha } from './utils/update-check';
@@ -389,7 +390,7 @@ app.route('/api/admin', adminRoutes);
 
 // 管理员手动触发维护任务，用于本地开发和部署后自检。
 app.post('/api/admin/cron/run', async (c) => {
-  await runScheduled(c.env);
+  await c.env.SCHEDULED_TASKS.getByName('maintenance').runScheduled();
   return c.json({ success: true });
 });
 
@@ -967,6 +968,14 @@ async function runScheduled(env: Bindings): Promise<void> {
   });
 }
 
+// Maintenance has its own Durable Object CPU budget on the Workers Free plan.
+// Keep the existing request/deadline budget and database coordination inside it.
+export class ScheduledTasksDO extends DurableObject<Bindings> {
+  async runScheduled(): Promise<void> {
+    await withDatabase(this.env, async () => runScheduled(this.env));
+  }
+}
+
 export default {
   async fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -985,7 +994,7 @@ export default {
     try {
       await withDatabase(env, async () => {
         clearScheduledDatabaseStartupFailure();
-        await runScheduled(env);
+        await env.SCHEDULED_TASKS.getByName('maintenance').runScheduled();
       });
     } catch (error) {
       recordScheduledDatabaseStartupFailure(error);

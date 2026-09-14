@@ -61,7 +61,6 @@ const HEALTH_KEY_PREFIX = 'health:';
 const AUDIT_THROTTLE_PREFIX = 'health:audit:last:';
 const DEFAULT_AUDIT_THROTTLE_MS = 5 * 60 * 1000;
 const MAX_DETAIL_LENGTH = 700;
-const healthSuccessThrottleCache = new Map<string, number>();
 
 function nowIso(nowMs = Date.now()): string {
   return new Date(nowMs).toISOString();
@@ -142,18 +141,11 @@ export async function recordHealthEvent(
 
   const nowMs = options.nowMs ?? Date.now();
   const at = nowIso(nowMs);
-  if (status === 'ok' && options.successThrottleMs) {
-    const cachedSuccessMs = healthSuccessThrottleCache.get(component) || 0;
-    if (nowMs - cachedSuccessMs < options.successThrottleMs) {
-      return;
-    }
-  }
 
   const previous = parseHealthEvent(await db.getSetting(database, healthKey(component)), component);
   if (status === 'ok' && options.successThrottleMs && previous?.status === 'ok' && previous.last_success_at) {
     const previousSuccessMs = Date.parse(previous.last_success_at);
     if (Number.isFinite(previousSuccessMs) && nowMs - previousSuccessMs < options.successThrottleMs) {
-      healthSuccessThrottleCache.set(component, previousSuccessMs);
       return;
     }
   }
@@ -167,9 +159,6 @@ export async function recordHealthEvent(
   };
 
   await db.setSetting(database, healthKey(component), JSON.stringify(event));
-  if (status === 'ok') {
-    healthSuccessThrottleCache.set(component, nowMs);
-  }
 
   if (!options.auditAction || status !== 'error') return;
 

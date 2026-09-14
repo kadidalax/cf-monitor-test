@@ -22,6 +22,11 @@ export function createWorkerLoader({ db = {}, overrides = {}, globals = {}, expo
       withDatabase: async (_env, work) => work(database),
     },
     }),
+    'cloudflare:workers': {
+      DurableObject: class {
+        constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+      },
+    },
     'cloudflare:sockets': { connect: () => { throw new Error('Unexpected TCP connection in test'); } },
     ...overrides,
   };

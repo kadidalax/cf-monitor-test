@@ -13,7 +13,8 @@ import { confirmUserMfaFactor } from '../auth/mfa-factor';
 import { generateMfaSetupToken, generateMfaToken, verifyMfaSetupToken } from '../auth/mfa-token';
 import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
-import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
+import { validateAdminPasswordStrength } from '../auth/password';
+import { hashAdminPassword, verifyAdminPassword } from '../auth/password-service';
 import { clearMfaStepUpCookie, getAdminSessionToken, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
 import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
@@ -2643,7 +2644,7 @@ adminRoutes.post('/account/mfa/setup', async (c) => {
     c.header('Retry-After', String(retryAfter));
     return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
   }
-  if (!await verifyPassword(password, user.passwd)) {
+  if (!await verifyAdminPassword(c.env, user.uuid, password, user.passwd)) {
     const failedAt = Date.now();
     await recordLoginFailure(database, buckets, failedAt, states);
     await auditLoginFailure(database, user.username, clientIp, 'invalid_mfa_setup_password', failedAt);
@@ -2886,7 +2887,8 @@ adminRoutes.post('/account/chpasswd', async (c) => {
     const database = getDatabase(c.env);
     const user = await db.getUserByUsername(database, username);
 
-    if (typeof body.old_password !== 'string' || typeof body.new_password !== 'string') {
+    if (typeof body.old_password !== 'string' || typeof body.new_password !== 'string'
+      || !body.old_password || body.old_password.length > 4096 || body.new_password.length > 4096) {
       return c.json({ error: '密码格式错误' }, 400);
     }
 
@@ -2900,12 +2902,12 @@ adminRoutes.post('/account/chpasswd', async (c) => {
     }
 
     // Verify the current password before replacing it.
-    const valid = await verifyPassword(body.old_password, user.passwd);
+    const valid = await verifyAdminPassword(c.env, user.uuid, body.old_password, user.passwd);
     if (!valid) {
       return c.json({ error: '旧密码错误' }, 400);
     }
 
-    const newHash = await hashPassword(body.new_password);
+    const newHash = await hashAdminPassword(c.env, user.uuid, body.new_password);
     const updatedUser = await db.updateUserPasswordAndRotateSession(database, userId, newHash);
     if (!updatedUser) {
       return c.json({ error: '用户不存在' }, 404);

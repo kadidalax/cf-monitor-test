@@ -18,7 +18,7 @@ for (const route of [
   assert.ok(adminSource.includes(`adminRoutes.${route}`), `missing MFA route: ${route}`);
 }
 
-assert.match(adminSource, /verifyPassword\(/);
+// Password confirmation is exercised through the real routes in password-free-cpu.test.mjs.
 assert.match(adminSource, /generateTotpSecret\(/);
 assert.match(adminSource, /buildTotpUri\(/);
 assert.match(adminSource, /generateRecoveryCodes\(/);

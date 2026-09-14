@@ -25,6 +25,10 @@ class_name = "LiveDataDO"
 name = "RATE_LIMIT"
 class_name = "RateLimitDO"
 
+[[durable_objects.bindings]]
+name = "SCHEDULED_TASKS"
+class_name = "ScheduledTasksDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LiveDataDO"]
@@ -32,6 +36,10 @@ new_sqlite_classes = ["LiveDataDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["RateLimitDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ScheduledTasksDO"]
 
 [vars]
 SUPABASE_URL = "https://PROJECT_REF.supabase.co"

@@ -49,6 +49,7 @@ export async function createRuntimeFixture({ persistDurableObjects = false, exte
       durableObjects: {
         LIVE_DATA: { className: 'LiveDataDO', useSQLite: true },
         RATE_LIMIT: { className: 'RateLimitDO', useSQLite: true },
+        SCHEDULED_TASKS: { className: 'ScheduledTasksDO', useSQLite: true },
       },
       ...(persistPath ? { durableObjectsPersist: persistPath } : {}),
       serviceBindings: { ASSETS: () => new Response('<!doctype html><title>Local fixture</title>', { headers: { 'Content-Type': 'text/html' } }) },

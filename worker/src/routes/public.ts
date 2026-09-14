@@ -13,7 +13,8 @@ import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth
 import { MfaConfigurationError } from '../auth/mfa';
 import { confirmUserMfaFactor } from '../auth/mfa-factor';
 import { generateMfaToken, verifyMfaToken } from '../auth/mfa-token';
-import { hashPassword, needsPasswordRehash, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
+import { needsPasswordRehash, validateAdminPasswordStrength } from '../auth/password';
+import { hashAdminPassword, verifyAdminPassword } from '../auth/password-service';
 import {
   clearAdminSessionCookie,
   ensureAdminCsrfCookie,
@@ -1002,6 +1003,7 @@ publicRoutes.post('/admin/recovery', async (c) => {
   const serviceRoleKey = readRecoverySecretKey(parsed.body);
   const username = readRecoveryUsername(parsed.body);
   const password = readRecoveryPassword(parsed.body);
+  if (password.length > MAX_LOGIN_PASSWORD_LENGTH) return c.json({ error: '密码长度超出限制' }, 400);
 
   const usernameError = validateRecoveryUsername(username);
   if (usernameError) return c.json({ error: usernameError }, 400);
@@ -1025,7 +1027,7 @@ publicRoutes.post('/admin/recovery', async (c) => {
   const candidate = {
     uuid: crypto.randomUUID(),
     username,
-    hashedPassword: await hashPassword(password),
+    hashedPassword: await hashAdminPassword(c.env, username, password),
   };
   let user: Pick<db.User, 'uuid' | 'username' | 'session_version'>;
   if (userCount === 0) {
@@ -1095,7 +1097,7 @@ publicRoutes.post('/login', async (c) => {
   const user = await timed(metrics, 'db_user', () => db.getUserByUsername(database, username));
   if (!user) {
     const userCount = await timed(metrics, 'db_user_count', () => db.countUsers(database));
-    await timed(metrics, 'verify_password', () => verifyPassword(password, DUMMY_ADMIN_PASSWORD_HASH));
+    await timed(metrics, 'verify_password', () => verifyAdminPassword(c.env, username, password, DUMMY_ADMIN_PASSWORD_HASH));
     const failedAt = Date.now();
     await timed(metrics, 'db_record_failure', () => recordLoginFailure(database, rateLimitBuckets, failedAt, rateLimitStates));
     await timed(metrics, 'audit_failure', () => auditLoginFailure(database, username, clientIp, 'unknown_user', failedAt));
@@ -1106,7 +1108,7 @@ publicRoutes.post('/login', async (c) => {
     return c.json({ error: '用户名或密码错误' }, 401);
   }
 
-  const valid = await timed(metrics, 'verify_password', () => verifyPassword(password, user.passwd));
+  const valid = await timed(metrics, 'verify_password', () => verifyAdminPassword(c.env, user.uuid, password, user.passwd));
   if (!valid) {
     const failedAt = Date.now();
     await timed(metrics, 'db_record_failure', () => recordLoginFailure(database, rateLimitBuckets, failedAt, rateLimitStates));
@@ -1118,7 +1120,7 @@ publicRoutes.post('/login', async (c) => {
   if (needsPasswordRehash(user.passwd)) {
     runLoginBackground(
       c,
-      hashPassword(password).then((hashedPassword) => db.rehashUserPassword(database, user.uuid, user.passwd, hashedPassword)),
+      hashAdminPassword(c.env, user.uuid, password).then((hashedPassword) => db.rehashUserPassword(database, user.uuid, user.passwd, hashedPassword)),
     );
   }
 
@@ -1689,4 +1691,5 @@ publicRoutes.get('/live', async (c) => {
   return response;
 });
 
-export { publicRoutes, generateToken, hashPassword, verifyPassword };
+export { publicRoutes, generateToken };
+export { hashPassword, verifyPassword } from '../auth/password';

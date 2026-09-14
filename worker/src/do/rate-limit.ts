@@ -1,14 +1,41 @@
+import { DurableObject } from 'cloudflare:workers';
+import { hashPassword, verifyPassword } from '../auth/password';
+
 const RATE_LIMIT_STORAGE_PREFIX = 'rate-limit:';
 const RATE_LIMIT_MAX_BUCKETS = 5000;
 const RATE_LIMIT_CLEANUP_ALARM_MS = 5 * 60 * 1000;
 const RATE_LIMIT_MAX_BODY_BYTES = 2 * 1024;
 
-export class RateLimitDO {
+export class RateLimitDO extends DurableObject<Env> {
   private state: DurableObjectState;
   private sweepCounter = 0;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
     this.state = state;
+  }
+
+  async hashPassword(password: string): Promise<string> {
+    if (typeof password !== 'string' || !password || password.length > 4096) {
+      throw new TypeError('Invalid password input');
+    }
+    try {
+      return await hashPassword(password);
+    } catch {
+      throw new Error('Password computation unavailable');
+    }
+  }
+
+  async verifyPassword(password: string, hash: string): Promise<boolean> {
+    if (typeof password !== 'string' || !password || password.length > 4096
+      || typeof hash !== 'string' || !hash || hash.length > 1024) {
+      throw new TypeError('Invalid password input');
+    }
+    try {
+      return await verifyPassword(password, hash);
+    } catch {
+      throw new Error('Password computation unavailable');
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
