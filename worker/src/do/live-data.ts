@@ -1007,6 +1007,7 @@ export class LiveDataDO {
       hidden,
       ...(previous?.sourceIp ? { sourceIp: previous.sourceIp } : {}),
       ...(previous?.region ? { region: previous.region } : {}),
+      ...(previous?.authHash ? { authHash: previous.authHash } : {}),
       lastReport: compactLiveReport(report),
       lastReportTime: now,
       expiresAt,

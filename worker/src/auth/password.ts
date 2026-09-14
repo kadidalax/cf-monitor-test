@@ -1,5 +1,6 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 600000;
+// Cloudflare caps native PBKDF2 at 100000 iterations, including node:crypto.
+const PBKDF2_ITERATIONS = 100000;
 const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;

@@ -8,10 +8,10 @@ const oldPassword = 'synthetic-legacy-password';
 const salt = Buffer.alloc(16, 7);
 const oldHash = `pbkdf2_sha256$10000$${salt.toString('base64')}$${pbkdf2Sync(oldPassword, salt, 10000, 32, 'sha256').toString('base64')}`;
 
-test('SEC01: new password hashes meet the current 600000-iteration PBKDF2 recommendation', async () => {
+test('SEC01: new password hashes use the Workers-supported 100000-iteration work factor', async () => {
   const first = await hashPassword('synthetic-unique-passphrase');
   const second = await hashPassword('synthetic-unique-passphrase');
-  assert.ok(Number(first.split('$')[1]) >= 600000);
+  assert.ok(Number(first.split('$')[1]) >= 100000);
   assert.notEqual(first, second, 'every password receives an independent random salt');
   assert.equal(await verifyPassword('synthetic-unique-passphrase', first), true);
   assert.equal(await verifyPassword('synthetic-wrong-passphrase', first), false);
@@ -45,5 +45,28 @@ test('SEC01: unknown-user verification has the same configured cost as a new acc
   const { DUMMY_ADMIN_PASSWORD_HASH } = createWorkerLoader({ expose: {
     'worker/src/routes/public.ts': ['DUMMY_ADMIN_PASSWORD_HASH'],
   } }).load('worker/src/routes/public.ts');
-  assert.ok(Number(DUMMY_ADMIN_PASSWORD_HASH.split('$')[1]) >= 600000);
+  assert.ok(Number(DUMMY_ADMIN_PASSWORD_HASH.split('$')[1]) >= 100000);
+});
+
+test('SEC01: password creation and unknown-user checks work with the production crypto limit', async t => {
+  const deriveBits = crypto.subtle.deriveBits.bind(crypto.subtle);
+  t.mock.method(crypto.subtle, 'deriveBits', (algorithm, ...args) => {
+    if (algorithm.name === 'PBKDF2' && algorithm.iterations > 100000) {
+      throw new DOMException('Pbkdf2 failed: iteration counts above 100000 are not supported', 'NotSupportedError');
+    }
+    return deriveBits(algorithm, ...args);
+  });
+  await t.test('new hashes can be created, verified and finish the legacy upgrade', async () => {
+    const hash = await hashPassword('synthetic-platform-passphrase');
+    assert.equal(await verifyPassword('synthetic-platform-passphrase', hash), true);
+    assert.equal(await verifyPassword('synthetic-wrong-passphrase', hash), false);
+    assert.equal(needsPasswordRehash(hash), false);
+    assert.equal(needsPasswordRehash(oldHash), true);
+  });
+  await t.test('unknown users fail authentication without a crypto exception', async () => {
+    const { DUMMY_ADMIN_PASSWORD_HASH } = createWorkerLoader({ expose: {
+      'worker/src/routes/public.ts': ['DUMMY_ADMIN_PASSWORD_HASH'],
+    } }).load('worker/src/routes/public.ts');
+    assert.equal(await verifyPassword('synthetic-unknown-passphrase', DUMMY_ADMIN_PASSWORD_HASH), false);
+  });
 });

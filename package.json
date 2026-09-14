@@ -11,6 +11,7 @@
     "postinstall": "node scripts/install-wrangler-wrapper.mjs",
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
+    "prebuild": "node scripts/github-ci-gate.mjs --workers-build-only",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
     "test:js": "node --test",
     "test:go": "cd agent && go test ./...",

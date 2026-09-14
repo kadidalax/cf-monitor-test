@@ -197,7 +197,9 @@ export async function runGithubCiGate({
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
+// npm prebuild waits only in Workers Builds; ordinary CI must not wait for itself.
+if (process.argv[1] && resolve(process.argv[1]) === modulePath
+    && (!process.argv.includes('--workers-build-only') || process.env.WORKERS_CI === '1')) {
   try { await runGithubCiGate(); } catch (error) {
     console.error(error instanceof GithubCiGateError ? error.message : 'GitHub CI gate failed; deployment stopped.');
     process.exitCode = 1;

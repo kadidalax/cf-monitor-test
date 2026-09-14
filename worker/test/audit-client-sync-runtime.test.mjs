@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateToken } from '../src/auth/jwt.ts';
 import { encryptBackup } from '../src/utils/backup.ts';
-import { hashAgentToken } from '../src/utils/client.ts';
-import { createRuntimeFixture, runtimeSecrets } from '../test-support/runtime-fixture.mjs';
+import { generateAgentToken, hashAgentToken } from '../src/utils/client.ts';
+import { createRuntimeFixture, eventually, runtimeSecrets } from '../test-support/runtime-fixture.mjs';
 import { rpc } from '../../scripts/test-support/postgres.mjs';
 
 async function setup(t) {
@@ -76,4 +76,73 @@ test('W02: consecutive native rotations and restart reject every superseded cred
   await f.restart();
   assert.equal((await f.report(current)).status, 200);
   for (const previous of old) assert.equal((await f.report(previous)).status, 401);
+});
+
+test('W02: native sockets keep identity across report attachments and enforce revocation', { timeout: 90000 }, async t => {
+  const f = await setup(t);
+  const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
+  const stub = namespace.get(namespace.idFromName('global'));
+  const live = async () => (await stub.fetch('https://do/live')).json();
+  const upgrade = current => f.fetch('/api/clients/report', {
+    headers: { Upgrade: 'websocket', Authorization: `Bearer ${current}` },
+  });
+  async function open(child, current) {
+    const response = await upgrade(current);
+    assert.equal(response.status, 101, 'a current identity must establish the native socket');
+    const connection = { ws: response.webSocket, acknowledged: 0, errors: 0, closeCode: null };
+    connection.ws.addEventListener('message', event => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'ack') connection.acknowledged += 1;
+      if (message.type === 'error') connection.errors += 1;
+    });
+    connection.ws.addEventListener('close', event => { connection.closeCode = event.code; });
+    connection.ws.accept();
+    child.after(() => { try { connection.ws.close(); } catch {} });
+    return connection;
+  }
+  async function report(connection, uuid, cpu) {
+    const expected = connection.acknowledged + 1;
+    connection.ws.send(JSON.stringify({ type: 'report', data: { cpu, timestamp: Date.now() } }));
+    await eventually(() => connection.acknowledged >= expected || connection.errors > 0 || connection.closeCode !== null);
+    assert.equal(connection.closeCode, null, 'saving a valid report must not retire the same connection');
+    assert.equal(connection.errors, 0, 'the current connection must keep accepting valid reports');
+    assert.equal(connection.acknowledged, expected);
+    const snapshot = await live();
+    assert.ok(snapshot.online.includes(uuid));
+    assert.equal(snapshot.data[uuid].cpu, cpu);
+  }
+
+  for (const scenario of ['consecutive reports', 'metadata then report', 'rotation and deletion']) {
+    await t.test(scenario, async child => {
+      const uuid = `socket-${scenario.replaceAll(' ', '-')}`;
+      const current = generateAgentToken();
+      await f.database.query('insert into clients(uuid,name,token_hash) values($1,$2,$3)',
+        [uuid, 'Synthetic socket', await hashAgentToken(current)]);
+      assert.equal((await f.admin(`/clients/${uuid}/edit`, { name: 'Confirmed socket' })).status, 200);
+      const connection = await open(child, current);
+      await report(connection, uuid, 11);
+      if (scenario === 'consecutive reports') {
+        await report(connection, uuid, 12);
+        await report(connection, uuid, 13);
+      } else if (scenario === 'metadata then report') {
+        assert.equal((await f.admin(`/clients/${uuid}/edit`, { name: 'Updated socket metadata' })).status, 200);
+        await report(connection, uuid, 14);
+        await report(connection, uuid, 15);
+      } else {
+        const rotated = await f.admin(`/clients/${uuid}/token/rotate`, {});
+        assert.equal(rotated.status, 200);
+        const replacement = (await rotated.json()).token;
+        await eventually(() => connection.closeCode !== null);
+        assert.equal(connection.closeCode, 1008, 'rotation must still retire the old native socket');
+        assert.equal((await upgrade(current)).status, 401);
+        const next = await open(child, replacement);
+        await report(next, uuid, 16);
+        assert.equal((await f.admin(`/clients/${uuid}/remove`, {})).status, 200);
+        await eventually(() => next.closeCode !== null);
+        assert.equal(next.closeCode, 1008, 'deletion must still retire the native socket');
+        assert.equal((await upgrade(replacement)).status, 401);
+        assert.ok(!(await live()).online.includes(uuid));
+      }
+    });
+  }
 });
