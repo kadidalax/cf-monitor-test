@@ -36,7 +36,7 @@ func basicInfoDeliveryFixture(t *testing.T) (*reportPreparer, *pingReportState) 
 	var samples int64
 	preparer := &reportPreparer{collect: func(seconds int) Report {
 		samples++
-		return Report{CPU: 12, Timestamp: 1800000000000 + samples*3000, ReportInterval: seconds}
+		return Report{CPU: float64Metric(12), Timestamp: 1800000000000 + samples*3000, ReportInterval: seconds}
 	}}
 	state := newPingReportState()
 	t.Cleanup(state.close)

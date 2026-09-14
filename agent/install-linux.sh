@@ -119,6 +119,9 @@ normalize_proxy_url() {
     echo "${name} must use an http:// or https:// URL without credentials, query, or fragment." >&2
     exit 1
   fi
+  if [ "$name" = "--install-ghproxy" ]; then
+    require_https_url "$name" "$value" || return 1
+  fi
   printf '%s' "$value"
 }
 
@@ -129,6 +132,28 @@ require_https_url() {
     echo "${name} must use an https:// URL." >&2
     exit 1
   fi
+}
+
+require_trusted_checksum_url() {
+  case "$1" in
+    "https://github.com/$CF_MONITOR_REPOSITORY/releases/latest/download/SHA256SUMS") return 0 ;;
+    "https://github.com/$CF_MONITOR_REPOSITORY/releases/download/"*/SHA256SUMS)
+      _cf_checksum_tag="${1#https://github.com/$CF_MONITOR_REPOSITORY/releases/download/}"
+      _cf_checksum_tag="${_cf_checksum_tag%/SHA256SUMS}"
+      _cf_checksum_tag="$(printf '%s' "$_cf_checksum_tag" | sed 's/%2[Bb]/+/g')"
+      if release_tag_is_safe "$_cf_checksum_tag"; then return 0; fi ;;
+  esac
+  echo "Checksum URL must be an official repository HTTPS release SHA256SUMS." >&2
+  return 1
+}
+
+require_trusted_source_url() {
+  case "$1" in
+    *"/../"*|*"/./"*|*"%"*|*"@"*|*"?"*|*"#"*) ;;
+    "https://github.com/$CF_MONITOR_REPOSITORY/archive/"*) return 0 ;;
+  esac
+  echo "Source URL must be an official repository HTTPS archive." >&2
+  return 1
 }
 
 with_github_proxy() {
@@ -143,47 +168,20 @@ with_github_proxy() {
 }
 
 download_file() {
-  local url="$1"
-  local output="$2"
-  if [[ "$DRY_RUN" == "1" ]]; then
-    if command -v curl >/dev/null 2>&1; then
-      local curl_args=(-fsSL --retry 3 -o "$output")
-      if [[ -n "$PROXY" ]]; then
-        curl_args+=(--proxy "$PROXY")
-      fi
-      printf '[dry-run] curl'
-      printf ' %q' "${curl_args[@]}" "$url"
-      printf '\n'
-    elif command -v wget >/dev/null 2>&1; then
-      local wget_args=(-O "$output")
-      if [[ -n "$PROXY" ]]; then
-        wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-      fi
-      printf '[dry-run] wget'
-      printf ' %q' "${wget_args[@]}" "$url"
-      printf '\n'
-    else
-      echo "[dry-run] download \"$url\" to \"$output\""
-    fi
-    return
+  _cf_download_url="$1"
+  _cf_download_output="$2"
+  require_https_url "download URL" "$_cf_download_url" || return 1
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "[dry-run] download $_cf_download_url to $_cf_download_output (HTTPS-only redirects)"
+    return 0
   fi
-
-  if command -v curl >/dev/null 2>&1; then
-    local curl_args=(-fsSL --retry 3 -o "$output")
-    if [[ -n "$PROXY" ]]; then
-      curl_args+=(--proxy "$PROXY")
-    fi
-    curl "${curl_args[@]}" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    local wget_args=(-O "$output")
-    if [[ -n "$PROXY" ]]; then
-      wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-    fi
-    wget "${wget_args[@]}" "$url"
-  else
-    echo "curl or wget is required to download files." >&2
-    exit 1
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required for downloads with HTTPS-only redirects." >&2
+    return 1
   fi
+  set -- -fsSL --proto '=https' --proto-redir '=https' --retry 3
+  [ -z "$PROXY" ] || set -- "$@" --proxy "$PROXY"
+  curl "$@" -o "$_cf_download_output" "$_cf_download_url"
 }
 
 resolve_build_dir() {
@@ -204,8 +202,8 @@ resolve_build_dir() {
   fi
 
   local source_url="${SOURCE_URL:-https://github.com/${CF_MONITOR_REPOSITORY}/archive/refs/heads/${CF_MONITOR_BRANCH}.tar.gz}"
-  source_url="$(with_github_proxy "$source_url")"
-  download_file "$source_url" "$source_archive" >&2
+  require_trusted_source_url "$source_url" || return 1
+  download_file "$source_url" "$source_archive" >&2 || return 1
 
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[dry-run] tar -xzf \"$source_archive\" -C \"$source_dir\"" >&2
@@ -284,17 +282,14 @@ default_binary_url() {
 }
 
 default_checksum_url() {
-  local base="${BINARY_BASE_URL:-$CF_MONITOR_RELEASE_BASE}"
-  printf '%s/SHA256SUMS' "${base%/}"
+  printf '%s/SHA256SUMS' "$CF_MONITOR_RELEASE_BASE"
 }
 
 verify_binary_checksum() {
   local binary="$1"
   local filename="$2"
   local checksum_url="$3"
-  if [[ -z "$checksum_url" ]]; then
-    return
-  fi
+  require_trusted_checksum_url "$checksum_url" || return 1
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[dry-run] verify SHA256SUMS for ${filename} from ${checksum_url}"
     return
@@ -306,7 +301,11 @@ verify_binary_checksum() {
 
   local sums_file expected actual
   sums_file="$(mktemp /tmp/cf-vps-monitor-agent-sha256.XXXXXX)"
-  download_file "$checksum_url" "$sums_file"
+  if ! download_file "$checksum_url" "$sums_file"; then
+    rm -f "$sums_file"
+    echo "Failed to download the trusted release checksum." >&2
+    return 1
+  fi
   expected="$(awk -v f="$filename" '{name=$2; sub(/^\*/, "", name); sub(/^.*\//, "", name); if (name == f) { print tolower($1); exit }}' "$sums_file")"
   rm -f "$sums_file"
   if [[ -z "$expected" ]]; then
@@ -708,28 +707,29 @@ agent_disk_openrc_content() {
 name="CF VPS Monitor Disk Usage"
 description="Local container file allocation collector"
 command=$(shell_quote "$INSTALL_DIR/cf-vps-monitor-agent")
-command_args=$(shell_quote "--disk-usage-collector $(shell_quote "$SERVICE_NAME") --mount-include $(shell_quote "$MOUNT_INCLUDE") --mount-exclude $(shell_quote "$MOUNT_EXCLUDE") --container-disk-total-bytes $CONTAINER_DISK_TOTAL_BYTES")
+command_args=$(shell_quote "--disk-usage-collector $(shell_quote "$SERVICE_NAME") --mount-include $(shell_quote "$MOUNT_INCLUDE") --mount-exclude $(shell_quote "$MOUNT_EXCLUDE") --container-disk-total-bytes $CONTAINER_DISK_TOTAL_BYTES --log-file $(shell_quote "/var/log/$DISK_SERVICE_NAME.log")")
 command_user="root:root"
 command_background=true
 start_stop_daemon_args="--wait 1000"
 pidfile="/run/\${RC_SVCNAME}.pid"
 directory="/"
-output_log="/var/log/\${RC_SVCNAME}.log"
-error_log="/var/log/\${RC_SVCNAME}.log"
+collector_log="/var/log/\${RC_SVCNAME}.log"
+output_log="/dev/null"
+error_log="/dev/null"
 
 start_pre() {
-  _cf_disk_log="\$output_log"
+  _cf_disk_log="\$collector_log"
   while :; do
     [ ! -L "\$_cf_disk_log" ] || { eerror "Refusing linked disk collector log"; return 1; }
     _cf_disk_parent="\$(dirname "\$_cf_disk_log")" || return 1
     [ "\$_cf_disk_parent" != "\$_cf_disk_log" ] || break
     _cf_disk_log="\$_cf_disk_parent"
   done
-  if [ -e "\$output_log" ] && { [ ! -f "\$output_log" ] || [ "\$(stat -c %h "\$output_log")" != 1 ]; }; then
+  if [ -e "\$collector_log" ] && { [ ! -f "\$collector_log" ] || [ "\$(stat -c %h "\$collector_log")" != 1 ]; }; then
     eerror "Refusing non-regular disk collector log"
     return 1
   fi
-  checkpath -f -m 0600 -o root:root "\$output_log" || return 1
+  checkpath -f -m 0600 -o root:root "\$collector_log" || return 1
 }
 EOF
 }
@@ -1117,7 +1117,7 @@ else
       if ! BINARY_URL="$(with_github_proxy "$DEFAULT_BINARY_URL")"; then
         exit 1
       fi
-      CHECKSUM_URL="$(with_github_proxy "$(default_checksum_url)")"
+      CHECKSUM_URL="$(default_checksum_url)"
     fi
     AUTO_BINARY_URL="1"
   fi
@@ -1128,13 +1128,14 @@ if [[ -n "$BINARY_URL" ]]; then
     echo "Custom --binary-url requires --checksum-url for SHA256 verification." >&2
     exit 1
   fi
+  require_trusted_checksum_url "$CHECKSUM_URL" || exit 1
   if [[ "$DRY_RUN" == "1" ]]; then
     WORK_BIN="/tmp/cf-vps-monitor-agent.dry-run"
     download_file "$BINARY_URL" "$WORK_BIN"
   else
     WORK_BIN="$(mktemp /tmp/cf-vps-monitor-agent.XXXXXX)"
     if download_file "$BINARY_URL" "$WORK_BIN"; then
-      verify_binary_checksum "$WORK_BIN" "$(basename "$BINARY_URL")" "$CHECKSUM_URL"
+      verify_binary_checksum "$WORK_BIN" "$(basename "$BINARY_URL")" "$CHECKSUM_URL" || exit 1
       chmod 0755 "$WORK_BIN"
     elif [[ "$AUTO_BINARY_URL" == "1" ]]; then
       echo "Prebuilt agent binary was not found at ${BINARY_URL}; falling back to source build." >&2
@@ -1220,6 +1221,7 @@ export CF_MONITOR_NIC_INCLUDE=$(shell_quote "$NIC_INCLUDE")
 export CF_MONITOR_NIC_EXCLUDE=$(shell_quote "$NIC_EXCLUDE")
 export CF_MONITOR_TRAFFIC_RESET_DAY=$(shell_quote "$TRAFFIC_RESET_DAY")
 export CF_MONITOR_TRAFFIC_STATE_FILE=$(shell_quote "${STATE_DIR}/traffic-state.json")
+export CF_MONITOR_LOG_FILE=$(shell_quote "$STATE_DIR/agent.log")
 exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
 EOF
 )
@@ -1243,9 +1245,9 @@ EOF
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>$(xml_escape "/var/log/$SERVICE_NAME.log")</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>$(xml_escape "/var/log/$SERVICE_NAME.log")</string>
+  <string>/dev/null</string>
 </dict>
 </plist>
 EOF
@@ -1256,7 +1258,7 @@ EOF
   run launchctl bootstrap system "$PLIST_FILE"
   echo "Installed ${SERVICE_NAME}."
   echo "Status: launchctl print system/${SERVICE_NAME}"
-  echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
+  echo "Logs:   tail -f ${STATE_DIR}/agent.log"
   exit 0
 fi
 

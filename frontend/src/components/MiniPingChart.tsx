@@ -14,6 +14,7 @@ import {
   fetchPingTaskSeries,
   formatPingMs,
   getPingSeriesAverage,
+  getPingSeriesTimeoutCount,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
@@ -43,6 +44,7 @@ export default function MiniPingChart({
   const [series, setSeries] = useState<PingTaskSeries[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [rangeEnd, setRangeEnd] = useState(() => Date.now());
 
   useEffect(() => {
     if (!uuid) return;
@@ -52,12 +54,15 @@ export default function MiniPingChart({
     async function loadData() {
       setLoading(true);
       setError(null);
+      const end = Date.now();
+      setRangeEnd(end);
 
       try {
         const nextSeries = await fetchPingTaskSeries(uuid, {
           limit,
           maxTasks: 8,
           rangeHours,
+          cursor: new Date(end).toISOString(),
           includeHidden,
           signal: controller.signal,
         });
@@ -83,8 +88,8 @@ export default function MiniPingChart({
   const chartRows = useMemo(() => buildPingChartRows(seriesWithRecords), [seriesWithRecords]);
   const yAxisDomain = useMemo(() => getPingYAxisDomain(seriesWithRecords), [seriesWithRecords]);
   const xAxisDomain = useMemo(
-    () => getPingTimeDomain(seriesWithRecords, rangeHours),
-    [rangeHours, seriesWithRecords],
+    () => getPingTimeDomain(seriesWithRecords, rangeHours, rangeEnd),
+    [rangeHours, rangeEnd, seriesWithRecords],
   );
 
   const contentWidth = typeof width === 'number' ? `${width}px` : width;
@@ -138,6 +143,7 @@ export default function MiniPingChart({
             <XAxis
               dataKey="time"
               type="number"
+              allowDuplicatedCategory={false}
               domain={xAxisDomain}
               tickFormatter={(value) => new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
               fontSize={11}
@@ -172,6 +178,7 @@ export default function MiniPingChart({
               <Line
                 key={item.task.key}
                 type="monotone"
+                data={chartRows.filter((row) => row[item.task.key] !== undefined)}
                 dataKey={item.task.key}
                 name={item.task.label}
                 stroke={item.task.color}
@@ -179,8 +186,8 @@ export default function MiniPingChart({
                 strokeOpacity={1}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                dot={false}
-                connectNulls
+                dot={{ r: 2 }}
+                connectNulls={false}
                 isAnimationActive={false}
               />
             ))}
@@ -219,6 +226,7 @@ export default function MiniPingChart({
               </Flex>
               <Text size="1" color="gray" className="mini-ping-chart-legend-stat">
                 {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
+                {` · 超时 ${getPingSeriesTimeoutCount(item.records)} / ${item.records.length}`}
               </Text>
             </Box>
           );

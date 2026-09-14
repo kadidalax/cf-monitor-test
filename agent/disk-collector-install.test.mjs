@@ -196,7 +196,7 @@ for (const [installer, mode] of [['install.sh', 'openrc'], ['install.sh', 'syste
     assert.equal(readFileSync(join(item.root, 'check-args'), 'utf8'), '--disk-usage-check\n--mount-include\n/\n--mount-exclude\n/data space\n--container-disk-total-bytes\n0\n');
     assert.equal(readFileSync(join(item.root, 'check-token'), 'utf8'), 'unset\n');
     if (mode === 'openrc') {
-      assert.equal(readFileSync(join(item.root, 'collector-args'), 'utf8'), `--disk-usage-collector\n${service}\n--mount-include\n/\n--mount-exclude\n/data space\n--container-disk-total-bytes\n0\n`);
+      assert.equal(readFileSync(join(item.root, 'collector-args'), 'utf8'), `--disk-usage-collector\n${service}\n--mount-include\n/\n--mount-exclude\n/data space\n--container-disk-total-bytes\n0\n--log-file\n${posix(join(item.root, 'var/log', service + '-disk-usage.log'))}\n`);
       assert.equal(readFileSync(join(item.root, 'collector-token'), 'utf8'), 'unset\n');
       assert.equal(readFileSync(join(item.root, 'agent-env'), 'utf8'), `0\n${posix(item.cacheDir)}/usage.json\n`);
     }

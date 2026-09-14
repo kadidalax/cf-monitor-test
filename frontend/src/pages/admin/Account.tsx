@@ -1,3 +1,4 @@
+import { normalizeAuthUser } from '../../contexts/auth-state';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Badge,
@@ -28,6 +29,8 @@ import { toast } from 'sonner';
 import { useApi, useAuth } from '../../contexts/AuthContext';
 import { downloadRecoveryCodes, formatRecoveryCodesText, normalizeMfaCode, requestMfaStepUp } from '../../utils/mfa';
 
+import { hasValidNewPasswordLength, NEW_PASSWORD_GUIDANCE } from '../../utils/passwordPolicy';
+
 type AccountTab = 'username' | 'password' | 'security';
 
 type MfaStatus = {
@@ -53,6 +56,8 @@ export default function AdminAccount() {
   const [savingUsername, setSavingUsername] = useState(false);
   const [saving, setSaving] = useState(false);
   const [mfaStatus, setMfaStatus] = useState<MfaStatus | null>(null);
+  const [mfaStatusLoading, setMfaStatusLoading] = useState(false);
+  const [mfaStatusError, setMfaStatusError] = useState('');
   const [mfaLoading, setMfaLoading] = useState(false);
   const [setupPassword, setSetupPassword] = useState('');
   const [setup, setSetup] = useState<MfaSetup | null>(null);
@@ -67,10 +72,19 @@ export default function AdminAccount() {
   }, [user?.username]);
 
   const loadMfaStatus = useCallback(async () => {
+    setMfaStatusLoading(true);
+    setMfaStatusError('');
     try {
-      setMfaStatus(await apiFetch('/admin/account/mfa'));
+      const status = await apiFetch('/admin/account/mfa');
+      if (!status || typeof status.enabled !== 'boolean'
+        || !Number.isInteger(status.recovery_codes_remaining) || status.recovery_codes_remaining < 0) {
+        throw new Error('双重身份验证状态格式异常，请重试');
+      }
+      setMfaStatus(status);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '无法读取双重身份验证状态');
+      setMfaStatusError(error instanceof Error ? error.message : '无法读取双重身份验证状态');
+    } finally {
+      setMfaStatusLoading(false);
     }
   }, [apiFetch]);
 
@@ -108,7 +122,8 @@ export default function AdminAccount() {
         method: 'POST',
         body: JSON.stringify({ username: nextUsername }),
       });
-      const nextUser = result.user || { username: nextUsername };
+      const nextUser = normalizeAuthUser(result.user);
+      if (result.success !== true || !nextUser || nextUser.uuid !== user?.uuid) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       updateUser(nextUser);
       setUsername(nextUser.username || nextUsername);
       toast.success('用户名修改成功');
@@ -122,14 +137,15 @@ export default function AdminAccount() {
   const handleChangePassword = async () => {
     if (!oldPassword || !newPassword || !confirmPassword) { toast.error('请填写所有字段'); return; }
     if (newPassword !== confirmPassword) { toast.error('两次输入的新密码不一致'); return; }
-    if (newPassword.length < 6) { toast.error('密码长度至少 6 位'); return; }
+    if (!hasValidNewPasswordLength(newPassword)) { toast.error(NEW_PASSWORD_GUIDANCE); return; }
 
     setSaving(true);
     try {
-      await apiFetch('/admin/account/chpasswd', {
+      const result = await apiFetch('/admin/account/chpasswd', {
         method: 'POST',
         body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
       });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       toast.success('密码修改成功');
       setOldPassword('');
       setNewPassword('');
@@ -149,6 +165,7 @@ export default function AdminAccount() {
         method: 'POST',
         body: JSON.stringify({ password: setupPassword }),
       });
+      if (!['setup_token', 'secret', 'uri'].every((key) => typeof result[key] === 'string' && result[key].length > 0)) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       setSetup(result as MfaSetup);
       setSetupCode('');
     } catch (error) {
@@ -169,7 +186,9 @@ export default function AdminAccount() {
         method: 'POST',
         body: JSON.stringify({ setup_token: setup.setup_token, code }),
       });
-      setRecoveryCodes(Array.isArray(result.recovery_codes) ? result.recovery_codes : []);
+      if (result.success !== true || !Array.isArray(result.recovery_codes) || result.recovery_codes.length === 0
+        || result.recovery_codes.some((value: unknown) => typeof value !== 'string' || !value)) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
+      setRecoveryCodes(result.recovery_codes);
       setSetup(null);
       setSetupPassword('');
       setSetupCode('');
@@ -186,7 +205,9 @@ export default function AdminAccount() {
     setMfaLoading(true);
     try {
       const result = await apiFetch('/admin/account/mfa/recovery-codes', { method: 'POST' });
-      setRecoveryCodes(Array.isArray(result.recovery_codes) ? result.recovery_codes : []);
+      if (result.success !== true || !Array.isArray(result.recovery_codes) || result.recovery_codes.length === 0
+        || result.recovery_codes.some((value: unknown) => typeof value !== 'string' || !value)) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
+      setRecoveryCodes(result.recovery_codes);
       await loadMfaStatus();
       toast.success('恢复码已重新生成，旧恢复码已失效');
     } catch (error) {
@@ -201,7 +222,8 @@ export default function AdminAccount() {
     if (!await requestMfaStepUp()) return;
     setMfaLoading(true);
     try {
-      await apiFetch('/admin/account/mfa/disable', { method: 'POST' });
+      const result = await apiFetch('/admin/account/mfa/disable', { method: 'POST' });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       setSetup(null);
       setSetupPassword('');
       await loadMfaStatus();
@@ -254,7 +276,8 @@ export default function AdminAccount() {
           <Heading size="3" mb="3">更改密码</Heading>
           <Flex direction="column" gap="3">
             <label><Text size="2" weight="bold">旧密码</Text><TextField.Root className="admin-account-input" type="password" value={oldPassword} autoComplete="current-password" onChange={e => setOldPassword(e.target.value)} /></label>
-            <label><Text size="2" weight="bold">新密码</Text><TextField.Root className="admin-account-input" type="password" value={newPassword} autoComplete="new-password" onChange={e => setNewPassword(e.target.value)} /></label>
+            <label><Text size="2" weight="bold">新密码</Text><TextField.Root className="admin-account-input" type="password" value={newPassword} autoComplete="new-password" aria-describedby="account-new-password-help" onChange={e => setNewPassword(e.target.value)} /></label>
+            <Text id="account-new-password-help" size="1" color="gray">{NEW_PASSWORD_GUIDANCE}</Text>
             <label><Text size="2" weight="bold">确认新密码</Text><TextField.Root className="admin-account-input" type="password" value={confirmPassword} autoComplete="new-password" onChange={e => setConfirmPassword(e.target.value)} /></label>
             <Button onClick={handleChangePassword} disabled={saving}><Save size={16} />{saving ? '保存中...' : '修改密码'}</Button>
           </Flex>
@@ -269,12 +292,16 @@ export default function AdminAccount() {
               <Text size="2" color="gray">兼容 Google Authenticator、Microsoft Authenticator、1Password 等验证器。</Text>
             </Box>
             <Badge color={mfaStatus?.enabled ? 'green' : 'gray'} size="2">
-              {mfaStatus?.enabled ? '已启用' : '未启用'}
+              {!mfaStatus ? '状态未知' : mfaStatus.enabled ? '已启用' : '未启用'}
             </Badge>
           </Flex>
 
+          {mfaStatusError && <Flex role="alert" direction="column" gap="2" mb="3">
+            <Text color="red">{mfaStatusError}</Text>
+            <Button variant="soft" disabled={mfaStatusLoading} onClick={() => void loadMfaStatus()}>重试</Button>
+          </Flex>}
           {!mfaStatus ? (
-            <Text color="gray">正在读取状态...</Text>
+            mfaStatusLoading ? <Text color="gray">正在读取状态...</Text> : null
           ) : mfaStatus.enabled && !setup ? (
             <Flex direction="column" gap="4">
               <Callout.Root color="green"><Callout.Icon><ShieldCheck size={18} /></Callout.Icon><Callout.Text>账户已受双重身份验证保护，敏感操作确认在通过后 5 分钟内有效。</Callout.Text></Callout.Root>

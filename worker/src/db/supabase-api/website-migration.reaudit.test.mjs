@@ -48,7 +48,8 @@ test('R-D02 actual setup preserves explicit choices on same checksum and changed
     });
     const { applyBundledMigrations } = loader.load('worker/src/routes/setup.ts');
     const apply = () => applyBundledMigrations('synthetic-project', 'synthetic-management-token');
-    assert.equal((await apply()).applied, 5);
+    const migrationCount = loader.load('worker/src/generated/supabase-migrations.ts').BUNDLED_SUPABASE_MIGRATIONS.length;
+    assert.equal((await apply()).applied, migrationCount);
     const site = await rpc(sql, 'cfm_create_website_monitor', { input_monitor: {
       name: 'Synthetic', url: 'https://site.audit.example.com', ...disabledProbe,
     } });

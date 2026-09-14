@@ -45,7 +45,7 @@ export async function createRuntimeFixture({ persistDurableObjects = false, exte
       compatibilityDate: date, compatibilityFlags: ['nodejs_compat'],
       log: new Log(LogLevel.ERROR), port: 0,
       unsafeTriggerHandlers: triggerScheduled,
-      bindings: runtimeSecrets,
+      bindings: { ...runtimeSecrets },
       durableObjects: {
         LIVE_DATA: { className: 'LiveDataDO', useSQLite: true },
         RATE_LIMIT: { className: 'RateLimitDO', useSQLite: true },
@@ -104,7 +104,11 @@ export async function createRuntimeFixture({ persistDurableObjects = false, exte
         const timeout = setTimeout(() => resolve(), 5000);
         initialCreateBarrier = { count: 0, promise, resolve: () => { clearTimeout(timeout); resolve(); } };
       },
-      async restart() {
+      async restart(nextBindings = {}) {
+        for (const [name, value] of Object.entries(nextBindings)) {
+          if (value === undefined || value === null) delete options.bindings[name];
+          else options.bindings[name] = value;
+        }
         options.script += `\n// Test cold restart ${crypto.randomUUID()}\n`;
         await mf.setOptions(options);
         await mf.ready;

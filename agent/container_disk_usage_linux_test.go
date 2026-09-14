@@ -357,6 +357,31 @@ func nativeDiskCacheFixture(t *testing.T) (string, string, directoryDiskCache) {
 	return root, filepath.Join(root, "cache", "usage.json"), cache
 }
 
+func TestDirectoryDiskNativeCollectorLogRequiresRootControlledFiles(t *testing.T) {
+	_, filename, _ := nativeDiskCacheFixture(t)
+	writer, err := openDirectoryCollectorLog(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("synthetic collector failure\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Lstat(filename, &stat); err != nil || stat.Uid != 0 || stat.Mode&0777 != 0600 {
+		t.Fatal("collector log must be created as a private root file")
+	}
+	if err := os.Chmod(filename, 0666); err != nil {
+		t.Fatal(err)
+	}
+	if writer, err := openDirectoryCollectorLog(filename); err == nil {
+		writer.Close()
+		t.Fatal("collector accepted a writable log file")
+	}
+}
+
 func TestDirectoryDiskNativeProtectedCacheRoundTrip(t *testing.T) {
 	root, name, cache := nativeDiskCacheFixture(t)
 	if err := writeDirectoryDiskCacheFile(name, cache); err != nil {

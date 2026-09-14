@@ -1,6 +1,6 @@
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
 import { resolveFlagCode } from '../components/Flag';
-import { getNodeStatus } from './nodeMetrics';
+import { getNodeStatus, metricNumber, resourceUsage, sumMetrics } from './nodeMetrics';
 
 export type OfflinePosition = 'first' | 'keep' | 'last';
 export type NodeStatusFilter = 'all' | 'online' | 'offline';
@@ -18,10 +18,10 @@ export interface NodeStatsSummary {
   onlineCount: number;
   totalCount: number;
   regionCount: number;
-  totalUp: number;
-  totalDown: number;
-  totalSpeedUp: number;
-  totalSpeedDown: number;
+  totalUp: number | null;
+  totalDown: number | null;
+  totalSpeedUp: number | null;
+  totalSpeedDown: number | null;
 }
 
 export interface MonitorFilterOptions {
@@ -68,10 +68,10 @@ export function getNodeStatsSummary(
   clients: ClientInfo[],
   liveData: LiveDataMap,
 ): NodeStatsSummary {
-  let totalUp = 0;
-  let totalDown = 0;
-  let totalSpeedUp = 0;
-  let totalSpeedDown = 0;
+  let totalUp: number | null = 0;
+  let totalDown: number | null = 0;
+  let totalSpeedUp: number | null = 0;
+  let totalSpeedDown: number | null = 0;
 
   const onlineCount = clients.filter((client) =>
     liveData.online.includes(client.uuid),
@@ -88,12 +88,10 @@ export function getNodeStatsSummary(
     if (!liveData.online.includes(client.uuid)) continue;
 
     const record = liveData.data[client.uuid];
-    if (!record) continue;
-
-    totalUp += record.net_total_up || 0;
-    totalDown += record.net_total_down || 0;
-    totalSpeedUp += record.net_out || 0;
-    totalSpeedDown += record.net_in || 0;
+    totalUp = sumMetrics(totalUp, record?.net_total_up);
+    totalDown = sumMetrics(totalDown, record?.net_total_down);
+    totalSpeedUp = sumMetrics(totalSpeedUp, record?.net_out);
+    totalSpeedDown = sumMetrics(totalSpeedDown, record?.net_in);
   }
 
   return {
@@ -176,6 +174,7 @@ export function sortAdminNodes(
     const bLive = liveData.data[b.uuid];
 
     let comparison = 0;
+    let metrics: [unknown, unknown] | undefined;
 
     switch (sortKey) {
       case 'manual':
@@ -188,25 +187,31 @@ export function sortAdminNodes(
         comparison = Number(bOnline) - Number(aOnline);
         break;
       case 'cpu':
-        comparison = (aLive?.cpu || 0) - (bLive?.cpu || 0);
+        metrics = [aLive?.cpu, bLive?.cpu];
         break;
       case 'memory':
-        comparison = getUsagePercent(aLive?.ram || 0, a.mem_total) - getUsagePercent(bLive?.ram || 0, b.mem_total);
+        metrics = [resourceUsage(aLive?.ram, aLive?.ram_total, a.mem_total).percent, resourceUsage(bLive?.ram, bLive?.ram_total, b.mem_total).percent];
         break;
       case 'disk':
-        comparison = getUsagePercent(aLive?.disk || 0, a.disk_total) - getUsagePercent(bLive?.disk || 0, b.disk_total);
+        metrics = [resourceUsage(aLive?.disk, aLive?.disk_total, a.disk_total).percent, resourceUsage(bLive?.disk, bLive?.disk_total, b.disk_total).percent];
         break;
       case 'network':
-        comparison = ((aLive?.net_in || 0) + (aLive?.net_out || 0)) - ((bLive?.net_in || 0) + (bLive?.net_out || 0));
+        metrics = [sumMetrics(aLive?.net_in, aLive?.net_out), sumMetrics(bLive?.net_in, bLive?.net_out)];
         break;
       case 'traffic':
-        comparison = ((aLive?.net_total_up || 0) + (aLive?.net_total_down || 0)) - ((bLive?.net_total_up || 0) + (bLive?.net_total_down || 0));
+        metrics = [sumMetrics(aLive?.net_total_up, aLive?.net_total_down), sumMetrics(bLive?.net_total_up, bLive?.net_total_down)];
         break;
       default:
         comparison = (a.name || '').localeCompare(b.name || '');
         break;
     }
 
+    if (metrics) {
+      const [aValue, bValue] = metrics.map(metricNumber);
+      if (aValue === null || bValue === null) {
+        if (aValue !== bValue) return aValue === null ? 1 : -1;
+      } else comparison = aValue - bValue;
+    }
     if (comparison === 0) {
       comparison = (a.name || '').localeCompare(b.name || '');
     }
@@ -238,11 +243,6 @@ function applyOfflinePosition(
 
     return aOnline ? -1 : 1;
   });
-}
-
-function getUsagePercent(value: number, total: number): number {
-  if (!total) return 0;
-  return (value / total) * 100;
 }
 
 function getSortOrder(client: ClientInfo): number {

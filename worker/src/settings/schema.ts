@@ -1,4 +1,5 @@
 import { validateWebhookUrl } from '../utils/webhook.ts';
+import { normalizeSmtpHost } from '../utils/smtp-host.ts';
 
 type SettingType = 'string' | 'boolean' | 'integer' | 'enum';
 
@@ -129,15 +130,28 @@ export const SETTING_SCHEMA = {
     min: 1000,
     max: 10000000,
   },
-  // 历史表真实磁盘占用（含索引）的熔断线，字节。Supabase 免费库卡的是磁盘字节，
-  // 行数只是它的粗糙代理：同样行数可能对应 72MB 也可能 189MB。
-  // 默认 400 MiB，给非历史表与索引膨胀留出余量。
+  // 历史有效数据的估算水位，默认400 MiB；清理后可恢复写入。
+  // 整库已分配空间单独诊断，不能用DELETE后仍占用的页阻止恢复。
   record_high_watermark_bytes: {
     type: 'integer',
     defaultValue: '419430400',
     public: false,
     min: 16777216,
     max: 549755813888,
+  },
+  database_storage_budget_bytes: {
+    type: 'integer',
+    defaultValue: '524288000',
+    public: false,
+    min: 67108864,
+    max: 549755813888,
+  },
+  theme_storage_quota_bytes: {
+    type: 'integer',
+    defaultValue: '33554432',
+    public: false,
+    min: 1048576,
+    max: 1073741824,
   },
   capacity_daily_view_minutes: {
     type: 'integer',
@@ -446,18 +460,6 @@ function normalizeUpdateRepositoryUrl(value: unknown): string | null {
   } catch {
     return null;
   }
-}
-
-function normalizeSmtpHost(value: unknown): string | null {
-  if (value === '' || value === null || value === undefined) return '';
-  if (typeof value !== 'string') return null;
-  const host = value.trim().toLowerCase();
-  if (!host || host === 'localhost') return null;
-  if (/[\s/@:]/.test(host)) return null;
-  if (/^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)) return null;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return null;
-  if (host === '::1' || host.startsWith('fc') || host.startsWith('fd')) return null;
-  return host;
 }
 
 function normalizeEmailAddress(value: unknown): string | null {

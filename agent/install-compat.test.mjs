@@ -158,11 +158,13 @@ function userCronFixture(t, cronMode) {
   writeFileSync(join(root, 'cron.txt'), cronBefore);
   writeFileSync(join(root, 'bin/crontab'), `#!/bin/sh
 if [ "$1" = -l ]; then
+  printf 'read\n' >> "$CF_MONITOR_TEST_CRON_EVENTS"
   if [ "$CF_MONITOR_TEST_CRON_MODE" = read-denied ]; then echo 'crontab: permission denied' >&2; exit 1; fi
   if [ "$CF_MONITOR_TEST_CRON_MODE" = no-table ]; then echo 'no crontab for fixture' >&2; exit 1; fi
   if [ "$CF_MONITOR_TEST_CRON_MODE" = busybox-no-table ]; then echo "crontab: can't open 'fixture': No such file or directory" >&2; exit 1; fi
   cat "$CF_MONITOR_TEST_CRON"
 else
+  printf 'write\n' >> "$CF_MONITOR_TEST_CRON_EVENTS"
   if [ "$CF_MONITOR_TEST_CRON_MODE" = write-denied ]; then echo 'crontab: permission denied' >&2; exit 1; fi
   cp "$1" "$CF_MONITOR_TEST_CRON"
 fi
@@ -176,6 +178,7 @@ while :; do sleep 1; done
   const result = shell(root, `
 export XDG_DATA_HOME="$ROOT/data" XDG_CONFIG_HOME="$ROOT/config" XDG_STATE_HOME="$ROOT/state"
 export CF_MONITOR_TEST_CRON="$ROOT/cron.txt" CF_MONITOR_TEST_CRON_MODE=${quote(cronMode)}
+export CF_MONITOR_TEST_CRON_EVENTS="$ROOT/cron-events"
 export CF_MONITOR_TEST_PIDS="$ROOT/processes.txt" CF_MONITOR_TEST_OUTPUT="$ROOT/running.txt"
 FIXTURE_BIN="$(cd "$ROOT/bin" && pwd)"
 export PATH="$FIXTURE_BIN:$PATH"
@@ -208,11 +211,25 @@ if [ -s "$PID_FILE" ]; then
 fi
 printf 'RESULT:%s:%s:%s\\n' "$install_status" "$alive" "$INSTALL_DIR"
 `, { timeout: 35000 });
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const output = result.stdout + result.stderr;
+  const cronEvents = existsSync(join(root, 'cron-events')) ? readFileSync(join(root, 'cron-events'), 'utf8') : '';
+  const diagnostic = JSON.stringify({
+    forkFailed: /\bfork\b|resource temporarily unavailable/i.test(output),
+    processInitializationFailed: /child_copy|dofork|couldn.t reserve|cygwin_exception|DLL rebasing|unable to remap/i.test(output),
+    temporaryFileFailed: /mktemp|temporary (?:file|directory)/i.test(output),
+    autostartConfigured: /Autostart: crontab @reboot configured\./.test(output),
+    autostartUnavailable: /autostart[^\r\n]*(?:not configured|unavailable|disabled)/i.test(output),
+    cronPrepareFailed: /Cannot prepare crontab/.test(output),
+    cronReadFailed: /Cannot read crontab/.test(output),
+    cronWriteFailed: /Cannot update crontab/.test(output),
+    cronReadAttempted: cronEvents.includes('read\n'),
+    cronWriteAttempted: cronEvents.includes('write\n'),
+  });
+  assert.equal(result.status, 0, diagnostic);
   const outcome = result.stdout.match(/RESULT:(\d+):(\d+):([^\r\n]+)/);
-  assert.ok(outcome, `${result.stdout}\n${result.stderr}`);
+  assert.ok(outcome, diagnostic);
   return {
-    output: result.stdout + result.stderr,
+    output, diagnostic,
     status: Number(outcome[1]), alive: Number(outcome[2]),
     installDir: outcome[3], expectedInstallDir: `${posix(root)}/data/cf-vps-monitor/fixture`,
     cron: readFileSync(join(root, 'cron.txt'), 'utf8'), cronBefore,
@@ -248,9 +265,9 @@ test('compat permitted crontab keeps existing jobs and adds this user Agent once
 for (const cronMode of ['no-table', 'busybox-no-table']) {
   test(`compat ${cronMode} allows first-time user autostart registration`, { skip: !shellAvailable }, t => {
     const result = userCronFixture(t, cronMode);
-    assert.equal(result.status, 0, result.output);
+    assert.equal(result.status, 0, result.diagnostic);
     assert.equal(result.alive, 1);
-    assert.match(result.cron, /^@reboot .*\/start\.sh.* # cf-vps-monitor:fixture$/m);
+    assert.match(result.cron, /^@reboot .*\/start\.sh.* # cf-vps-monitor:fixture$/m, result.diagnostic);
     assert.match(result.output, /Autostart: crontab @reboot configured\./);
     assert.deepEqual(result.cronScratch, []);
   });

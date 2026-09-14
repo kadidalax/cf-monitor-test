@@ -1,4 +1,4 @@
-import type { MonitorReportPayload } from './monitor-report';
+import { selectMetricAvailability, type MonitorReportPayload } from './monitor-report';
 
 const METRIC_FIELDS = [
   'cpu', 'gpu', 'ram', 'ram_total', 'swap', 'swap_total', 'load', 'temp',
@@ -30,6 +30,7 @@ function selectScalars(value: unknown, fields: readonly string[]): Record<string
 // Public output is a separate allowlisted representation, including nested data.
 export function toPublicReport(report: MonitorReportPayload): Record<string, unknown> {
   const result = selectScalars(report, METRIC_FIELDS);
+  Object.assign(result, selectMetricAvailability(report));
   result.gpus = Array.isArray(report.gpus)
     ? report.gpus.slice(0, 16).map(gpu => selectScalars(gpu, GPU_FIELDS))
     : [];

@@ -1,19 +1,20 @@
 /**
  * NodeTable - sortable public node table with expandable details.
  */
-import React, { useMemo, useState } from 'react';
+import React, { lazy, Suspense, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Box, Flex, IconButton, Popover, Table, Text } from '@radix-ui/themes';
 import { ArrowDown, ArrowUp, ChevronRight, ChevronsUpDown } from 'lucide-react';
 import UsageBar from './UsageBar';
 import Flag from './Flag';
-import MiniPingChart from './MiniPingChart';
 import PriceTags from './PriceTags';
-import { diskUsagePresentation, formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { cpuCapacity, diskUsagePresentation, formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, sumMetrics, type NodeStatus } from '../utils/nodeMetrics';
 import { comparePublicClients } from '../utils/publicClients';
 import { getOSImage, getOSName } from '../utils/osIcon';
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
 import { formatCpuSpec } from '../utils/cpuFormat';
+
+const MiniPingChart = lazy(() => import('./MiniPingChart'));
 
 interface NodeTableProps {
   nodes: ClientInfo[];
@@ -130,9 +131,9 @@ function ExpandedNodeDetails({
       <div className="node-table-expanded-layout">
         <div className="node-table-detail-sections">
           <DetailSection title="资源规格">
-            <DetailRow label="CPU" value={formatCpuSpec(node.cpu_name, node.cpu_cores)} />
+            <DetailRow label="CPU" value={formatCpuSpec(node.cpu_name, cpuCapacity(live, node.cpu_cores))} />
             <DetailRow label="内存" value={formatMetricBytes(resourceTotal(live?.ram_total, node.mem_total))} />
-            <DetailRow label="交换" value={formatMetricBytes(live?.swap_total ?? node.swap_total)} />
+            <DetailRow label="交换" value={formatMetricBytes(live?.swap_total === undefined ? node.swap_total : live.swap_total)} />
             <DetailRow label="磁盘" value={diskUsagePresentation(live, node.disk_total).detail} />
             {diskUsagePresentation(live).estimated && <DetailRow label="文件占用估算" value={diskUsagePresentation(live).sampleLabel} />}
           </DetailSection>
@@ -173,7 +174,9 @@ function ExpandedNodeDetails({
         </div>
 
         <div className="node-table-ping-section">
-          <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer includeHidden={includeHidden} />
+          <Suspense fallback={<div role="status" style={{ height: 210, display: 'grid', placeItems: 'center' }}>正在加载图表…</div>}>
+            <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer includeHidden={includeHidden} />
+          </Suspense>
         </div>
       </div>
     </Box>
@@ -248,13 +251,13 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
           metrics = [resourceUsage(aLive?.disk, aLive?.disk_total, a.disk_total).percent, resourceUsage(bLive?.disk, bLive?.disk_total, b.disk_total).percent];
           break;
         case 'network':
-          cmp = ((aLive?.net_in || 0) + (aLive?.net_out || 0)) - ((bLive?.net_in || 0) + (bLive?.net_out || 0));
+          metrics = [sumMetrics(aLive?.net_in, aLive?.net_out), sumMetrics(bLive?.net_in, bLive?.net_out)];
           break;
         case 'price':
           cmp = (a.price || 0) - (b.price || 0);
           break;
         case 'traffic':
-          cmp = ((aLive?.net_total_up || 0) + (aLive?.net_total_down || 0)) - ((bLive?.net_total_up || 0) + (bLive?.net_total_down || 0));
+          metrics = [sumMetrics(aLive?.net_total_up, aLive?.net_total_down), sumMetrics(bLive?.net_total_up, bLive?.net_total_down)];
           break;
       }
 

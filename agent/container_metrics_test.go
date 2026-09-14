@@ -17,7 +17,7 @@ import (
 
 func TestContainerMetricsUnknownReportJSON(t *testing.T) {
 	report := Report{
-		CPU: 17, RAM: 46612480, RAMTotal: 128000000,
+		CPU: float64Metric(17), RAM: int64Metric(46612480), RAMTotal: int64Metric(128000000),
 		BasicInfo: &BasicInfo{DiskTotal: 1055735824384, Uptime: 330000},
 	}
 	data, err := json.Marshal(report)
@@ -367,7 +367,7 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 					t.Errorf("prepared report %s = %s, want null", name, fields[name])
 				}
 			}
-			if report.ReportInterval != 3 || report.Timestamp <= 0 || report.RAMTotal <= 0 {
+			if report.ReportInterval != 3 || report.Timestamp <= 0 || report.RAMTotal == nil || *report.RAMTotal <= 0 {
 				t.Error("normal interval, timestamp or memory collection was lost")
 			}
 		})

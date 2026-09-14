@@ -17,6 +17,8 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
   let restoreCalls = 0;
   let syncCalls = 0;
   let failSync = syncFails;
+  let revision = 0;
+  const pending = new Map();
   const db = {
     getBackupConfigurationSnapshot: async () => ({ clients: structuredClone(clients), settings: { record_enabled: 'false' },
       ping_tasks: [], website_monitors: [], offline_notifications: [], expiry_notifications: [], load_notifications: [] }),
@@ -29,8 +31,17 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
     listOfflineNotifications: async () => [], listExpiryNotifications: async () => [], listLoadNotifications: async () => [],
     restoreBackupData: async (_db, backup) => {
       restoreCalls += 1;
-      if (backup.clients) clients = structuredClone(backup.clients);
+      if (backup.clients) {
+        const affected = new Set([...clients, ...backup.clients].map(client => client.uuid));
+        clients = structuredClone(backup.clients);
+        for (const uuid of affected) pending.set(uuid, {
+          uuid, revision: String(++revision), client: clients.find(client => client.uuid === uuid) || null,
+        });
+      }
     },
+    listPendingClientSyncs: async (_db, { limit = 200 } = {}) => [...pending.values()].slice(0, limit),
+    acknowledgeClientSyncs: async (_db, changes) => changes.reduce((count, item) =>
+      count + Number(pending.get(item.uuid)?.revision === item.revision && pending.delete(item.uuid)), 0),
     cleanupOrphanClientData: async () => ({}), insertAuditLog: async () => {},
     markClientTokenUsed: async () => false,
     getClientByToken: async (_db, token) => clients.find(client => client.token === token) || null,
@@ -102,7 +113,7 @@ test('AUD-06 backup restoration replaces the authoritative DO client snapshot', 
 test('AUD-06 restored Agent can report against the refreshed management snapshot', async () => {
   const f = await fixture();
   const response = await f.doRequest('/client-report', { uuid: f.restored.uuid, name: f.restored.name,
-    hidden: false, report: { cpu: 23 }, ttl_ms: 120000 }).catch(error => ({ status: 500, error: String(error) }));
+    auth_hash: f.restored.token_hash, hidden: false, report: { cpu: 23 }, ttl_ms: 120000 }).catch(error => ({ status: 500, error: String(error) }));
   assert.equal(response.status, 200, `a newly restored node must not be blocked by an obsolete snapshot: ${response.error || ''}`);
   await f.state.drain();
 });
@@ -164,8 +175,8 @@ test('AUD-06 a failed live sync reports committed database state and allows a co
 });
 
 test('AUD-06 a normal thousand-node backup can synchronize above the ordinary snapshot request limit', async () => {
-  const rows = Array.from({ length: 1000 }, (_, index) => ({ uuid: `restored-${index}`, name: `Restored ${index}`,
-    cpu_name: 'x'.repeat(200), remark: 'r'.repeat(200) }));
+  const rows = await Promise.all(Array.from({ length: 1000 }, async (_, index) => ({ uuid: `restored-${index}`, name: `Restored ${index}`,
+    token_hash: await hashAgentToken(`synthetic-restored-node-${index}`), cpu_name: 'x'.repeat(200), remark: 'r'.repeat(200) })));
   assert.ok(new TextEncoder().encode(JSON.stringify({ clients: rows })).byteLength > 256 * 1024);
   const f = await fixture({ clientRows: rows });
   const snapshot = await (await f.doRequest('/admin-clients-snapshot', undefined, 'GET')).json();

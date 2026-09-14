@@ -20,6 +20,45 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type directoryCollectorLog struct {
+	*rotatingAgentLog
+	directory *os.File
+}
+
+func (w *directoryCollectorLog) Close() error {
+	return errors.Join(w.rotatingAgentLog.Close(), w.directory.Close())
+}
+
+func openDirectoryCollectorLog(filename string) (io.WriteCloser, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("local disk collector logging requires root")
+	}
+	parent, name, err := openDiskCacheParent(filename, true)
+	if err != nil {
+		return nil, err
+	}
+	directory := os.NewFile(uintptr(parent), "collector log directory")
+	for index := 0; index <= agentLogBackups; index++ {
+		entry := name
+		if index > 0 {
+			entry += "." + strconv.Itoa(index)
+		}
+		if err := verifyDiskCacheDestination(parent, entry); err != nil {
+			directory.Close()
+			return nil, err
+		}
+	}
+	// The existing trusted-directory walk verifies root ownership and pins
+	// every ancestor. Reuse its descriptor for all rotations and file opens.
+	path := filepath.Join("/proc/self/fd", strconv.Itoa(parent), name)
+	writer, err := newRotatingAgentLog(path, agentLogMaxBytes, agentLogBackups, agentLogMaxAge, time.Now)
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	return &directoryCollectorLog{writer, directory}, nil
+}
+
 func runDirectoryCollector(options directoryCollectorOptions, output io.Writer) error {
 	if os.Geteuid() != 0 || !directoryCollectorServiceName(options.service) {
 		return errors.New("local disk collector requires root and a valid service name")

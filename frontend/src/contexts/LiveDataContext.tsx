@@ -16,7 +16,7 @@ import {
 } from './livePolling';
 import { fetchPublicSettings, normalizePublicSettings, setCachedPublicSettings } from '../utils/publicSettings';
 import { fetchPublicBootstrap, getCachedPublicBootstrap } from '../utils/publicBootstrap';
-import { normalizeLastKnownRecord, normalizeLiveDataResponse, normalizeViewerTokenResponse } from '../utils/liveDataResponse';
+import { normalizeLastKnownRecord, normalizeLiveDataResponse, normalizeViewerTokenResponse, selectMetricAvailability } from '../utils/liveDataResponse';
 import { notifyPublicDataUpdated, subscribePublicDataUpdated } from '../utils/publicDataEvents';
 import type { PublicDataUpdateDetail } from '../utils/publicDataEvents';
 import { mergePublicClientPatch } from '../utils/publicClients';
@@ -25,20 +25,22 @@ import { notifyWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '
 import { useAuth } from './AuthContext';
 
 export interface LiveRecord {
-  cpu: number;
+  cpu: number | null;
+  cpu_capacity?: number;
+  metric_errors?: Partial<Record<'cpu' | 'ram' | 'swap' | 'network', 'collection_failed' | 'container_scope_unavailable' | 'warming_up'>>;
   gpu?: number;
-  ram: number;
-  ram_total: number;
-  swap: number;
-  swap_total: number;
+  ram: number | null;
+  ram_total: number | null;
+  swap: number | null;
+  swap_total: number | null;
   disk: number | null;
   disk_total: number | null;
   disk_source?: 'directory';
   disk_sampled_at?: number;
-  net_in: number;
-  net_out: number;
-  net_total_up: number;
-  net_total_down: number;
+  net_in: number | null;
+  net_out: number | null;
+  net_total_up: number | null;
+  net_total_down: number | null;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
   // null = 主机温度未采集或不可用；0 和负值仍是有效摄氏温度。
@@ -164,9 +166,25 @@ export function applyLiveUpdate(
     ...(message.data || {}),
     lastReportTime: message.timestamp,
   } as LiveRecord;
+  const incomingAvailability = selectMetricAvailability(message.data);
+  if (Object.prototype.hasOwnProperty.call(message.data || {}, 'cpu')) nextRecord.cpu_capacity = incomingAvailability.cpu_capacity;
+  const metricErrors = { ...base.data[uuid]?.metric_errors, ...incomingAvailability.metric_errors };
+  for (const [metric, fields] of [
+    ['cpu', ['cpu']], ['ram', ['ram', 'ram_total']], ['swap', ['swap', 'swap_total']],
+    ['network', ['net_in', 'net_out', 'net_total_up', 'net_total_down']],
+  ] as const) {
+    if (fields.some(field => Object.prototype.hasOwnProperty.call(message.data || {}, field)) && !incomingAvailability.metric_errors?.[metric]) {
+      delete metricErrors[metric];
+    }
+  }
+  const availability = selectMetricAvailability({ ...nextRecord, metric_errors: metricErrors });
+  delete nextRecord.cpu_capacity;
+  delete nextRecord.metric_errors;
+  Object.assign(nextRecord, availability);
   const nextOnline = base.online.includes(uuid) ? base.online : [...base.online, uuid];
+  const { cpu_capacity: _previousCapacity, metric_errors: _previousErrors, ...previousClientInfo } = previousClient || {};
   const nextClient = {
-    ...previousClient,
+    ...previousClientInfo,
     ...nextRecord,
     uuid,
     name: message.name || previousClient?.name || uuid,

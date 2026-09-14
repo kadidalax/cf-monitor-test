@@ -212,7 +212,6 @@ test('AUD-25 a start failure restores the old executable and task', { skip: !win
 
 test('AUD-54 the generated runner preserves Unicode quotes and backslashes in the actual child environment', { skip: !windows }, t => {
   const result = upgradeFixture(t, false, true);
-  t.diagnostic(JSON.stringify(result));
   assert.equal(result.failed, false, result.error);
   assert.equal(result.name, "上海'节点\\A");
   assert.equal(result.nicInclude, "网卡\\eth'");

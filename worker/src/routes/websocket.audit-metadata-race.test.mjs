@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createDurableState, createSocket, createWorkerLoader } from '../../test-support/worker-module.mjs';
+import { hashAgentToken } from '../utils/client.ts';
 
 for (const action of ['hide', 'remove', 'rename', 'none']) {
   test(`AUD-03 WebSocket route network metadata respects a later ${action}`, async () => {
-    const old = { uuid: 'node', name: 'Old route name', hidden: false, region: '', token: 'a'.repeat(64), token_hash: `sha256:${'b'.repeat(64)}` };
+    const old = { uuid: 'node', name: 'Old route name', hidden: false, region: '', token: 'a'.repeat(64), token_hash: await hashAgentToken('a'.repeat(64)) };
     let startedResolve, releaseResolve;
     const started = new Promise(resolve => { startedResolve = resolve; });
     const release = new Promise(resolve => { releaseResolve = resolve; });
@@ -26,10 +27,18 @@ for (const action of ['hide', 'remove', 'rename', 'none']) {
       uuid: old.uuid, name: old.name, hidden: false, report: { cpu: 7 },
     }) }));
     await storage.drain();
-    const env = { LIVE_DATA: { idFromName: value => value, get: () => ({ fetch: request => object.fetch(request) }) } };
+    let forwarded = 0;
+    const env = { LIVE_DATA: { idFromName: value => value, get: () => ({ fetch: request => {
+      if (new URL(request.url).pathname === '/') {
+        forwarded += 1;
+        assert.equal(request.headers.get('Upgrade'), 'websocket');
+        return new Response('Synthetic terminal WebSocket transport');
+      }
+      return object.fetch(request);
+    } }) } };
     const { wsRoutes } = loader.load('worker/src/routes/websocket.ts');
     const pending = wsRoutes.fetch(new Request('https://panel.example.test/clients/report', {
-      headers: { Authorization: `Bearer ${old.token}`, 'CF-IPCountry': 'US' },
+      headers: { Authorization: `Bearer ${old.token}`, 'CF-IPCountry': 'US', Upgrade: 'websocket' },
     }), env, { waitUntil: promise => storage.state.waitUntil(promise) });
     let deadline;
     try {
@@ -45,7 +54,8 @@ for (const action of ['hide', 'remove', 'rename', 'none']) {
       }
       const before = viewer.messages.length;
       releaseResolve();
-      assert.equal((await pending).status, 400, 'the real route rejects missing Upgrade after its metadata I/O');
+      assert.equal((await pending).status, 200, 'the valid request reaches the terminal transport after its metadata I/O');
+      assert.equal(forwarded, 1);
       await storage.drain();
       const snapshot = await (await object.fetch(new Request('https://do/admin-clients-snapshot'))).json();
       const row = snapshot.clients.find(client => client.uuid === old.uuid);

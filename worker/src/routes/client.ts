@@ -247,16 +247,18 @@ async function readLiveAgentAuthClient(env: Bindings, tokenHash: string): Promis
   return normalizeLiveAgentAuthClient(payload.client);
 }
 
-async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Promise<void> {
-  if (!client.token_hash) return;
+async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Promise<boolean> {
+  if (!client.token_hash) return false;
   const stub = liveDataAuthStub(env);
-  if (!stub) return;
+  if (!stub) return true;
   const { token: _token, ...safeClient } = client;
-  await stub.fetch(new Request('https://do/agent-auth', {
+  const response = await stub.fetch(new Request('https://do/agent-auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client: { ...safeClient, token: '' } }),
   }));
+  const body = await response.json().catch(() => null) as { success?: unknown } | null;
+  return response.ok && body?.success === true;
 }
 
 async function sourceIpFingerprint(ip: string): Promise<string> {
@@ -299,7 +301,7 @@ export async function getAgentClientByToken(
   const now = Date.now();
   const cacheKey = await agentTokenLookupHash(token);
   const cached = agentAuthCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
+  if (cached && cached.value === null && cached.expiresAt > now) {
     onAuthSource?.('memory');
     return cached.value;
   }
@@ -317,9 +319,14 @@ export async function getAgentClientByToken(
 
   const client = await db.getClientByToken(database, token, true);
   if (client) {
+    const snapshot = normalizeLiveAgentAuthClient({ ...client, token_hash: cacheKey });
+    if (!snapshot || !await upsertLiveAgentAuthClient(env, snapshot)) {
+      agentAuthCache.delete(cacheKey);
+      onAuthSource?.('miss');
+      return null;
+    }
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    if (deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
     onAuthSource?.('db');
     const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
@@ -343,7 +350,7 @@ export async function getAgentClientIdentityByToken(
   const now = Date.now();
   const cacheKey = await agentTokenLookupHash(token);
   const cached = agentIdentityAuthCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
+  if (cached && cached.value === null && cached.expiresAt > now) {
     onAuthSource?.('memory');
     return cached.value;
   }
@@ -361,6 +368,12 @@ export async function getAgentClientIdentityByToken(
 
   const client = await db.getClientIdentityByToken(database, token, true);
   if (client) {
+    const snapshot = normalizeLiveAgentAuthClient({ ...client, token_hash: cacheKey });
+    if (!snapshot || !await upsertLiveAgentAuthClient(env, snapshot)) {
+      agentIdentityAuthCache.delete(cacheKey);
+      onAuthSource?.('miss');
+      return null;
+    }
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('db');
@@ -640,6 +653,7 @@ async function updateLiveReport(
       uuid,
       name,
       hidden,
+      auth_hash: c.get('clientAuthTokenHash'),
       source_ip: requestClientIp(c),
       region: requestRegion(c),
       ...reportBody,
@@ -900,7 +914,7 @@ async function agentPresentedTokenKey(c: ClientContext, token: string): Promise<
   return `${ip}:${tokenPart}`;
 }
 
-async function enforceAgentAuthAttemptLimit(c: ClientContext, token: string): Promise<Response | null> {
+export async function enforceAgentAuthAttemptLimit(c: ClientContext, token: string): Promise<Response | null> {
   const ipLimited = localAgentRateLimit(
     c,
     `agent-auth-attempt:${requestClientIp(c) || 'unknown'}`,
@@ -916,7 +930,7 @@ async function enforceAgentAuthAttemptLimit(c: ClientContext, token: string): Pr
   );
 }
 
-async function enforceAgentAuthFailureLimit(c: ClientContext, token: string): Promise<Response | null> {
+export async function enforceAgentAuthFailureLimit(c: ClientContext, token: string): Promise<Response | null> {
   return enforceAgentBucketRateLimit(
     c,
     'agent-auth-failure',
@@ -1011,6 +1025,7 @@ async function clientAuth(c: ClientContext, next: Next) {
   c.set('clientHidden', Boolean(client.hidden));
   c.set('clientRecord', client);
   c.set('agentTokenKey', await agentTokenKey(token));
+  c.set('clientAuthTokenHash', await agentTokenLookupHash(token));
   return next();
 }
 
@@ -1052,6 +1067,7 @@ async function clientIdentityAuth(c: ClientContext, next: Next) {
   c.set('clientName', client.name);
   c.set('clientHidden', Boolean(client.hidden));
   c.set('agentTokenKey', await agentTokenKey(token));
+  c.set('clientAuthTokenHash', await agentTokenLookupHash(token));
   return next();
 }
 

@@ -33,8 +33,10 @@ export function invalidateAdminSessionCache(userId?: string): void {
 export async function validateAdminSession(
   database: db.QueryDatabase,
   payload: AdminJwtPayload,
+  options: { fresh?: boolean } = {},
 ): Promise<AdminSessionUser | null> {
   const key = cacheKey(payload);
+  if (options.fresh) return readAdminSession(database, payload, key, false);
   const cached = adminSessionCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.user;
 
@@ -51,11 +53,12 @@ async function readAdminSession(
   database: db.QueryDatabase,
   payload: AdminJwtPayload,
   key: string,
+  cacheResult = true,
 ): Promise<AdminSessionUser | null> {
   if (database.provider === 'supabase-api') {
     const user = await validateSupabaseAdminSession(database.env, payload.userId, payload.sessionVersion);
     if (!user || user.username !== payload.username) return null;
-    adminSessionCache.set(key, {
+    if (cacheResult) adminSessionCache.set(key, {
       user,
       expiresAt: Date.now() + ADMIN_SESSION_CACHE_MS,
     });
@@ -71,7 +74,7 @@ async function readAdminSession(
     username: user.username,
     session_version: user.session_version,
   };
-  adminSessionCache.set(key, {
+  if (cacheResult) adminSessionCache.set(key, {
     user: sessionUser,
     expiresAt: Date.now() + ADMIN_SESSION_CACHE_MS,
   });

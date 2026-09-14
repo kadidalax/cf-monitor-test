@@ -31,7 +31,10 @@ export function makeWebsiteBackup() {
   return {
     schema: 'cf-monitor.backup', version: '2.0.0', scope: 'configuration',
     timestamp: '2026-09-06T00:00:00.000Z',
-    clients: [{ uuid: 'node-a', name: 'Synthetic A' }, { uuid: 'node-b', name: 'Synthetic B' }],
+    clients: [
+      { uuid: 'node-a', name: 'Synthetic A', token_hash: `sha256:${'a'.repeat(64)}` },
+      { uuid: 'node-b', name: 'Synthetic B', token_hash: `sha256:${'b'.repeat(64)}` },
+    ],
     website_monitors: structuredClone(websiteConfiguration),
   };
 }

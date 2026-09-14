@@ -51,7 +51,12 @@ async function snapshot(object, includeHidden = false) {
   return response.json();
 }
 
-function control(object, action, value) {
+async function control(object, action, value) {
+  if (action === 'clients-restore' && !Object.hasOwn(value, 'expected_version')) {
+    const previous = await object.fetch(new Request('https://do/admin-clients-snapshot'));
+    const snapshot = previous.ok ? await previous.json() : null;
+    value = { ...value, expected_version: snapshot?.updatedAt ?? 0 };
+  }
   return object.fetch(new Request(`https://do/${action}`, { method: 'POST', body: JSON.stringify(value) }));
 }
 
@@ -197,6 +202,18 @@ test('restoring client configuration clears all retained reports even if the UUI
   const live = await snapshot(f.cold(), true);
   assert.deepEqual(live.online, []);
   assert.deepEqual(live.last_known, {});
+});
+
+test('missing, invalid or stale restore versions cannot clear current client state', async () => {
+  const f = fixture();
+  await httpReport(f);
+  for (const expectedVersion of [undefined, null, -1, '0', 0]) {
+    const response = await f.object.fetch(new Request('https://do/clients-restore', {
+      method: 'POST', body: JSON.stringify({ clients: [], expected_version: expectedVersion }),
+    }));
+    assert.equal(response.status, expectedVersion === 0 ? 409 : 400);
+    assert.equal((await snapshot(f.object)).data.node.cpu, 17, 'a rejected restore must leave the current report intact');
+  }
 });
 
 test('partial control snapshots do not drop unrelated retained nodes but full membership removes them', async () => {

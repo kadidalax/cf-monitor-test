@@ -83,7 +83,8 @@ ${releaseCommands(workflow)}
       : 'bash';
     const result = spawnSync(bash, ['--noprofile', '--norc', script], {
       cwd: agent, encoding: 'utf8', timeout: 20_000,
-      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: directory,
+      // A per-case Windows TEMP would poison the shared MSYS /tmp mount.
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: directory,
         AGENT_VERSION: version, AGENT_VERSION_TAG: version, GITHUB_SHA: 'a'.repeat(40), GITHUB_REPOSITORY: 'synthetic/repo',
         GITHUB_ENV: join(directory, 'github-env'), RUNNER_TEMP: directory, GH_TOKEN: 'synthetic-token',
         AUDIT_COMMAND_LOG: log, REMOTE_RELEASE_JSON: metadata, NODE_EXECUTABLE: process.execPath,

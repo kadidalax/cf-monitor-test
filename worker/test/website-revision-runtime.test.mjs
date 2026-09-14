@@ -25,6 +25,7 @@ function websocketReceipt(ws, envelope) {
 test('R-D03 native Agent and manual-check paths respect website configuration ownership', { timeout: 120000 }, async t => {
   let lostReceiptFor = null;
   let blockedCheck = null;
+  let blockedAssignment = null;
   const forwarded = [];
   const f = await createRuntimeFixture({
     persistDurableObjects: true,
@@ -36,7 +37,14 @@ test('R-D03 native Agent and manual-check paths respect website configuration ow
       }
       return new Response(null, { status: 200 });
     },
-    rpcHook: ({ name, args, phase }) => {
+    rpcHook: async ({ name, args, phase, result }) => {
+      if (blockedAssignment && name === 'cfm_agent_website_probe_tasks' && phase === 'after') {
+        const held = blockedAssignment;
+        assert.ok(result.some(task => task.id === held.id && task.config_revision === held.revision),
+          'the held assignment must contain the original configuration');
+        held.started.resolve();
+        await held.release.promise;
+      }
       if (name !== 'cfm_record_website_check') return;
       if (phase === 'before') forwarded.push(args.input_check);
       if (phase === 'after' && args.input_check.monitor_id === lostReceiptFor) {
@@ -44,7 +52,7 @@ test('R-D03 native Agent and manual-check paths respect website configuration ow
       }
     },
   });
-  t.after(() => f.close());
+  t.after(() => { blockedAssignment?.release.resolve(); return f.close(); });
   const agentToken = 'synthetic-website-revision-token-'.padEnd(64, '0');
   await f.database.query("insert into clients(uuid,name,token) values ('revision-node','Synthetic revision Agent',$1)", [agentToken]);
   await f.database.query("insert into ping_tasks(id,name,type,target,all_clients,interval_sec) values (1,'Synthetic ping','tcp','target.audit.example.com:443',1,120)");
@@ -109,9 +117,33 @@ test('R-D03 native Agent and manual-check paths respect website configuration ow
     assert.equal((await current(site)).status, 'pending');
     assert.notEqual(active.config_revision, site.config_revision);
     const submitted = forwarded.filter(check => check.monitor_id === site.id);
+    assert.deepEqual(submitted, [], 'Malformed and already known stale revisions are dropped before SQL');
+    assert.equal((await f.database.query("select count(*)::int as n from ping_snapshots where client='revision-node'")).rows[0].n, 1);
+  });
+
+  await t.test('a late assignment keeps the original revision for the final SQL ownership check', async () => {
+    const site = await create();
+    const report = reportFor(site);
+    report.website_probe_results.push({ ...report.website_probe_results[0], config_revision: undefined });
+    report.website_probe_results.push({ ...report.website_probe_results[0], config_revision: 'invalid-revision' });
+    const held = { id: site.id, revision: site.config_revision, started: deferred(), release: deferred() };
+    blockedAssignment = held;
+    const sending = post(await stubFor('website-assignment-became-stale'), report);
+    try {
+      await held.started.promise;
+      await f.database.query('update website_monitors set url=$2 where id=$1', [site.id, `${site.url}/changed`]);
+    } finally {
+      blockedAssignment = null;
+      held.release.resolve();
+    }
+    const response = await sending;
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.notEqual((await current(site)).config_revision, site.config_revision);
+    const submitted = forwarded.filter(check => check.monitor_id === site.id);
     assert.equal(submitted.length, 1, 'Malformed revisions are dropped at the Agent boundary');
     assert.equal(submitted[0].config_revision, site.config_revision, 'Never substitute the current revision for a stale result');
-    assert.equal((await f.database.query("select count(*)::int as n from ping_snapshots where client='revision-node'")).rows[0].n, 1);
+    assert.equal((await history(site)).length, 0, 'SQL must reject the stale result even when the assignment read preceded the edit');
+    assert.equal((await current(site)).status, 'pending');
   });
 
   await t.test('lost SQL confirmation followed by cold retry keeps one original website check', async () => {

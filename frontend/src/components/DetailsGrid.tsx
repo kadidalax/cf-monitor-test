@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { formatCpuSpec } from '../utils/cpuFormat';
 import type { LiveRecord } from '../types';
-import { diskUsagePresentation, formatMetricBytes, resourceTotal } from '../utils/nodeMetrics';
+import { cpuCapacity, diskUsagePresentation, formatMetricBytes, resourceTotal } from '../utils/nodeMetrics';
 
 interface DetailsGridProps {
   client: {
@@ -132,7 +132,7 @@ export default function DetailsGrid({ client, live, box, align, compact, remark 
   const items = [
     {
       label: 'CPU',
-      value: formatCpuSpec(client.cpu_name, client.cpu_cores),
+      value: formatCpuSpec(client.cpu_name, cpuCapacity(live, client.cpu_cores)),
       icon: <Cpu size={16} />,
     },
     {
@@ -167,7 +167,7 @@ export default function DetailsGrid({ client, live, box, align, compact, remark 
     },
     {
       label: '交换空间',
-      value: formatMetricBytes(live?.swap_total ?? client.swap_total),
+      value: formatMetricBytes(live?.swap_total === undefined ? client.swap_total : live.swap_total),
       icon: <HardDrive size={16} />,
     },
     {

@@ -90,6 +90,15 @@ function adminActionRunner(errors = []) {
   };
 }
 const passthroughAction = async (_key, action) => action();
+function notificationEditorBindings() {
+  const owner = {};
+  const session = { capture: () => owner, isCurrent: value => value === owner };
+  return { canEditOffline: true, canEditExpiry: true, canEditLoad: true,
+    loadPolicy: { minimum_interval_min: 4, sample_interval_sec: 120, history_enabled: true }, loadIntervalInvalid: false,
+    offlineEditSession: session,
+    offlineBatchSession: session, expiryEditSession: session, expiryBatchSession: session,
+    loadEditSession: session };
+}
 
 test('AUD-49 notification write failures are caught and expose the real error', async () => {
   const methods = [['saveSingleEdit', []], ['saveBatchEdit', []], ['toggleOffline', ['node-a', true]], ['toggleExpiry', ['node-a', true]], ['saveExpirySingleEdit', []], ['saveExpiryBatchEdit', []], ['saveLoadNotification', []], ['deleteLoadNotification', [1]], ['sendTestMessage', []]];
@@ -97,6 +106,7 @@ test('AUD-49 notification write failures are caught and expose the real error', 
     const errors = [];
     let closed = false;
     const action = productionDeclaration(notifications, name, {
+      ...notificationEditorBindings(),
       apiFetch: async () => { throw new Error('Synthetic service rejection'); },
       runAction: adminActionRunner(errors), toast: { error: message => errors.push(message), success() {} },
       editingOffline: 'node-a', editForm: { enable: true, grace_period: 1200 }, selectedClients: ['node-a'], batchForm: { enable: true, grace_period: 1200 },
@@ -118,6 +128,7 @@ test('AUD-49 a pending notification save cannot submit twice', async () => {
   const pending = Promise.withResolvers();
   let requests = 0;
   const save = productionDeclaration(notifications, 'saveSingleEdit', {
+    ...notificationEditorBindings(),
     editingOffline: 'node-a', editForm: { enable: true, grace_period: 1200 }, runAction: adminActionRunner(),
     apiFetch: () => { requests += 1; return pending.promise; }, toast: { success() {}, error() {} }, setEditDialogOpen() {}, loadOfflineTab() {},
   });
@@ -170,8 +181,9 @@ test('AUD-05 initial administrator form requires and sends ownership key', async
       const bodies = [];
       const errors = [];
       const submit = productionDeclaration('src/pages/Login.tsx', 'handleRecoverySubmit', {
+        ...productionModule('src/utils/passwordPolicy.ts'),
         recoveryStatus: { admin_present: adminPresent }, recoveryKey: key, recoveryUsername: 'synthetic-owner', recoveryPassword: 'synthetic-password',
-        fetch: async (_url, options) => { bodies.push(JSON.parse(options.body)); return new Response(JSON.stringify({ mode: 'created' })); },
+        fetch: async (_url, options) => { bodies.push(JSON.parse(options.body)); return new Response(JSON.stringify({ success: true, mode: 'created' })); },
         toast: { error: message => errors.push(message), success() {} }, setRecoveryLoading() {}, setUsername() {}, setPassword() {}, setRecoveryPassword() {}, setRecoveryKey() {}, setRecoveryStatus() {}, setRecoveryMode() {},
       });
       await submit({ preventDefault() {} });
@@ -764,7 +776,27 @@ test('AUD-38 Windows command data retains literal PowerShell argument values', (
         assert.ok(script.includes(nodeName), 'the generated outer string must not evaluate the literal node-name expression');
       }
       // The original command is DATA for the PowerShell parser, never a scriptblock to invoke.
-      const parser = `$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(script, 'utf16le').toString('base64')}')); $tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors); if($errors.Count) { throw 'Generated command has parse errors' }; $install=$ast.Find({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.CommandElements[0].Value -eq '.\\install-windows.ps1' },$true); $values=@{}; for($i=1;$i -lt $install.CommandElements.Count;$i+=2) { $values[$install.CommandElements[$i].ParameterName]=$install.CommandElements[$i+1].Value }; $values | ConvertTo-Json -Compress`;
+      const parser = `
+$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(script, 'utf16le').toString('base64')}'))
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+if($errors.Count) { throw 'Generated command has parse errors' }
+$installs=@($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.InvocationOperator -eq [Management.Automation.Language.TokenKind]::Ampersand },$true))
+if($installs.Count -ne 1) { throw 'Expected one installer invocation' }
+$install=$installs[0]; $target=$install.CommandElements[0]
+if($target -isnot [Management.Automation.Language.VariableExpressionAst] -or $target.VariablePath.UserPath -ne 'p') { throw 'Expected temporary installer path' }
+$assignments=@($ast.FindAll({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'p' },$true))
+if($assignments.Count -ne 1) { throw 'Expected one temporary path assignment' }
+$path=$assignments[0].Right.PipelineElements[0]
+if($path -isnot [Management.Automation.Language.CommandAst] -or $path.GetCommandName() -ne 'Join-Path' -or $path.CommandElements.Count -ne 3 -or $path.CommandElements[1].VariablePath.UserPath -ne 'd' -or $path.CommandElements[2].Value -ne 'install-windows.ps1') { throw 'Unexpected installer path construction' }
+if($install.CommandElements.Count % 2 -ne 1) { throw 'Unexpected installer arguments' }
+$values=@{}
+for($i=1;$i -lt $install.CommandElements.Count;$i+=2) {
+  $parameter=$install.CommandElements[$i]; $value=$install.CommandElements[$i+1]
+  if($parameter -isnot [Management.Automation.Language.CommandParameterAst] -or $value -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $value.StringConstantType -ne [Management.Automation.Language.StringConstantType]::SingleQuoted) { throw 'Installer arguments must remain literal data' }
+  $values[$parameter.ParameterName]=$value.Value
+}
+$values | ConvertTo-Json -Compress`;
       const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from('[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ' + parser, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
       assert.equal(result.status, 0, result.stderr);
       const received = JSON.parse(result.stdout.trim());
@@ -779,6 +811,7 @@ test('AUD-46 toggling offline notification preserves saved grace period', async 
     const requests = [];
     const toggle = productionDeclaration(notifications, 'toggleOffline', {
       runAction: passthroughAction,
+      canEditOffline: true,
       DEFAULT_GRACE_PERIOD_SEC: 360,
       notificationMap: new Map([['node-a', { grace_period: savedGrace }]]),
       apiFetch: async (_path, options) => { requests.push(JSON.parse(options.body)); return { success: true }; },
@@ -816,7 +849,9 @@ test('AUD-45 directed load rules reject an empty target list before posting', as
   const requests = [];
   const errors = [];
   const save = productionDeclaration(notifications, 'saveLoadNotification', {
+    ...notificationEditorBindings(),
     runAction: passthroughAction,
+    loadEditSession: { capture: () => ({ pending: false }) },
     editingLoad: null,
     loadForm: { name: 'Synthetic rule', metric: 'cpu', threshold: 80, ratio: 0.8, interval_min: 15, all_clients: false, clients: [] },
     apiFetch: async (path, options) => { requests.push({ path, body: JSON.parse(options.body) }); return { success: true }; },

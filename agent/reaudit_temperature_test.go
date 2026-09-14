@@ -109,7 +109,7 @@ func TestReauditTemperatureSensorContract(t *testing.T) {
 				return tc.sensors, tc.err
 			})
 			value := sampler.sample(context.Background())
-			assertReauditTemperatureJSON(t, Report{Temp: value, CPU: 17}, tc.want)
+			assertReauditTemperatureJSON(t, Report{Temp: value, CPU: float64Metric(17)}, tc.want)
 		})
 	}
 }

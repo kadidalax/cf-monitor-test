@@ -1,4 +1,5 @@
 import { currentScheduledBudget, ScheduledBudgetExceeded } from './scheduled-budget.ts';
+import { normalizeSmtpHost } from './smtp-host.ts';
 
 export const EMAIL_MESSAGE_MAX_CHARS = 4096;
 export const EMAIL_SUBJECT_MAX_CHARS = 120;
@@ -30,18 +31,6 @@ export type SmtpIo = {
 
 const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
-function isUnsafeHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  return !normalized ||
-    normalized === 'localhost' ||
-    /[\s/@:]/.test(normalized) ||
-    /^(127\.|10\.|192\.168\.|169\.254\.)/.test(normalized) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(normalized) ||
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd');
-}
-
 function utf8Base64(value: string): string {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
@@ -49,12 +38,34 @@ function utf8Base64(value: string): string {
   return btoa(binary);
 }
 
-function quoteDisplayName(value: string): string {
-  return `"${value.replace(/["\\]/g, '\\$&')}"`;
+function truncateText(value: string, max: number): string {
+  let end = 0;
+  for (const character of value) {
+    if (end + character.length > max) break;
+    end += character.length;
+  }
+  return value.slice(0, end);
 }
 
 function encodeHeader(value: string): string {
-  return `=?UTF-8?B?${utf8Base64(value.slice(0, EMAIL_SUBJECT_MAX_CHARS))}?=`;
+  const words: string[] = [];
+  const encoder = new TextEncoder();
+  let chunk = '';
+  let bytes = 0;
+  // 39 UTF-8 bytes yield at most 64 ASCII characters per encoded-word,
+  // leaving space for "Subject: " within RFC 2047's 76-character line limit.
+  for (const character of value) {
+    const size = encoder.encode(character).byteLength;
+    if (bytes + size > 39) {
+      words.push(`=?UTF-8?B?${utf8Base64(chunk)}?=`);
+      chunk = '';
+      bytes = 0;
+    }
+    chunk += character;
+    bytes += size;
+  }
+  if (chunk) words.push(`=?UTF-8?B?${utf8Base64(chunk)}?=`);
+  return words.join('\r\n ');
 }
 
 export function normalizeRecipients(value: string): string[] {
@@ -73,7 +84,7 @@ export function normalizeRecipients(value: string): string[] {
 }
 
 export function validateSmtpConfig(input: Pick<SmtpConfig, 'host' | 'port' | 'security'>): void {
-  if (isUnsafeHost(input.host)) throw new Error('SMTP Host 无效');
+  if (!normalizeSmtpHost(input.host)) throw new Error('SMTP Host 无效');
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
     throw new Error('SMTP Port 无效');
   }
@@ -91,22 +102,23 @@ export function buildEmailMessage(input: {
   body: string;
   host: string;
 }): string {
-  const subject = input.subject.slice(0, EMAIL_SUBJECT_MAX_CHARS);
-  const body = input.body.slice(0, EMAIL_MESSAGE_MAX_CHARS);
+  const subject = truncateText(input.subject, EMAIL_SUBJECT_MAX_CHARS);
+  const body = truncateText(input.body, EMAIL_MESSAGE_MAX_CHARS).replace(/\r\n|\r|\n/g, '\r\n');
+  const encodedBody = utf8Base64(body).match(/.{1,76}/g)?.join('\r\n') || '';
   const from = input.fromName.trim()
-    ? `${quoteDisplayName(input.fromName.trim())} <${input.fromAddress}>`
+    ? `${encodeHeader(input.fromName.trim())}\r\n <${input.fromAddress}>`
     : input.fromAddress;
   const headers = [
     `From: ${from}`,
-    `To: ${input.recipients.join(', ')}`,
+    `To: ${input.recipients.join(',\r\n ')}`,
     `Subject: ${encodeHeader(subject)}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: 8bit',
+    'Content-Transfer-Encoding: base64',
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: <${crypto.randomUUID()}@${input.host}>`,
   ];
-  return `${headers.join('\r\n')}\r\n\r\n${body}`;
+  return `${headers.join('\r\n')}\r\n\r\n${encodedBody}`;
 }
 
 const SMTP_MAX_REPLY_BYTES = 64 * 1024;

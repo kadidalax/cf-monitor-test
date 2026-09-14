@@ -1,5 +1,5 @@
 import { fetchWithBootstrapRetry } from './api.ts';
-import { collectCursorHistory } from './publicHistory.ts';
+import { collectCursorHistory, historyCursorFromRecord, mergeHistoryRecords, normalizeHistoryRecordId } from './publicHistory.ts';
 
 export interface PingTask {
   id: number | string;
@@ -14,6 +14,7 @@ export interface PingTask {
 
 export interface PingRecord {
   time: string;
+  id?: string;
   value: number;
   task_id?: number | string;
 }
@@ -158,6 +159,7 @@ export function normalizePingRecord(payload: unknown): PingRecord | null {
   const taskId = record.task_id;
   return {
     time: record.time,
+    id: normalizeHistoryRecordId(record.id),
     value: record.value,
     ...(typeof taskId === 'number' || typeof taskId === 'string' ? { task_id: taskId } : {}),
   };
@@ -176,9 +178,9 @@ export function normalizePingRecords(payload: unknown): PingRecord[] {
   });
 }
 
-function findAnchor(anchors: number[], timestamp: number, toleranceMs: number) {
+function findAnchor(anchors: number[], timestamp: number, toleranceMs: number, grouped: Record<number, PingChartRow>, key: string) {
   for (const anchor of anchors) {
-    if (Math.abs(anchor - timestamp) <= toleranceMs) return anchor;
+    if (Math.abs(anchor - timestamp) <= toleranceMs && grouped[anchor][key] === undefined) return anchor;
   }
   return null;
 }
@@ -197,7 +199,7 @@ export function buildPingChartRows(series: PingTaskSeries[]) {
       const timestamp = new Date(record.time).getTime();
       if (!Number.isFinite(timestamp)) continue;
 
-      const anchor = findAnchor(anchors, timestamp, toleranceMs);
+      const anchor = findAnchor(anchors, timestamp, toleranceMs, grouped, item.task.key);
       const useTimestamp = anchor ?? timestamp;
       if (!grouped[useTimestamp]) {
         grouped[useTimestamp] = { time: useTimestamp };
@@ -210,35 +212,21 @@ export function buildPingChartRows(series: PingTaskSeries[]) {
   return Object.values(grouped).sort((a, b) => Number(a.time) - Number(b.time));
 }
 
-function getLatestPingTimestamp(series: PingTaskSeries[]) {
-  const timestamps = series.flatMap((item) =>
-    item.records
-      .map((record) => new Date(record.time).getTime())
-      .filter((timestamp) => Number.isFinite(timestamp)),
-  );
-  return timestamps.length ? Math.max(...timestamps) : null;
-}
-
-export function limitPingSeriesToRecentRange(series: PingTaskSeries[], rangeHours?: number) {
+export function limitPingSeriesToRecentRange(series: PingTaskSeries[], rangeHours?: number, rangeEnd = Date.now()) {
   if (!rangeHours || rangeHours <= 0) return series;
-
-  const latest = getLatestPingTimestamp(series);
-  if (!latest) return series;
-
-  const cutoff = latest - rangeHours * 3600000;
+  const cutoff = rangeEnd - rangeHours * 3600000;
   return series.map((item) => ({
     ...item,
     records: item.records.filter((record) => {
       const timestamp = new Date(record.time).getTime();
-      return Number.isFinite(timestamp) && timestamp >= cutoff && timestamp <= latest;
+      return Number.isFinite(timestamp) && timestamp >= cutoff && timestamp <= rangeEnd;
     }),
   }));
 }
 
-export function getPingTimeDomain(series: PingTaskSeries[], rangeHours?: number): [number | string, number | string] {
-  const latest = getLatestPingTimestamp(series);
-  if (!latest || !rangeHours || rangeHours <= 0) return ['dataMin', 'dataMax'];
-  return [latest - rangeHours * 3600000, latest];
+export function getPingTimeDomain(_series: PingTaskSeries[], rangeHours?: number, rangeEnd = Date.now()): [number | string, number | string] {
+  if (!rangeHours || rangeHours <= 0) return ['dataMin', 'dataMax'];
+  return [rangeEnd - rangeHours * 3600000, rangeEnd];
 }
 
 export function getPingValues(series: PingTaskSeries[]) {
@@ -280,6 +268,10 @@ export function getPingSeriesAverage(records: PingRecord[]): number | null {
 
   const sum = chronological.reduce((total, value) => total + value, 0);
   return sum / chronological.length;
+}
+
+export function getPingSeriesTimeoutCount(records: PingRecord[]): number {
+  return records.filter((record) => Number.isFinite(record.value) && record.value < 0).length;
 }
 
 export function formatPingMs(value: number | null | undefined): string {
@@ -340,14 +332,14 @@ export async function fetchPingTaskSeries(
 
   const completeBatchRange = async (series: PingTaskSeries[]): Promise<PingTaskSeries[]> => Promise.all(series.map(async (item) => {
     if (!rangeStart || item.records.length < requestLimitForTask(item.task)) return item;
-    const oldest = Math.min(...item.records.map(record => Date.parse(record.time)));
-    if (!Number.isFinite(oldest) || oldest <= Date.parse(rangeStart)) return item;
+    const ordered = mergeHistoryRecords(item.records);
+    const oldest = ordered[0];
+    if (!oldest || Date.parse(oldest.time) < Date.parse(rangeStart)) return item;
     const older = await collectCursorHistory(
       (nextCursor) => fetchTaskPage(item.task, nextCursor),
-      { cursor: new Date(oldest).toISOString(), start: rangeStart, end: cursor, normalize: normalizePingRecords, signal },
+      { cursor: historyCursorFromRecord(oldest), start: rangeStart, end: cursor, normalize: normalizePingRecords, signal },
     );
-    const records = new Map([...older, ...item.records].map(record => [Date.parse(record.time), record]));
-    return { ...item, records: [...records.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)) };
+    return { ...item, records: mergeHistoryRecords([...older, ...item.records]) };
   }));
 
   if (tasks.length > 0) {
@@ -373,7 +365,7 @@ export async function fetchPingTaskSeries(
       if (signal?.aborted) throw error;
       // Fall back to the legacy per-task endpoint below.
     }
-    if (batchSeries) return limitPingSeriesToRecentRange(await completeBatchRange(batchSeries), rangeHours);
+    if (batchSeries) return limitPingSeriesToRecentRange(await completeBatchRange(batchSeries), rangeHours, Date.parse(cursor));
   }
 
   const series = await Promise.all(
@@ -385,5 +377,5 @@ export async function fetchPingTaskSeries(
     }),
   );
 
-  return limitPingSeriesToRecentRange(series, rangeHours);
+  return limitPingSeriesToRecentRange(series, rangeHours, Date.parse(cursor));
 }

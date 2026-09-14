@@ -2,6 +2,9 @@ import * as notificationDispatch from '../../worker/src/utils/notification-dispa
 import * as offline from '../../worker/src/utils/offline-notification.ts';
 import { shouldNotifyWebsiteDown, shouldNotifyWebsiteRecovery } from '../../worker/src/utils/website-monitor.ts';
 import { rotateScheduledItems, scheduledItems } from '../../worker/src/utils/scheduled-budget.ts';
+import * as budgets from '../../worker/src/utils/scheduled-budget.ts';
+import * as loadWindow from '../../worker/src/utils/load-notification-window.ts';
+import { createWorkerLoader } from '../../worker/test-support/worker-module.mjs';
 import { loadTypeScriptFunctions } from './typescript.mjs';
 import { rpc } from './postgres.mjs';
 
@@ -25,6 +28,9 @@ export async function notificationHarness(database, transport, databaseOverrides
     updateLoadNotification: (_db, id, patch) => rpc(database, 'cfm_update_load_notification', { input_id: id, input_patch: patch }),
     getLoadMetricWindowStatsForClients: async () => new Map(clients.map(client => [client.uuid, { samples: 2, exceeded: 2, avg_value: 99 }])),
     listDueWebsiteMonitors: (_db, now, limit) => rpc(database, 'cfm_due_website_monitors', { input_now: now, input_limit: limit }),
+    listPendingWebsiteNotifications: (_db, now, limit, afterId) => rpc(database, 'cfm_pending_website_notifications', {
+      input_now: now, input_limit: limit, input_after_id: afterId,
+    }),
     recordWebsiteCheck: (_db, check) => rpc(database, 'cfm_record_website_check', { input_check: check }),
     markWebsiteMonitorNotified: (_db, id, time, expected) => rpc(database, 'cfm_mark_website_monitor_notified', {
       input_id: id, input_time: time, input_expected: expected,
@@ -37,10 +43,28 @@ export async function notificationHarness(database, transport, databaseOverrides
       input_key: key, input_event_id: eventId, input_token: token, input_success: success, input_now: now, input_repeat_ms: repeatMs,
     }),
   };
+  const websiteBoundary = {
+    shouldNotifyWebsiteDown, shouldNotifyWebsiteRecovery,
+    checkWebsiteMonitorHttp: async monitor => ({
+      monitor_id: monitor.id, config_revision: monitor.config_revision, checked_at: state.now.toISOString(), ok: state.websiteUp,
+      effective_status: state.websiteUp ? 'up' : 'down', effective_reason: 'synthetic',
+      status_code: state.websiteUp ? 200 : 500, raw_status_code: state.websiteUp ? 200 : 500,
+      latency_ms: 1, error: state.websiteUp ? null : 'synthetic', source_type: 'worker', source_client: null,
+    }),
+  };
+  const websitePipeline = createWorkerLoader({ db: { ...methods, ...databaseOverrides }, overrides: {
+    'worker/src/utils/website-monitor.ts': websiteBoundary,
+    'worker/src/utils/notification-templates.ts': {
+      buildWebsiteAlertNotification: message('website-down'), buildWebsiteRecoveryNotification: message('website-up'),
+    },
+    'worker/src/utils/scheduled-budget.ts': budgets,
+  } }).load('worker/src/utils/website-notifications.ts');
   const functions = await loadTypeScriptFunctions(new URL('../../worker/src/index.ts', import.meta.url), [
     'sendNotification', 'runOfflineCheck', 'shouldSendExpiryNotification', 'runExpiryCheck', 'runLoadCheck', 'runWebsiteMonitorChecks',
   ], {
     ...offline,
+    ...websitePipeline,
+    ...loadWindow,
     rotateScheduledItems, scheduledItems,
     db: { ...methods, ...databaseOverrides },
     deliverNotification: notificationDispatch.deliverNotification,
@@ -53,13 +77,7 @@ export async function notificationHarness(database, transport, databaseOverrides
     buildOfflineNotification: message('offline'), buildNodeRecoveryNotification: message('recovery'),
     buildExpiryNotification: message('expiry'), buildLoadNotification: message('load'),
     buildWebsiteAlertNotification: message('website-down'), buildWebsiteRecoveryNotification: message('website-up'),
-    shouldNotifyWebsiteDown, shouldNotifyWebsiteRecovery,
-    checkWebsiteMonitorHttp: async monitor => ({
-      monitor_id: monitor.id, config_revision: monitor.config_revision, checked_at: state.now.toISOString(), ok: state.websiteUp,
-      effective_status: state.websiteUp ? 'up' : 'down', effective_reason: 'synthetic',
-      status_code: state.websiteUp ? 200 : 500, raw_status_code: state.websiteUp ? 200 : 500,
-      latency_ms: 1, error: state.websiteUp ? null : 'synthetic', source_type: 'worker', source_client: null,
-    }),
+    ...websiteBoundary,
   });
   const context = {
     database: {}, env: {}, getClients: async () => clients,

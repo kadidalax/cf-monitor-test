@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import "../../admin.css";
 import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { Flex, Text, Button, IconButton } from "@radix-ui/themes";
 import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucide-react";

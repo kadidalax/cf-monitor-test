@@ -24,9 +24,10 @@ function fixture(t, scenario = 'prepare') {
     rmSync(resolved, { recursive: true, force: true });
   });
   for (const child of ['bin', 'etc/conf.d', 'etc/init.d', 'var/log', 'run', 'temp']) mkdirSync(join(root, child), { recursive: true });
+  mkdirSync(join(root, "owned 'quoted' install", 'state'), { recursive: true });
   const agent = scenario === 'exits'
-    ? '#!/bin/sh\nprintf "synthetic startup failure\\n"\nexit 7\n'
-    : '#!/bin/sh\ntrap "exit 0" TERM INT\nprintf "synthetic agent running\\n"\nwhile :; do sleep 0.1; done\n';
+    ? '#!/bin/sh\nprintf "synthetic startup failure\\n" >> "$CF_MONITOR_LOG_FILE"\nexit 7\n'
+    : '#!/bin/sh\ntrap "exit 0" TERM INT\nprintf "synthetic agent running\\n" >> "$CF_MONITOR_LOG_FILE"\nwhile :; do sleep 0.1; done\n';
   writeFileSync(join(root, 'synthetic-agent'), agent, { mode: 0o755 });
   const source = installer
     .replaceAll('/etc/conf.d', posix(join(root, 'etc/conf.d')))
@@ -138,6 +139,9 @@ for fixture_command in rc-service rc-update; do
   }
 done
 ensure_agent_user() { :; }
+# Ownership has separate lifecycle coverage; pre-created logs here exercise
+# the service's real log validation and preparation boundary.
+agent_assert_instance() { :; }
 # Account creation/service-manager registration are external boundaries. Files,
 # generated shell code, log contents and the daemon child below remain real.
 run() { if [ "$1" = chown ]; then return 0; fi; "$@"; }
@@ -162,7 +166,7 @@ exit "$_fixture_status"
   writeFileSync(scriptPath, script);
   return {
     root,
-    log: join(root, 'var/log', `${serviceName}.log`),
+    log: join(root, "owned 'quoted' install", 'state', 'agent.log'),
     run() {
       for (const path of [scriptPath, boundariesPath, ...shimPaths, join(root, 'synthetic-agent')]) {
         const syntax = spawnSync('sh', ['-n', posix(path)], { cwd: repo, encoding: 'utf8', timeout: 5000, windowsHide: true });
@@ -222,9 +226,9 @@ for (const kind of ['symlink', 'hardlink', 'directory', 'ancestor-symlink']) {
     if (kind === 'hardlink') linkSync(target, item.log);
     if (kind === 'directory') mkdirSync(item.log);
     if (kind === 'ancestor-symlink') {
-      rmdirSync(join(item.root, 'var/log'));
+      rmdirSync(dirname(item.log));
       mkdirSync(join(item.root, 'linked-logs'));
-      symlinkSync(join(item.root, 'linked-logs'), join(item.root, 'var/log'), process.platform === 'win32' ? 'junction' : 'dir');
+      symlinkSync(join(item.root, 'linked-logs'), dirname(item.log), process.platform === 'win32' ? 'junction' : 'dir');
     }
     const result = item.run();
     assert.notEqual(result.status, 0, result.stdout + result.stderr);

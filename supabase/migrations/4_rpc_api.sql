@@ -15,6 +15,36 @@ alter table clients add constraint clients_traffic_reset_day_check check (traffi
 alter table website_monitors add column if not exists config_revision uuid not null default gen_random_uuid();
 alter table website_checks add column if not exists config_revision uuid;
 
+-- Configuration identities travel as JavaScript safe integers. PostgreSQL
+-- bigint is required above 2^31; reject values that JSON consumers cannot keep
+-- exact, including automatic allocation after a maximal restored identity.
+alter table ping_tasks drop constraint if exists ping_tasks_safe_id_check;
+alter table ping_tasks add constraint ping_tasks_safe_id_check check (id between 1 and 9007199254740991);
+alter table website_monitors drop constraint if exists website_monitors_safe_id_check;
+alter table website_monitors add constraint website_monitors_safe_id_check check (id between 1 and 9007199254740991);
+alter table load_notifications drop constraint if exists load_notifications_safe_id_check;
+alter table load_notifications add constraint load_notifications_safe_id_check check (id between 1 and 9007199254740991);
+
+-- Remove only this application's obsolete overloads, before redefining them.
+drop function if exists public.cfm_ping_task(integer);
+drop function if exists public.cfm_update_ping_task(integer, jsonb);
+drop function if exists public.cfm_delete_ping_task(integer);
+drop function if exists public.cfm_load_notification(integer);
+drop function if exists public.cfm_update_load_notification(integer, jsonb);
+drop function if exists public.cfm_delete_load_notification(integer);
+drop function if exists public.cfm_mark_website_monitor_notified(integer, text, jsonb);
+drop function if exists public.cfm_ping_records(text, integer, integer);
+drop function if exists public.cfm_ping_records_paged(text, integer, integer, integer);
+drop function if exists public.cfm_ping_records_cursor(text, integer, text, integer);
+drop function if exists public.cfm_public_website_monitor(integer, integer, boolean);
+drop function if exists public.cfm_website_monitor(integer);
+drop function if exists public.cfm_website_checks(integer, integer);
+drop function if exists public.cfm_update_website_monitor(integer, jsonb);
+drop function if exists public.cfm_delete_website_monitor(integer);
+drop function if exists public.cfm_set_website_monitor_visibility(integer, boolean);
+drop function if exists public.cfm_set_website_monitor_enabled(integer, boolean);
+drop function if exists public.cfm_mark_load_notification_sent(integer, text, text, text);
+
 -- Phase 1 Worker Data API RPC. These functions are called only by the Worker
 -- with Supabase service_role; browsers still talk only to the Worker.
 
@@ -420,9 +450,13 @@ $$;
 
 create or replace function public.cfm_delete_clients(input_uuids jsonb)
 returns jsonb
-language sql
+language plpgsql
 set search_path = public
 as $$
+declare
+  result jsonb;
+  target_uuid text;
+begin
   with
     ids as (
       select distinct uuid
@@ -444,7 +478,21 @@ as $$
       'ping_records', (select count(*) from deleted_ping_records),
       'ping_snapshots', (select count(*) from deleted_ping_snapshots)
     )
-  );
+  ) into result;
+
+  -- Missing SQL rows may still have state from an older deployment in the DO.
+  -- Queue their reconciliation too; a later creation replaces this revision
+  -- and the pending RPC always projects the current SQL identity.
+  for target_uuid in
+    select distinct uuid
+    from jsonb_array_elements_text(coalesce(input_uuids, '[]'::jsonb)) as item(uuid)
+    where trim(uuid) <> ''
+    order by uuid
+  loop
+    perform cfm_internal.enqueue_client_sync(target_uuid);
+  end loop;
+  return result;
+end;
 $$;
 
 create or replace function public.cfm_prune_client_references(input_uuids jsonb)
@@ -455,6 +503,7 @@ as $$
 declare
   remove_ids text[] := '{}';
   ping_tasks_updated integer := 0;
+  website_monitors_updated integer := 0;
   load_notifications_updated integer := 0;
   load_notifications_deleted integer := 0;
   expiry_notifications_deleted integer := 0;
@@ -467,6 +516,7 @@ begin
   if array_length(remove_ids, 1) is null then
     return jsonb_build_object(
       'ping_tasks_updated', 0,
+      'website_monitors_updated', 0,
       'load_notifications_updated', 0,
       'load_notifications_deleted', 0,
       'expiry_notifications_deleted', 0
@@ -547,8 +597,10 @@ begin
   where client = any(remove_ids);
   get diagnostics expiry_notifications_deleted = row_count;
 
+  website_monitors_updated := cfm_internal.prune_website_client_references(remove_ids);
   return jsonb_build_object(
     'ping_tasks_updated', ping_tasks_updated,
+    'website_monitors_updated', website_monitors_updated,
     'load_notifications_updated', load_notifications_updated,
     'load_notifications_deleted', load_notifications_deleted,
     'expiry_notifications_deleted', expiry_notifications_deleted
@@ -563,6 +615,7 @@ set search_path = public
 as $$
 declare
   ping_tasks_updated integer := 0;
+  website_monitors_updated integer := 0;
   load_notifications_updated integer := 0;
   load_notifications_deleted integer := 0;
   offline_notifications_deleted integer := 0;
@@ -665,8 +718,10 @@ begin
   delete from ping_snapshots p where not exists (select 1 from clients c where c.uuid = p.client);
   get diagnostics ping_snapshots_deleted = row_count;
 
+  website_monitors_updated := cfm_internal.prune_website_client_references(null);
   return jsonb_build_object(
     'ping_tasks_updated', ping_tasks_updated,
+    'website_monitors_updated', website_monitors_updated,
     'load_notifications_updated', load_notifications_updated,
     'load_notifications_deleted', load_notifications_deleted,
     'expiry_notifications_deleted', expiry_notifications_deleted,
@@ -792,7 +847,7 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_ping_task(input_id integer)
+create or replace function public.cfm_ping_task(input_id bigint)
 returns jsonb
 language sql
 stable
@@ -825,7 +880,7 @@ as $$
   returning to_jsonb(ping_tasks.*);
 $$;
 
-create or replace function public.cfm_update_ping_task(input_id integer, input_task jsonb)
+create or replace function public.cfm_update_ping_task(input_id bigint, input_task jsonb)
 returns jsonb
 language sql
 set search_path = public
@@ -848,17 +903,20 @@ language plpgsql
 set search_path = public
 as $$
 declare
-  input_id integer;
-  final_id integer;
-  final_ids integer[] := '{}';
+  input_id bigint;
+  final_id bigint;
+  final_ids bigint[] := '{}';
   changed_count integer := 0;
   next_order integer := 1;
   old_order integer;
 begin
   for input_id in
-    select distinct value::integer
-    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) as value
-    where value ~ '^[0-9]+$' and value::integer > 0
+    select item.value::bigint
+    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end)
+      with ordinality as item(value, ord)
+    where item.value ~ '^[0-9]+$' and item.value::bigint > 0
+    group by item.value::bigint
+    order by min(item.ord)
   loop
     final_ids := array_append(final_ids, input_id);
   end loop;
@@ -869,8 +927,8 @@ begin
 
   if exists (
     select 1
-    from unnest(final_ids) id
-    where not exists (select 1 from ping_tasks where ping_tasks.id = id)
+    from unnest(final_ids) as requested(id)
+    where not exists (select 1 from ping_tasks where ping_tasks.id = requested.id)
   ) then
     raise exception 'Ping task id does not exist';
   end if;
@@ -897,7 +955,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_delete_ping_task(input_id integer)
+create or replace function public.cfm_delete_ping_task(input_id bigint)
 returns jsonb
 language sql
 set search_path = public
@@ -1255,10 +1313,16 @@ returns void
 language plpgsql
 set search_path = public
 as $$
+declare
+  previous_payload_bytes bigint;
 begin
   if input_theme is null or jsonb_typeof(input_theme) <> 'object' then
     return;
   end if;
+
+  -- Serialize all theme writers before measuring the combined content budget.
+  lock table themes, theme_assets in share row exclusive mode;
+  previous_payload_bytes := (cfm_internal.theme_storage_usage()->>'theme_payload_bytes')::bigint;
 
   insert into themes (
     short, name, description, version, author, url, preview_path, style_path,
@@ -1302,6 +1366,9 @@ begin
   from jsonb_array_elements(
     case when jsonb_typeof(input_assets) = 'array' then input_assets else '[]'::jsonb end
   ) asset;
+
+  perform cfm_internal.enforce_theme_storage_quota(previous_payload_bytes);
+  delete from cfm_internal.storage_diagnostics_cache;
 end;
 $$;
 
@@ -1316,12 +1383,19 @@ set search_path = public
 as $$
 declare
   updated_count integer;
+  previous_payload_bytes bigint;
 begin
+  lock table themes, theme_assets in share row exclusive mode;
+  previous_payload_bytes := (cfm_internal.theme_storage_usage()->>'theme_payload_bytes')::bigint;
   update themes
   set config_json = input_config_json, custom_css = input_custom_css, updated_at = now()
   where short = input_short;
 
   get diagnostics updated_count = row_count;
+  if updated_count > 0 then
+    perform cfm_internal.enforce_theme_storage_quota(previous_payload_bytes);
+    delete from cfm_internal.storage_diagnostics_cache;
+  end if;
   return updated_count > 0;
 end;
 $$;
@@ -1334,9 +1408,13 @@ as $$
 declare
   deleted_count integer;
 begin
+  lock table themes, theme_assets in share row exclusive mode;
   delete from themes where short = input_short;
 
   get diagnostics deleted_count = row_count;
+  if deleted_count > 0 then
+    delete from cfm_internal.storage_diagnostics_cache;
+  end if;
   return deleted_count > 0;
 end;
 $$;
@@ -1371,7 +1449,7 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_load_notification(input_id integer)
+create or replace function public.cfm_load_notification(input_id bigint)
 returns jsonb
 language sql
 stable
@@ -1450,7 +1528,7 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_update_load_notification(input_id integer, input_patch jsonb)
+create or replace function public.cfm_update_load_notification(input_id bigint, input_patch jsonb)
 returns boolean
 language plpgsql
 set search_path = public
@@ -1478,7 +1556,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_delete_load_notification(input_id integer)
+create or replace function public.cfm_delete_load_notification(input_id bigint)
 returns void
 language sql
 set search_path = public
@@ -1598,7 +1676,7 @@ begin
 
   select * into monitor_row
   from website_monitors
-  where id = (input_check->>'monitor_id')::integer
+  where id = (input_check->>'monitor_id')::bigint
   limit 1;
   if not found then
     return null;
@@ -1609,7 +1687,7 @@ begin
     status_code, raw_status_code, latency_ms, error, source_type, source_client
   )
   values (
-    (input_check->>'monitor_id')::integer,
+    (input_check->>'monitor_id')::bigint,
     checked_time,
     check_ok,
     case when input_check->>'effective_status' = 'up' then 'up' else 'down' end,
@@ -1638,7 +1716,7 @@ begin
         last_error = null,
         down_since = null,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   else
     update website_monitors
@@ -1653,7 +1731,7 @@ begin
         down_since = coalesce(down_since, checked_time),
         last_notified_at = case when status = 'down' then last_notified_at else null end,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   end if;
 
@@ -1738,7 +1816,7 @@ $$;
 
 drop function if exists public.cfm_mark_website_monitor_notified(integer, text);
 create or replace function public.cfm_mark_website_monitor_notified(
-  input_id integer, input_time text, input_expected jsonb default null
+  input_id bigint, input_time text, input_expected jsonb default null
 )
 returns boolean
 language sql
@@ -1934,6 +2012,34 @@ begin
 end;
 $$;
 
+-- Composite history cursors preserve all ties in the descending row order.
+-- Timestamp-only cursors remain valid for previously released clients.
+create or replace function cfm_internal.history_cursor(input_cursor text)
+returns table(cursor_time timestamptz, cursor_id bigint, cursor_ordinal integer)
+language sql
+stable
+set search_path = public
+as $$
+  select
+    case when left(input_cursor, 3) = 'v1|' then split_part(input_cursor, '|', 2)::timestamptz
+      else nullif(input_cursor, '')::timestamptz end,
+    case when left(input_cursor, 3) = 'v1|' then split_part(input_cursor, '|', 3)::bigint else null end,
+    case when left(input_cursor, 3) = 'v1|' then split_part(input_cursor, '|', 4)::integer else null end;
+$$;
+revoke all on function cfm_internal.history_cursor(text) from public, anon, authenticated;
+grant execute on function cfm_internal.history_cursor(text) to service_role;
+
+create or replace function cfm_internal.history_cursor_key(input_time timestamptz, input_id bigint, input_ordinal integer)
+returns text
+language sql
+stable
+set search_path = public
+as $$
+  select 'v1|' || (to_jsonb(input_time) #>> '{}') || '|' || input_id::text || '|' || input_ordinal::text;
+$$;
+revoke all on function cfm_internal.history_cursor_key(timestamptz, bigint, integer) from public, anon, authenticated;
+grant execute on function cfm_internal.history_cursor_key(timestamptz, bigint, integer) to service_role;
+
 create or replace function public.cfm_records_range_paged(
   input_client text,
   input_start text,
@@ -1948,39 +2054,40 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
-      select
-        greatest(coalesce(input_page, 1), 1)::integer as page,
+  with params as (
+      select greatest(coalesce(input_page, 1), 1)::integer as page,
         least(greatest(coalesce(input_limit, 100), 1), 500)::integer as limit_value
     ),
     raw_rows as (
-      select records.*
-      from records, params
-      where client = input_client
-        and time >= input_start::timestamptz
-        and time <= input_end::timestamptz
-      order by time desc
+      select r.id, r.client, r.time, r.cpu, r.gpu, r.ram, r.ram_total, r.swap, r.swap_total, r.load, r.temp,
+        r.disk, r.disk_total, r.net_in, r.net_out, r.net_total_up, r.net_total_down,
+        r.process_count, r.connections, r.connections_udp, r.uptime
+      from records r
+      where r.client = input_client
+        and r.time >= input_start::timestamptz
+        and r.time <= input_end::timestamptz
+      order by r.time desc, r.id desc
       limit (select limit_value + 1 from params)
       offset (select (page - 1) * limit_value from params)
     ),
-    numbered as (
-      select raw_rows.*, row_number() over (order by time asc) as rn
-      from raw_rows
-    ),
     data_rows as (
-      select id, client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp,
-        disk, disk_total, net_in, net_out, net_total_up, net_total_down,
-        process_count, connections, connections_udp, uptime
-      from numbered, params
-      where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc
+      limit (select limit_value from params)
     )
-  select jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb),
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
+  select jsonb_strip_nulls(jsonb_build_object(
     'total', (params.page - 1) * params.limit_value + (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', params.page,
     'limit', params.limit_value,
-    'has_more', (select count(*) from raw_rows) > params.limit_value
+    'has_more', (select count(*) from raw_rows) > params.limit_value,
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, 0) from data_rows
+        order by time asc, id asc limit 1) else null end
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc) from data_rows), '[]'::jsonb)
   )
   from params
   );
@@ -2001,43 +2108,42 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
+  with params as (
       select least(greatest(coalesce(input_limit, 100), 1), 500)::integer as limit_value
     ),
     raw_rows as (
-      select *
-      from records, params
-      where client = input_client
-        and time >= input_start::timestamptz
-        and time <= input_end::timestamptz
-        and (input_cursor is null or time < input_cursor::timestamptz)
-      order by time desc
+      select r.id, r.client, r.time, r.cpu, r.gpu, r.ram, r.ram_total, r.swap, r.swap_total, r.load, r.temp,
+        r.disk, r.disk_total, r.net_in, r.net_out, r.net_total_up, r.net_total_down,
+        r.process_count, r.connections, r.connections_udp, r.uptime
+      from records r
+      cross join cfm_internal.history_cursor(input_cursor) boundary
+      where r.client = input_client
+        and r.time >= input_start::timestamptz
+        and r.time <= input_end::timestamptz
+        and (boundary.cursor_time is null
+          or (boundary.cursor_id is null and r.time < boundary.cursor_time)
+          or (boundary.cursor_id is not null and (r.time, r.id) < (boundary.cursor_time, boundary.cursor_id)))
+      order by r.time desc, r.id desc
       limit (select limit_value + 1 from params)
     ),
-    numbered as (
-      select raw_rows.*, row_number() over (order by time asc) as rn
-      from raw_rows
-    ),
     data_rows as (
-      select id, client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp,
-        disk, disk_total, net_in, net_out, net_total_up, net_total_down,
-        process_count, connections, connections_udp, uptime
-      from numbered, params
-      where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc
+      limit (select limit_value from params)
     )
-  -- jsonb_strip_nulls 只能作用在标量字段上：它是**递归**的，套在整个响应外面会连
-  -- data 数组里 load 为 null 的键一起删掉，而前端把「键不存在」当作 0，
-  -- 「负载不可用」就被读成「空闲」。先剥标量字段的 null，再合并未经剥离的 data。
-  -- （gpu / ping 的同款游标 RPC 没有可空列，那两处保持原样。）
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
   select jsonb_strip_nulls(jsonb_build_object(
     'total', (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', 1,
     'limit', params.limit_value,
     'has_more', (select count(*) from raw_rows) > params.limit_value,
-    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value then (select min(time) from data_rows) else null end
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, 0) from data_rows
+        order by time asc, id asc limit 1) else null end
   )) || jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb)
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc) from data_rows), '[]'::jsonb)
   )
   from params
   );
@@ -2134,47 +2240,46 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
-      select
-        greatest(coalesce(input_page, 1), 1)::integer as page,
+  with params as (
+      select greatest(coalesce(input_page, 1), 1)::integer as page,
         least(greatest(coalesce(input_limit, 100), 1), 500)::integer as limit_value
     ),
-    flat_rows as (
-      select
-        s.id,
-        s.client,
-        s.time,
+    raw_rows as (
+      select r.id, r.client, r.time, devices.device_ordinal::integer as device_ordinal,
         coalesce((device->>'device_index')::integer, 0) as device_index,
         coalesce(device->>'device_name', '') as device_name,
         coalesce((device->>'mem_total')::double precision, 0) as mem_total,
         coalesce((device->>'mem_used')::double precision, 0) as mem_used,
         coalesce((device->>'utilization')::double precision, 0) as utilization,
         coalesce((device->>'temperature')::double precision, 0) as temperature
-      from gpu_snapshots s
-      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.devices_json) = 'array' then s.devices_json else '[]'::jsonb end) device
-      where s.client = input_client
-        and (input_start is null or s.time >= input_start::timestamptz)
-        and (input_end is null or s.time <= input_end::timestamptz)
-      order by s.time desc, device_index asc
+      from gpu_snapshots r
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(r.devices_json) = 'array'
+        then r.devices_json else '[]'::jsonb end) with ordinality as devices(device, device_ordinal)
+      where r.client = input_client
+        and (input_start is null or r.time >= input_start::timestamptz)
+        and (input_end is null or r.time <= input_end::timestamptz)
+      order by r.time desc, r.id desc, devices.device_ordinal desc
       limit (select limit_value + 1 from params)
       offset (select (page - 1) * limit_value from params)
     ),
-    numbered as (
-      select flat_rows.*, row_number() over (order by time asc, device_index asc) as rn
-      from flat_rows
-    ),
     data_rows as (
-      select id, client, time, device_index, device_name, mem_total, mem_used, utilization, temperature
-      from numbered, params
-      where not ((select count(*) from flat_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc, device_ordinal desc
+      limit (select limit_value from params)
     )
-  select jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc, device_index asc) from data_rows), '[]'::jsonb),
-    'total', (params.page - 1) * params.limit_value + (select count(*) from data_rows) + case when (select count(*) from flat_rows) > params.limit_value then 1 else 0 end,
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
+  select jsonb_strip_nulls(jsonb_build_object(
+    'total', (params.page - 1) * params.limit_value + (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', params.page,
     'limit', params.limit_value,
-    'has_more', (select count(*) from flat_rows) > params.limit_value
+    'has_more', (select count(*) from raw_rows) > params.limit_value,
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc, device_ordinal asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, device_ordinal) from data_rows
+        order by time asc, id asc, device_ordinal asc limit 1) else null end
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc, device_ordinal asc) from data_rows), '[]'::jsonb)
   )
   from params
   );
@@ -2195,53 +2300,55 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
+  with params as (
       select least(greatest(coalesce(input_limit, 100), 1), 500)::integer as limit_value
     ),
-    flat_rows as (
-      select
-        s.id,
-        s.client,
-        s.time,
+    raw_rows as (
+      select r.id, r.client, r.time, devices.device_ordinal::integer as device_ordinal,
         coalesce((device->>'device_index')::integer, 0) as device_index,
         coalesce(device->>'device_name', '') as device_name,
         coalesce((device->>'mem_total')::double precision, 0) as mem_total,
         coalesce((device->>'mem_used')::double precision, 0) as mem_used,
         coalesce((device->>'utilization')::double precision, 0) as utilization,
         coalesce((device->>'temperature')::double precision, 0) as temperature
-      from gpu_snapshots s
-      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.devices_json) = 'array' then s.devices_json else '[]'::jsonb end) device
-      where s.client = input_client
-        and (input_start is null or s.time >= input_start::timestamptz)
-        and (input_end is null or s.time <= input_end::timestamptz)
-        and (input_cursor is null or s.time < input_cursor::timestamptz)
-      order by s.time desc, device_index asc
+      from gpu_snapshots r
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(r.devices_json) = 'array'
+        then r.devices_json else '[]'::jsonb end) with ordinality as devices(device, device_ordinal)
+      cross join cfm_internal.history_cursor(input_cursor) boundary
+      where r.client = input_client
+        and (input_start is null or r.time >= input_start::timestamptz)
+        and (input_end is null or r.time <= input_end::timestamptz)
+        and (boundary.cursor_time is null
+          or (boundary.cursor_id is null and r.time < boundary.cursor_time)
+          or (boundary.cursor_id is not null and (r.time, r.id, devices.device_ordinal) < (boundary.cursor_time, boundary.cursor_id, boundary.cursor_ordinal)))
+      order by r.time desc, r.id desc, devices.device_ordinal desc
       limit (select limit_value + 1 from params)
     ),
-    numbered as (
-      select flat_rows.*, row_number() over (order by time asc, device_index asc) as rn
-      from flat_rows
-    ),
     data_rows as (
-      select id, client, time, device_index, device_name, mem_total, mem_used, utilization, temperature
-      from numbered, params
-      where not ((select count(*) from flat_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc, device_ordinal desc
+      limit (select limit_value from params)
     )
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
   select jsonb_strip_nulls(jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc, device_index asc) from data_rows), '[]'::jsonb),
-    'total', (select count(*) from data_rows) + case when (select count(*) from flat_rows) > params.limit_value then 1 else 0 end,
+    'total', (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', 1,
     'limit', params.limit_value,
-    'has_more', (select count(*) from flat_rows) > params.limit_value,
-    'next_cursor', case when (select count(*) from flat_rows) > params.limit_value then (select min(time) from data_rows) else null end
-  ))
+    'has_more', (select count(*) from raw_rows) > params.limit_value,
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc, device_ordinal asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, device_ordinal) from data_rows
+        order by time asc, id asc, device_ordinal asc limit 1) else null end
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc, device_ordinal asc) from data_rows), '[]'::jsonb)
+  )
   from params
   );
 end;
 $$;
 
-create or replace function public.cfm_ping_records(input_client text, input_task_id integer, input_limit integer default 120)
+create or replace function public.cfm_ping_records(input_client text, input_task_id bigint, input_limit integer default 120)
 returns jsonb
 language plpgsql
 stable
@@ -2269,7 +2376,7 @@ $$;
 
 create or replace function public.cfm_ping_records_paged(
   input_client text,
-  input_task_id integer,
+  input_task_id bigint,
   input_page integer default 1,
   input_limit integer default 120
 )
@@ -2280,41 +2387,37 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
-      select
-        greatest(coalesce(input_page, 1), 1)::integer as page,
+  with params as (
+      select greatest(coalesce(input_page, 1), 1)::integer as page,
         least(greatest(coalesce(input_limit, 120), 1), 500)::integer as limit_value
     ),
     raw_rows as (
-      select
-        id,
-        client,
-        input_task_id as task_id,
-        time,
-        (values_json ->> input_task_id::text)::integer as value
-      from ping_snapshots, params
-      where client = input_client
-        and values_json ? input_task_id::text
-      order by time desc
+      select r.id, r.client, input_task_id as task_id, r.time, (r.values_json ->> input_task_id::text)::integer as value
+      from ping_snapshots r
+      where r.client = input_client
+        and r.values_json ? input_task_id::text
+      order by r.time desc, r.id desc
       limit (select limit_value + 1 from params)
       offset (select (page - 1) * limit_value from params)
     ),
-    numbered as (
-      select raw_rows.*, row_number() over (order by time asc) as rn
-      from raw_rows
-    ),
     data_rows as (
-      select id, client, task_id, time, value
-      from numbered, params
-      where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc
+      limit (select limit_value from params)
     )
-  select jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb),
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
+  select jsonb_strip_nulls(jsonb_build_object(
     'total', (params.page - 1) * params.limit_value + (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', params.page,
     'limit', params.limit_value,
-    'has_more', (select count(*) from raw_rows) > params.limit_value
+    'has_more', (select count(*) from raw_rows) > params.limit_value,
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, 0) from data_rows
+        order by time asc, id asc limit 1) else null end
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc) from data_rows), '[]'::jsonb)
   )
   from params
   );
@@ -2323,7 +2426,7 @@ $$;
 
 create or replace function public.cfm_ping_records_cursor(
   input_client text,
-  input_task_id integer,
+  input_task_id bigint,
   input_cursor text default null,
   input_limit integer default 120
 )
@@ -2334,41 +2437,40 @@ set search_path = public
 as $$
 begin
   return (
-  with
-    params as (
+  with params as (
       select least(greatest(coalesce(input_limit, 120), 1), 500)::integer as limit_value
     ),
     raw_rows as (
-      select
-        id,
-        client,
-        input_task_id as task_id,
-        time,
-        (values_json ->> input_task_id::text)::integer as value
-      from ping_snapshots, params
-      where client = input_client
-        and values_json ? input_task_id::text
-        and (input_cursor is null or time < input_cursor::timestamptz)
-      order by time desc
+      select r.id, r.client, input_task_id as task_id, r.time, (r.values_json ->> input_task_id::text)::integer as value
+      from ping_snapshots r
+      cross join cfm_internal.history_cursor(input_cursor) boundary
+      where r.client = input_client
+        and r.values_json ? input_task_id::text
+        and (boundary.cursor_time is null
+          or (boundary.cursor_id is null and r.time < boundary.cursor_time)
+          or (boundary.cursor_id is not null and (r.time, r.id) < (boundary.cursor_time, boundary.cursor_id)))
+      order by r.time desc, r.id desc
       limit (select limit_value + 1 from params)
     ),
-    numbered as (
-      select raw_rows.*, row_number() over (order by time asc) as rn
-      from raw_rows
-    ),
     data_rows as (
-      select id, client, task_id, time, value
-      from numbered, params
-      where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
+      select * from raw_rows
+      order by time desc, id desc
+      limit (select limit_value from params)
     )
+  -- Strip null continuation fields only; nullable metrics inside data stay null.
   select jsonb_strip_nulls(jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb),
     'total', (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', 1,
     'limit', params.limit_value,
     'has_more', (select count(*) from raw_rows) > params.limit_value,
-    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value then (select min(time) from data_rows) else null end
-  ))
+    'next_cursor', case when (select count(*) from raw_rows) > params.limit_value
+      then (select time from data_rows order by time asc, id asc limit 1) else null end,
+    'next_cursor_key', case when (select count(*) from raw_rows) > params.limit_value
+      then (select cfm_internal.history_cursor_key(time, id, 0) from data_rows
+        order by time asc, id asc limit 1) else null end
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) || jsonb_build_object('id', id::text) order by time asc, id asc) from data_rows), '[]'::jsonb)
+  )
   from params
   );
 end;
@@ -2386,19 +2488,19 @@ stable
 set search_path = public
 as $$
 declare
-  task_id integer;
+  task_id bigint;
   safe_limit integer := least(greatest(coalesce(input_limit, 120), 1), 1000);
   result jsonb := '{}'::jsonb;
 begin
   for task_id in
-    select distinct value::integer
+    select distinct value::bigint
     from jsonb_array_elements_text(case when jsonb_typeof(input_task_ids) = 'array' then input_task_ids else '[]'::jsonb end) as value
-    where value ~ '^[0-9]+$' and value::integer > 0
+    where value ~ '^[0-9]+$' and value::bigint > 0
   loop
     result := result || jsonb_build_object(
       task_id::text,
       coalesce((
-        select jsonb_agg(to_jsonb(row_data) order by time asc)
+        select jsonb_agg(to_jsonb(row_data) || jsonb_build_object('id', id::text) order by time asc, id asc)
         from (
           select
             id,
@@ -2410,7 +2512,7 @@ begin
           where client = input_client
             and values_json ? task_id::text
             and (input_cursor is null or time < input_cursor::timestamptz)
-          order by time desc
+          order by time desc, id desc
           limit safe_limit
         ) row_data
       ), '[]'::jsonb)
@@ -2649,7 +2751,7 @@ as $$
   from monitor_rows m;
 $$;
 
-create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120, input_include_hidden boolean default false)
+create or replace function public.cfm_public_website_monitor(input_id bigint, input_check_limit integer default 120, input_include_hidden boolean default false)
 returns jsonb
 language plpgsql
 stable
@@ -2704,7 +2806,7 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_website_monitor(input_id integer)
+create or replace function public.cfm_website_monitor(input_id bigint)
 returns jsonb
 language sql
 stable
@@ -2719,7 +2821,7 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_website_checks(input_monitor_id integer, input_limit integer default 60)
+create or replace function public.cfm_website_checks(input_monitor_id bigint, input_limit integer default 60)
 returns jsonb
 language plpgsql
 stable
@@ -2776,7 +2878,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_update_website_monitor(input_id integer, input_monitor jsonb)
+create or replace function public.cfm_update_website_monitor(input_id bigint, input_monitor jsonb)
 returns jsonb
 language sql
 set search_path = public
@@ -2803,7 +2905,7 @@ as $$
   returning to_jsonb(website_monitors.*);
 $$;
 
-create or replace function public.cfm_delete_website_monitor(input_id integer)
+create or replace function public.cfm_delete_website_monitor(input_id bigint)
 returns void
 language sql
 set search_path = public
@@ -2817,17 +2919,17 @@ language plpgsql
 set search_path = public
 as $$
 declare
-  input_id integer;
-  final_id integer;
-  final_ids integer[] := '{}';
+  input_id bigint;
+  final_id bigint;
+  final_ids bigint[] := '{}';
   changed_count integer := 0;
   next_order integer := 1;
   old_order integer;
 begin
   for input_id in
-    select distinct value::integer
+    select distinct value::bigint
     from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) as value
-    where value ~ '^[0-9]+$' and value::integer > 0
+    where value ~ '^[0-9]+$' and value::bigint > 0
   loop
     final_ids := array_append(final_ids, input_id);
   end loop;
@@ -2866,7 +2968,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_set_website_monitor_visibility(input_id integer, input_hidden boolean)
+create or replace function public.cfm_set_website_monitor_visibility(input_id bigint, input_hidden boolean)
 returns boolean
 language plpgsql
 set search_path = public
@@ -2883,7 +2985,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_set_website_monitor_enabled(input_id integer, input_enabled boolean)
+create or replace function public.cfm_set_website_monitor_enabled(input_id bigint, input_enabled boolean)
 returns boolean
 language plpgsql
 set search_path = public
@@ -3160,30 +3262,30 @@ revoke all on function public.cfm_ping_task_estimate_rows() from anon;
 revoke all on function public.cfm_ping_task_estimate_rows() from authenticated;
 grant execute on function public.cfm_ping_task_estimate_rows() to service_role;
 
-revoke all on function public.cfm_ping_task(integer) from public;
-revoke all on function public.cfm_ping_task(integer) from anon;
-revoke all on function public.cfm_ping_task(integer) from authenticated;
-grant execute on function public.cfm_ping_task(integer) to service_role;
+revoke all on function public.cfm_ping_task(bigint) from public;
+revoke all on function public.cfm_ping_task(bigint) from anon;
+revoke all on function public.cfm_ping_task(bigint) from authenticated;
+grant execute on function public.cfm_ping_task(bigint) to service_role;
 
 revoke all on function public.cfm_create_ping_task(jsonb) from public;
 revoke all on function public.cfm_create_ping_task(jsonb) from anon;
 revoke all on function public.cfm_create_ping_task(jsonb) from authenticated;
 grant execute on function public.cfm_create_ping_task(jsonb) to service_role;
 
-revoke all on function public.cfm_update_ping_task(integer, jsonb) from public;
-revoke all on function public.cfm_update_ping_task(integer, jsonb) from anon;
-revoke all on function public.cfm_update_ping_task(integer, jsonb) from authenticated;
-grant execute on function public.cfm_update_ping_task(integer, jsonb) to service_role;
+revoke all on function public.cfm_update_ping_task(bigint, jsonb) from public;
+revoke all on function public.cfm_update_ping_task(bigint, jsonb) from anon;
+revoke all on function public.cfm_update_ping_task(bigint, jsonb) from authenticated;
+grant execute on function public.cfm_update_ping_task(bigint, jsonb) to service_role;
 
 revoke all on function public.cfm_reorder_ping_tasks(jsonb) from public;
 revoke all on function public.cfm_reorder_ping_tasks(jsonb) from anon;
 revoke all on function public.cfm_reorder_ping_tasks(jsonb) from authenticated;
 grant execute on function public.cfm_reorder_ping_tasks(jsonb) to service_role;
 
-revoke all on function public.cfm_delete_ping_task(integer) from public;
-revoke all on function public.cfm_delete_ping_task(integer) from anon;
-revoke all on function public.cfm_delete_ping_task(integer) from authenticated;
-grant execute on function public.cfm_delete_ping_task(integer) to service_role;
+revoke all on function public.cfm_delete_ping_task(bigint) from public;
+revoke all on function public.cfm_delete_ping_task(bigint) from anon;
+revoke all on function public.cfm_delete_ping_task(bigint) from authenticated;
+grant execute on function public.cfm_delete_ping_task(bigint) to service_role;
 
 revoke all on function public.cfm_delete_old_records(text, integer) from public;
 revoke all on function public.cfm_delete_old_records(text, integer) from anon;
@@ -3285,10 +3387,10 @@ revoke all on function public.cfm_load_notifications() from anon;
 revoke all on function public.cfm_load_notifications() from authenticated;
 grant execute on function public.cfm_load_notifications() to service_role;
 
-revoke all on function public.cfm_load_notification(integer) from public;
-revoke all on function public.cfm_load_notification(integer) from anon;
-revoke all on function public.cfm_load_notification(integer) from authenticated;
-grant execute on function public.cfm_load_notification(integer) to service_role;
+revoke all on function public.cfm_load_notification(bigint) from public;
+revoke all on function public.cfm_load_notification(bigint) from anon;
+revoke all on function public.cfm_load_notification(bigint) from authenticated;
+grant execute on function public.cfm_load_notification(bigint) to service_role;
 
 revoke all on function public.cfm_create_load_notification(jsonb) from public;
 revoke all on function public.cfm_create_load_notification(jsonb) from anon;
@@ -3300,15 +3402,15 @@ revoke all on function public.cfm_load_metric_window_stats(jsonb, text, text, te
 revoke all on function public.cfm_load_metric_window_stats(jsonb, text, text, text, double precision) from authenticated;
 grant execute on function public.cfm_load_metric_window_stats(jsonb, text, text, text, double precision) to service_role;
 
-revoke all on function public.cfm_update_load_notification(integer, jsonb) from public;
-revoke all on function public.cfm_update_load_notification(integer, jsonb) from anon;
-revoke all on function public.cfm_update_load_notification(integer, jsonb) from authenticated;
-grant execute on function public.cfm_update_load_notification(integer, jsonb) to service_role;
+revoke all on function public.cfm_update_load_notification(bigint, jsonb) from public;
+revoke all on function public.cfm_update_load_notification(bigint, jsonb) from anon;
+revoke all on function public.cfm_update_load_notification(bigint, jsonb) from authenticated;
+grant execute on function public.cfm_update_load_notification(bigint, jsonb) to service_role;
 
-revoke all on function public.cfm_delete_load_notification(integer) from public;
-revoke all on function public.cfm_delete_load_notification(integer) from anon;
-revoke all on function public.cfm_delete_load_notification(integer) from authenticated;
-grant execute on function public.cfm_delete_load_notification(integer) to service_role;
+revoke all on function public.cfm_delete_load_notification(bigint) from public;
+revoke all on function public.cfm_delete_load_notification(bigint) from anon;
+revoke all on function public.cfm_delete_load_notification(bigint) from authenticated;
+grant execute on function public.cfm_delete_load_notification(bigint) to service_role;
 
 revoke all on function public.cfm_due_website_monitors(text, integer) from public;
 revoke all on function public.cfm_due_website_monitors(text, integer) from anon;
@@ -3325,10 +3427,10 @@ revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer)
 revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer) from authenticated;
 grant execute on function public.cfm_agent_website_probe_tasks(text, text, integer) to service_role;
 
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from public;
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from anon;
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from authenticated;
-grant execute on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) to service_role;
+revoke all on function public.cfm_mark_website_monitor_notified(bigint, text, jsonb) from public;
+revoke all on function public.cfm_mark_website_monitor_notified(bigint, text, jsonb) from anon;
+revoke all on function public.cfm_mark_website_monitor_notified(bigint, text, jsonb) from authenticated;
+grant execute on function public.cfm_mark_website_monitor_notified(bigint, text, jsonb) to service_role;
 
 revoke all on function public.cfm_insert_monitor_record(jsonb) from public;
 revoke all on function public.cfm_insert_monitor_record(jsonb) from anon;
@@ -3400,20 +3502,20 @@ revoke all on function public.cfm_gpu_records_cursor(text, text, text, text, int
 revoke all on function public.cfm_gpu_records_cursor(text, text, text, text, integer) from authenticated;
 grant execute on function public.cfm_gpu_records_cursor(text, text, text, text, integer) to service_role;
 
-revoke all on function public.cfm_ping_records(text, integer, integer) from public;
-revoke all on function public.cfm_ping_records(text, integer, integer) from anon;
-revoke all on function public.cfm_ping_records(text, integer, integer) from authenticated;
-grant execute on function public.cfm_ping_records(text, integer, integer) to service_role;
+revoke all on function public.cfm_ping_records(text, bigint, integer) from public;
+revoke all on function public.cfm_ping_records(text, bigint, integer) from anon;
+revoke all on function public.cfm_ping_records(text, bigint, integer) from authenticated;
+grant execute on function public.cfm_ping_records(text, bigint, integer) to service_role;
 
-revoke all on function public.cfm_ping_records_paged(text, integer, integer, integer) from public;
-revoke all on function public.cfm_ping_records_paged(text, integer, integer, integer) from anon;
-revoke all on function public.cfm_ping_records_paged(text, integer, integer, integer) from authenticated;
-grant execute on function public.cfm_ping_records_paged(text, integer, integer, integer) to service_role;
+revoke all on function public.cfm_ping_records_paged(text, bigint, integer, integer) from public;
+revoke all on function public.cfm_ping_records_paged(text, bigint, integer, integer) from anon;
+revoke all on function public.cfm_ping_records_paged(text, bigint, integer, integer) from authenticated;
+grant execute on function public.cfm_ping_records_paged(text, bigint, integer, integer) to service_role;
 
-revoke all on function public.cfm_ping_records_cursor(text, integer, text, integer) from public;
-revoke all on function public.cfm_ping_records_cursor(text, integer, text, integer) from anon;
-revoke all on function public.cfm_ping_records_cursor(text, integer, text, integer) from authenticated;
-grant execute on function public.cfm_ping_records_cursor(text, integer, text, integer) to service_role;
+revoke all on function public.cfm_ping_records_cursor(text, bigint, text, integer) from public;
+revoke all on function public.cfm_ping_records_cursor(text, bigint, text, integer) from anon;
+revoke all on function public.cfm_ping_records_cursor(text, bigint, text, integer) from authenticated;
+grant execute on function public.cfm_ping_records_cursor(text, bigint, text, integer) to service_role;
 
 revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) from public;
 revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) from anon;
@@ -3456,55 +3558,55 @@ grant execute on function public.cfm_public_websites(integer, integer) to servic
 
 drop function if exists public.cfm_public_website_monitor(integer, integer);
 
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from authenticated;
-grant execute on function public.cfm_public_website_monitor(integer, integer, boolean) to service_role;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from public;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from anon;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_website_monitor(bigint, integer, boolean) to service_role;
 
 revoke all on function public.cfm_website_monitors() from public;
 revoke all on function public.cfm_website_monitors() from anon;
 revoke all on function public.cfm_website_monitors() from authenticated;
 grant execute on function public.cfm_website_monitors() to service_role;
 
-revoke all on function public.cfm_website_monitor(integer) from public;
-revoke all on function public.cfm_website_monitor(integer) from anon;
-revoke all on function public.cfm_website_monitor(integer) from authenticated;
-grant execute on function public.cfm_website_monitor(integer) to service_role;
+revoke all on function public.cfm_website_monitor(bigint) from public;
+revoke all on function public.cfm_website_monitor(bigint) from anon;
+revoke all on function public.cfm_website_monitor(bigint) from authenticated;
+grant execute on function public.cfm_website_monitor(bigint) to service_role;
 
-revoke all on function public.cfm_website_checks(integer, integer) from public;
-revoke all on function public.cfm_website_checks(integer, integer) from anon;
-revoke all on function public.cfm_website_checks(integer, integer) from authenticated;
-grant execute on function public.cfm_website_checks(integer, integer) to service_role;
+revoke all on function public.cfm_website_checks(bigint, integer) from public;
+revoke all on function public.cfm_website_checks(bigint, integer) from anon;
+revoke all on function public.cfm_website_checks(bigint, integer) from authenticated;
+grant execute on function public.cfm_website_checks(bigint, integer) to service_role;
 
 revoke all on function public.cfm_create_website_monitor(jsonb) from public;
 revoke all on function public.cfm_create_website_monitor(jsonb) from anon;
 revoke all on function public.cfm_create_website_monitor(jsonb) from authenticated;
 grant execute on function public.cfm_create_website_monitor(jsonb) to service_role;
 
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from public;
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from anon;
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from authenticated;
-grant execute on function public.cfm_update_website_monitor(integer, jsonb) to service_role;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from public;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from anon;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from authenticated;
+grant execute on function public.cfm_update_website_monitor(bigint, jsonb) to service_role;
 
-revoke all on function public.cfm_delete_website_monitor(integer) from public;
-revoke all on function public.cfm_delete_website_monitor(integer) from anon;
-revoke all on function public.cfm_delete_website_monitor(integer) from authenticated;
-grant execute on function public.cfm_delete_website_monitor(integer) to service_role;
+revoke all on function public.cfm_delete_website_monitor(bigint) from public;
+revoke all on function public.cfm_delete_website_monitor(bigint) from anon;
+revoke all on function public.cfm_delete_website_monitor(bigint) from authenticated;
+grant execute on function public.cfm_delete_website_monitor(bigint) to service_role;
 
 revoke all on function public.cfm_reorder_website_monitors(jsonb) from public;
 revoke all on function public.cfm_reorder_website_monitors(jsonb) from anon;
 revoke all on function public.cfm_reorder_website_monitors(jsonb) from authenticated;
 grant execute on function public.cfm_reorder_website_monitors(jsonb) to service_role;
 
-revoke all on function public.cfm_set_website_monitor_visibility(integer, boolean) from public;
-revoke all on function public.cfm_set_website_monitor_visibility(integer, boolean) from anon;
-revoke all on function public.cfm_set_website_monitor_visibility(integer, boolean) from authenticated;
-grant execute on function public.cfm_set_website_monitor_visibility(integer, boolean) to service_role;
+revoke all on function public.cfm_set_website_monitor_visibility(bigint, boolean) from public;
+revoke all on function public.cfm_set_website_monitor_visibility(bigint, boolean) from anon;
+revoke all on function public.cfm_set_website_monitor_visibility(bigint, boolean) from authenticated;
+grant execute on function public.cfm_set_website_monitor_visibility(bigint, boolean) to service_role;
 
-revoke all on function public.cfm_set_website_monitor_enabled(integer, boolean) from public;
-revoke all on function public.cfm_set_website_monitor_enabled(integer, boolean) from anon;
-revoke all on function public.cfm_set_website_monitor_enabled(integer, boolean) from authenticated;
-grant execute on function public.cfm_set_website_monitor_enabled(integer, boolean) to service_role;
+revoke all on function public.cfm_set_website_monitor_enabled(bigint, boolean) from public;
+revoke all on function public.cfm_set_website_monitor_enabled(bigint, boolean) from anon;
+revoke all on function public.cfm_set_website_monitor_enabled(bigint, boolean) from authenticated;
+grant execute on function public.cfm_set_website_monitor_enabled(bigint, boolean) to service_role;
 
 revoke all on function public.cfm_login_user(text) from public;
 revoke all on function public.cfm_login_user(text) from anon;
@@ -3864,6 +3966,26 @@ begin
     raise exception 'backup must be a JSON object';
   end if;
 
+  if input_backup ? 'clients' and jsonb_typeof(input_backup->'clients') = 'array' then
+    -- Old exports accidentally used the masked administrator list. They may
+    -- update an existing identity, but must never create an unusable Agent or
+    -- erase credentials. Serialize the check with client deletion/rotation.
+    lock table clients in share row exclusive mode;
+    if exists (
+      select 1 from jsonb_array_elements(input_backup->'clients') entry
+      where nullif(entry->>'token', '') is null
+        and nullif(entry->>'token_hash', '') is null
+        and not exists (
+          select 1 from clients current_client
+          where current_client.uuid = entry->>'uuid'
+            and (nullif(current_client.token, '') is not null
+              or nullif(current_client.token_hash, '') is not null)
+        )
+    ) then
+      raise exception '备份缺少节点凭据，无法恢复新节点；请从原实例重新导出，或先在目标实例创建对应节点并重新配置 Agent';
+    end if;
+  end if;
+
   if input_backup ? 'settings' and jsonb_typeof(input_backup->'settings') = 'object' then
     insert into settings (key, value)
     select key, value
@@ -3945,11 +4067,16 @@ begin
         coalesce(nullif(item->>'updated_at', '')::timestamptz, now())
       )
       on conflict (uuid) do update set
-        token = excluded.token,
-        token_hash = excluded.token_hash,
-        token_last_used_at = excluded.token_last_used_at,
-        token_last_used_ip = excluded.token_last_used_ip,
-        token_rotated_at = excluded.token_rotated_at,
+        token = case when excluded.token is null and excluded.token_hash is null
+          then clients.token else excluded.token end,
+        token_hash = case when excluded.token is null and excluded.token_hash is null
+          then clients.token_hash else excluded.token_hash end,
+        token_last_used_at = case when excluded.token is null and excluded.token_hash is null
+          then clients.token_last_used_at else excluded.token_last_used_at end,
+        token_last_used_ip = case when excluded.token is null and excluded.token_hash is null
+          then clients.token_last_used_ip else excluded.token_last_used_ip end,
+        token_rotated_at = case when excluded.token is null and excluded.token_hash is null
+          then clients.token_rotated_at else excluded.token_rotated_at end,
         name = excluded.name,
         cpu_name = excluded.cpu_name,
         virtualization = excluded.virtualization,
@@ -3981,6 +4108,9 @@ begin
         sort_order = excluded.sort_order,
         updated_at = now();
       perform cfm_internal.retire_client_notification_deliveries(item->>'uuid');
+      -- Even identical restored metadata invalidates the previous live/auth
+      -- lifecycle. Keep its retry identity in this same restore transaction.
+      perform cfm_internal.enqueue_client_sync(item->>'uuid');
     end loop;
   end if;
 
@@ -4101,7 +4231,7 @@ begin
           coalesce(item->>'type', 'icmp'),
           coalesce(item->>'target', ''),
           coalesce((item->>'interval_sec')::integer, 120),
-          coalesce((item->>'sort_order')::integer, (item->>'id')::integer)
+          coalesce((item->>'sort_order')::integer, 0)
         )
         on conflict (id) do update set
           name = excluded.name,
@@ -4452,7 +4582,7 @@ begin
 
   select * into monitor_row
   from website_monitors
-  where id = (input_check->>'monitor_id')::integer
+  where id = (input_check->>'monitor_id')::bigint
   limit 1;
   if not found then
     return null;
@@ -4463,7 +4593,7 @@ begin
     status_code, raw_status_code, latency_ms, error, source_type, source_client
   )
   values (
-    (input_check->>'monitor_id')::integer,
+    (input_check->>'monitor_id')::bigint,
     checked_time,
     check_ok,
     case when input_check->>'effective_status' = 'up' then 'up' else 'down' end,
@@ -4492,7 +4622,7 @@ begin
         last_error = null,
         down_since = null,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   else
     update website_monitors
@@ -4507,7 +4637,7 @@ begin
         down_since = coalesce(down_since, checked_time),
         last_notified_at = case when status = 'down' then last_notified_at else null end,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   end if;
 
@@ -4631,7 +4761,7 @@ as $$
   from monitor_rows m;
 $$;
 
-create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120, input_include_hidden boolean default false)
+create or replace function public.cfm_public_website_monitor(input_id bigint, input_check_limit integer default 120, input_include_hidden boolean default false)
 returns jsonb
 language plpgsql
 stable
@@ -4706,7 +4836,7 @@ begin
 
   select * into monitor_row
   from website_monitors
-  where id = (input_check->>'monitor_id')::integer
+  where id = (input_check->>'monitor_id')::bigint
   for update;
   if not found then
     return null;
@@ -4775,7 +4905,7 @@ begin
         last_error = null,
         down_since = null,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   else
     update website_monitors
@@ -4790,7 +4920,7 @@ begin
         down_since = coalesce(down_since, checked_time),
         last_notified_at = case when status = 'down' then last_notified_at else null end,
         updated_at = now()
-    where id = (input_check->>'monitor_id')::integer
+    where id = (input_check->>'monitor_id')::bigint
     returning * into monitor_row;
   end if;
 
@@ -4838,7 +4968,7 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_update_website_monitor(input_id integer, input_monitor jsonb)
+create or replace function public.cfm_update_website_monitor(input_id bigint, input_monitor jsonb)
 returns jsonb
 language sql
 set search_path = public
@@ -4874,10 +5004,10 @@ grant execute on function public.cfm_public_websites(integer, integer, boolean) 
 
 drop function if exists public.cfm_public_website_monitor(integer, integer);
 
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
-revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from authenticated;
-grant execute on function public.cfm_public_website_monitor(integer, integer, boolean) to service_role;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from public;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from anon;
+revoke all on function public.cfm_public_website_monitor(bigint, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_website_monitor(bigint, integer, boolean) to service_role;
 
 revoke all on function public.cfm_record_website_check(jsonb) from public;
 revoke all on function public.cfm_record_website_check(jsonb) from anon;
@@ -4889,10 +5019,10 @@ revoke all on function public.cfm_create_website_monitor(jsonb) from anon;
 revoke all on function public.cfm_create_website_monitor(jsonb) from authenticated;
 grant execute on function public.cfm_create_website_monitor(jsonb) to service_role;
 
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from public;
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from anon;
-revoke all on function public.cfm_update_website_monitor(integer, jsonb) from authenticated;
-grant execute on function public.cfm_update_website_monitor(integer, jsonb) to service_role;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from public;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from anon;
+revoke all on function public.cfm_update_website_monitor(bigint, jsonb) from authenticated;
+grant execute on function public.cfm_update_website_monitor(bigint, jsonb) to service_role;
 
 insert into settings (key, value)
 values ('schema_bootstrap_version', 'postgres-2026-07-01-agent-website-public-results')
@@ -4914,10 +5044,10 @@ declare
   updated_count integer;
 begin
   with input_order as (
-    select value::integer as id, min(ord)::integer as ord
+    select value::bigint as id, min(ord)::integer as ord
     from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
-    where value ~ '^[0-9]+$' and value::integer > 0
-    group by value::integer
+    where value ~ '^[0-9]+$' and value::bigint > 0
+    group by value::bigint
   )
   select count(*) into input_count from input_order;
   if input_count = 0 then
@@ -4925,10 +5055,10 @@ begin
   end if;
 
   with input_order as (
-    select value::integer as id, min(ord)::integer as ord
+    select value::bigint as id, min(ord)::integer as ord
     from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
-    where value ~ '^[0-9]+$' and value::integer > 0
-    group by value::integer
+    where value ~ '^[0-9]+$' and value::bigint > 0
+    group by value::bigint
   )
   select count(*) into existing_count
   from website_monitors w
@@ -4938,10 +5068,10 @@ begin
   end if;
 
   with input_order as (
-    select value::integer as id, min(ord)::integer as ord
+    select value::bigint as id, min(ord)::integer as ord
     from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
-    where value ~ '^[0-9]+$' and value::integer > 0
-    group by value::integer
+    where value ~ '^[0-9]+$' and value::bigint > 0
+    group by value::bigint
   ),
   final_order as (
     select id, (row_number() over (order by i.ord asc))::integer as sort_order
@@ -5695,7 +5825,22 @@ set search_path = public
 as $$
   select jsonb_build_object(
     'settings', public.cfm_public_settings(),
-    'clients', public.cfm_admin_clients(),
+    -- Backup is the privileged, complete projection. Administrator/public
+    -- lists intentionally mask credentials and are not restorable snapshots.
+    'clients', (
+      select coalesce(jsonb_agg(to_jsonb(row_data)), '[]'::jsonb)
+      from (
+        select uuid, token, token_hash,
+          token_last_used_at, token_last_used_ip, token_rotated_at,
+          name, cpu_name, virtualization, arch, cpu_cores, os,
+          kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
+          mem_total, swap_total, disk_total, version, price, billing_cycle,
+          auto_renewal, currency, expired_at, "group", tags, hidden,
+          traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
+        from clients
+        order by sort_order asc, lower(name) asc, created_at asc, uuid asc
+      ) row_data
+    ),
     'ping_tasks', public.cfm_public_ping_tasks(),
     'offline_notifications', public.cfm_offline_notifications(),
     'expiry_notifications', public.cfm_expiry_notifications(),
@@ -5834,7 +5979,7 @@ revoke all on function cfm_internal.notification_delivery_token_matches(text, te
 grant execute on function cfm_internal.notification_delivery_token_matches(text, text) to service_role;
 
 create or replace function public.cfm_mark_load_notification_sent(
-  input_id integer, input_client text, input_time text, input_token text
+  input_id bigint, input_client text, input_time text, input_token text
 )
 returns boolean
 language plpgsql
@@ -5853,5 +5998,368 @@ begin
   return true;
 end;
 $$;
-revoke all on function public.cfm_mark_load_notification_sent(integer, text, text, text) from public, anon, authenticated;
-grant execute on function public.cfm_mark_load_notification_sent(integer, text, text, text) to service_role;
+revoke all on function public.cfm_mark_load_notification_sent(bigint, text, text, text) from public, anon, authenticated;
+grant execute on function public.cfm_mark_load_notification_sent(bigint, text, text, text) to service_role;
+
+-- Retriable SQL -> Durable Object control synchronization. Queue entries contain
+-- identity/version only; the RPC projects current client data in one snapshot.
+create sequence if not exists cfm_internal.client_sync_revision_seq as bigint;
+do $$
+begin
+  if to_regclass('cfm_internal.client_sync_queue') is null then
+    lock table clients in share row exclusive mode;
+    create table cfm_internal.client_sync_queue (
+      uuid text primary key,
+      revision bigint not null default nextval('cfm_internal.client_sync_revision_seq'),
+      enqueued_at timestamptz not null default now()
+    );
+    -- First upgrade reconciles existing nodes exactly once. Later migration
+    -- replay must not resurrect acknowledged work or replace pending versions.
+    insert into cfm_internal.client_sync_queue(uuid)
+      select uuid from clients order by uuid;
+  end if;
+end;
+$$;
+create index if not exists idx_client_sync_revision on cfm_internal.client_sync_queue(revision);
+alter table cfm_internal.client_sync_queue enable row level security;
+alter table cfm_internal.client_sync_queue force row level security;
+revoke all on cfm_internal.client_sync_queue from public, anon, authenticated;
+grant select, insert, update, delete on cfm_internal.client_sync_queue to service_role;
+revoke all on sequence cfm_internal.client_sync_revision_seq from public, anon, authenticated;
+grant usage on sequence cfm_internal.client_sync_revision_seq to service_role;
+
+create or replace function cfm_internal.enqueue_client_sync(input_uuid text)
+returns void
+language sql
+set search_path = public
+as $$
+  insert into cfm_internal.client_sync_queue(uuid) values (input_uuid)
+  on conflict (uuid) do update
+    -- Allocate after the conflicting row is locked. A candidate INSERT may
+    -- have obtained its default revision before waiting for another writer.
+    set revision = nextval('cfm_internal.client_sync_revision_seq'), enqueued_at = excluded.enqueued_at;
+$$;
+revoke all on function cfm_internal.enqueue_client_sync(text) from public, anon, authenticated;
+grant execute on function cfm_internal.enqueue_client_sync(text) to service_role;
+
+create or replace function cfm_internal.queue_client_control_change()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  -- Reports and last-used bookkeeping do not change administrative authority.
+  if tg_op = 'UPDATE' and row(
+    new.token, new.token_hash, new.token_rotated_at, new.name, new.hidden, new.sort_order,
+    new.remark, new.public_remark, new."group", new.tags, new.ipv4, new.ipv6, new.region,
+    new.price, new.billing_cycle, new.auto_renewal, new.currency, new.expired_at,
+    new.traffic_limit, new.traffic_limit_type, new.traffic_reset_day
+  ) is not distinct from row(
+    old.token, old.token_hash, old.token_rotated_at, old.name, old.hidden, old.sort_order,
+    old.remark, old.public_remark, old."group", old.tags, old.ipv4, old.ipv6, old.region,
+    old.price, old.billing_cycle, old.auto_renewal, old.currency, old.expired_at,
+    old.traffic_limit, old.traffic_limit_type, old.traffic_reset_day
+  ) then
+    return new;
+  end if;
+  perform cfm_internal.enqueue_client_sync(case when tg_op = 'DELETE' then old.uuid else new.uuid end);
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+revoke all on function cfm_internal.queue_client_control_change() from public, anon, authenticated;
+drop trigger if exists cfm_client_control_sync on public.clients;
+create trigger cfm_client_control_sync after insert or update or delete on public.clients
+  for each row execute function cfm_internal.queue_client_control_change();
+
+create or replace function public.cfm_pending_client_syncs(input_uuids jsonb default null, input_limit integer default 10)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'uuid', pending.uuid,
+    'revision', pending.revision::text,
+    'client', case when c.uuid is null then null else to_jsonb(c) || jsonb_build_object(
+      'token', '',
+      'token_hash', coalesce(nullif(c.token_hash, ''),
+        case when nullif(c.token, '') is not null
+          then 'sha256:' || encode(sha256(convert_to(c.token, 'UTF8')), 'hex')
+          else '' end)
+    ) end
+  ) order by pending.revision), '[]'::jsonb)
+  from (
+    select uuid, revision from cfm_internal.client_sync_queue
+    where input_uuids is null or uuid in (
+      select value from jsonb_array_elements_text(input_uuids)
+    )
+    order by revision
+    limit least(greatest(coalesce(input_limit, 10), 1), 200)
+  ) pending
+  left join clients c on c.uuid = pending.uuid;
+$$;
+revoke all on function public.cfm_pending_client_syncs(jsonb, integer) from public, anon, authenticated;
+grant execute on function public.cfm_pending_client_syncs(jsonb, integer) to service_role;
+
+create or replace function public.cfm_acknowledge_client_sync(input_uuid text, input_revision text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  delete from cfm_internal.client_sync_queue
+  where uuid = input_uuid and revision::text = input_revision;
+  return found;
+end;
+$$;
+revoke all on function public.cfm_acknowledge_client_sync(text, text) from public, anon, authenticated;
+grant execute on function public.cfm_acknowledge_client_sync(text, text) to service_role;
+
+create or replace function public.cfm_acknowledge_client_syncs(input_changes jsonb)
+returns integer
+language plpgsql
+set search_path = public
+as $$
+declare
+  acknowledged integer;
+begin
+  if input_changes is null or jsonb_typeof(input_changes) <> 'array' then
+    raise exception 'invalid client synchronization acknowledgement batch';
+  end if;
+  if jsonb_array_length(input_changes) > 200 then
+    raise exception 'client synchronization acknowledgement batch exceeds 200';
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements(input_changes) entry
+    where jsonb_typeof(entry->'uuid') is distinct from 'string'
+      or coalesce(entry->>'uuid', '') = ''
+      or jsonb_typeof(entry->'revision') is distinct from 'string'
+      or coalesce(entry->>'revision', '') !~ '^[1-9][0-9]*$'
+  ) then
+    raise exception 'invalid client synchronization acknowledgement revision';
+  end if;
+  with deleted as (
+    delete from cfm_internal.client_sync_queue pending
+    using jsonb_array_elements(input_changes) entry
+    where pending.uuid = entry->>'uuid' and pending.revision::text = entry->>'revision'
+    returning 1
+  )
+  select count(*)::integer into acknowledged from deleted;
+  return acknowledged;
+end;
+$$;
+revoke all on function public.cfm_acknowledge_client_syncs(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_acknowledge_client_syncs(jsonb) to service_role;
+
+-- JSON selections need explicit referential cleanup. Keep this shared by
+-- direct deletion, configuration restore, explicit pruning and legacy repair.
+create or replace function cfm_internal.prune_website_client_references(input_remove_ids text[] default null)
+returns integer
+language plpgsql
+set search_path = public
+as $$
+declare
+  changed integer;
+begin
+  with candidates as (
+    select wm.id, (
+      select coalesce(jsonb_agg(agent.uuid order by agent.position), '[]'::jsonb)
+      from jsonb_array_elements_text(wm.agent_probe_clients) with ordinality as agent(uuid, position)
+      where case when input_remove_ids is null
+        then exists (select 1 from clients c where c.uuid = agent.uuid)
+        else not (agent.uuid = any(input_remove_ids)) end
+    ) as next_clients
+    from website_monitors wm
+  ), updated as (
+    update website_monitors wm
+    set agent_probe_clients = candidate.next_clients,
+      enabled = case when wm.agent_probe_mode = 'selected' and candidate.next_clients = '[]'::jsonb
+        then false else wm.enabled end,
+      agent_probe_mode = case when wm.agent_probe_mode = 'selected' and candidate.next_clients = '[]'::jsonb
+        then 'off' else wm.agent_probe_mode end,
+      agent_probe_status_enabled = case when wm.agent_probe_mode = 'selected' and candidate.next_clients = '[]'::jsonb
+        then false else wm.agent_probe_status_enabled end,
+      updated_at = now()
+    from candidates candidate
+    where wm.id = candidate.id and wm.agent_probe_clients is distinct from candidate.next_clients
+    returning 1
+  )
+  select count(*)::integer into changed from updated;
+  return changed;
+end;
+$$;
+revoke all on function cfm_internal.prune_website_client_references(text[]) from public, anon, authenticated;
+grant execute on function cfm_internal.prune_website_client_references(text[]) to service_role;
+
+create or replace function cfm_internal.prune_deleted_website_agents()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  removed_ids text[];
+begin
+  select array_agg(uuid) into removed_ids from deleted_website_agents;
+  if removed_ids is not null then
+    perform cfm_internal.prune_website_client_references(removed_ids);
+  end if;
+  return null;
+end;
+$$;
+revoke all on function cfm_internal.prune_deleted_website_agents() from public, anon, authenticated;
+drop trigger if exists cfm_clients_prune_website_agents on public.clients;
+create trigger cfm_clients_prune_website_agents after delete on public.clients
+  referencing old table as deleted_website_agents
+  for each statement execute function cfm_internal.prune_deleted_website_agents();
+
+-- Repair existing installations too; valid selections are not updated.
+select cfm_internal.prune_website_client_references(null);
+
+-- Whole-database allocation is diagnostic. The history gate deliberately keeps
+-- its live-data measurement and recoverable 80% watermark above.
+create table if not exists cfm_internal.storage_diagnostics_cache (
+  singleton boolean primary key default true check (singleton),
+  checked_at timestamptz not null,
+  snapshot jsonb not null
+);
+alter table cfm_internal.storage_diagnostics_cache enable row level security;
+alter table cfm_internal.storage_diagnostics_cache force row level security;
+revoke all on table cfm_internal.storage_diagnostics_cache from public, anon, authenticated, service_role;
+grant select, insert, update, delete on table cfm_internal.storage_diagnostics_cache to service_role;
+
+create or replace function cfm_internal.storage_budget_bytes(input_key text, input_default bigint, input_min bigint, input_max bigint)
+returns bigint
+language sql
+stable
+set search_path = public
+as $$
+  select coalesce((
+    select case when value ~ '^[0-9]{1,15}$'
+      and value::numeric between input_min and input_max
+      then value::bigint else input_default end
+    from settings where key = input_key
+  ), input_default);
+$$;
+revoke all on function cfm_internal.storage_budget_bytes(text, bigint, bigint, bigint) from public, anon, authenticated;
+grant execute on function cfm_internal.storage_budget_bytes(text, bigint, bigint, bigint) to service_role;
+
+create or replace function cfm_internal.theme_storage_usage()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with theme_payload as (
+    select count(*)::bigint as theme_count,
+      coalesce(sum(octet_length((to_jsonb(theme_row) - 'created_at' - 'updated_at')::text)), 0)::bigint as payload_bytes
+    from themes theme_row
+  ), asset_payload as (
+    select count(*)::bigint as asset_count,
+      coalesce(sum(octet_length(content_base64)::bigint + octet_length(theme_short)
+        + octet_length(path) + octet_length(content_type) + 64), 0)::bigint as payload_bytes
+    from theme_assets
+  )
+  select jsonb_build_object(
+    'theme_payload_bytes', theme_payload.payload_bytes + asset_payload.payload_bytes,
+    'theme_count', theme_payload.theme_count,
+    'theme_asset_count', asset_payload.asset_count,
+    'theme_measurement', 'stored-text-including-base64-and-metadata'
+  ) from theme_payload cross join asset_payload;
+$$;
+revoke all on function cfm_internal.theme_storage_usage() from public, anon, authenticated;
+grant execute on function cfm_internal.theme_storage_usage() to service_role;
+
+create or replace function cfm_internal.enforce_theme_storage_quota(input_previous_bytes bigint)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  current_bytes bigint;
+  quota_bytes bigint;
+begin
+  current_bytes := (cfm_internal.theme_storage_usage()->>'theme_payload_bytes')::bigint;
+  quota_bytes := cfm_internal.storage_budget_bytes('theme_storage_quota_bytes', 33554432, 1048576, 1073741824);
+  -- Existing installations over the configured budget can still shrink their
+  -- content. A failed growth rolls the entire upload/settings transaction back.
+  if current_bytes > quota_bytes and current_bytes > input_previous_bytes then
+    raise exception using errcode = 'P0001', message = 'CFM_THEME_STORAGE_QUOTA_EXCEEDED';
+  end if;
+end;
+$$;
+revoke all on function cfm_internal.enforce_theme_storage_quota(bigint) from public, anon, authenticated;
+grant execute on function cfm_internal.enforce_theme_storage_quota(bigint) to service_role;
+
+create or replace function public.cfm_database_storage_diagnostics(input_force_refresh boolean default false)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  cached cfm_internal.storage_diagnostics_cache%rowtype;
+  result jsonb;
+  database_bytes bigint;
+  application_bytes bigint;
+  table_sizes jsonb;
+  budget_bytes bigint;
+  theme_quota_bytes bigint;
+  measured_time timestamptz;
+begin
+  select * into cached from cfm_internal.storage_diagnostics_cache where singleton;
+  if coalesce(input_force_refresh, false) or cached.checked_at is null
+    or cached.checked_at <= now() - interval '10 minutes' then
+    -- Independent Worker isolates share this cache. Recheck after acquiring the
+    -- transaction lock to avoid repeating the expensive measurement together.
+    perform pg_advisory_xact_lock(hashtextextended('cfm.database-storage-diagnostics', 0));
+    select * into cached from cfm_internal.storage_diagnostics_cache where singleton;
+    if coalesce(input_force_refresh, false) or cached.checked_at is null
+      or cached.checked_at <= now() - interval '10 minutes' then
+      measured_time := clock_timestamp();
+      with sizes as (
+        select app_table.name, pg_total_relation_size(('public.' || app_table.name)::regclass) as allocated_bytes
+        from unnest(array[
+          'clients', 'records', 'gpu_records', 'gpu_snapshots', 'users', 'login_rate_limits', 'settings',
+          'themes', 'theme_assets', 'ping_tasks', 'ping_records', 'ping_snapshots', 'website_monitors',
+          'website_checks', 'offline_notifications', 'expiry_notifications', 'load_notifications', 'audit_logs'
+        ]::text[]) app_table(name)
+      )
+      select sum(allocated_bytes), jsonb_object_agg(name, jsonb_build_object('allocated_bytes', allocated_bytes))
+        into application_bytes, table_sizes from sizes;
+      database_bytes := pg_database_size(current_database());
+      result := jsonb_build_object(
+        'measurement', 'database-allocation',
+        'database_allocated_bytes', database_bytes,
+        'application_allocated_bytes', application_bytes,
+        'other_allocated_bytes', greatest(database_bytes - application_bytes, 0),
+        'tables', table_sizes,
+        'measured_at', measured_time,
+        'cache_seconds', 600
+      ) || cfm_internal.theme_storage_usage();
+      insert into cfm_internal.storage_diagnostics_cache(singleton, checked_at, snapshot)
+        values (true, measured_time, result)
+        on conflict(singleton) do update set checked_at = excluded.checked_at, snapshot = excluded.snapshot;
+    else
+      result := cached.snapshot;
+    end if;
+  else
+    result := cached.snapshot;
+  end if;
+
+  -- Settings are deliberately read after the cached observation: changing a
+  -- project's planning budget must immediately change its warning status.
+  budget_bytes := cfm_internal.storage_budget_bytes('database_storage_budget_bytes', 524288000, 67108864, 549755813888);
+  theme_quota_bytes := cfm_internal.storage_budget_bytes('theme_storage_quota_bytes', 33554432, 1048576, 1073741824);
+  database_bytes := (result->>'database_allocated_bytes')::bigint;
+  return result || jsonb_build_object(
+    'budget_bytes', budget_bytes,
+    'theme_quota_bytes', theme_quota_bytes,
+    'status', case when database_bytes::numeric >= budget_bytes::numeric * 0.95 then 'critical'
+      when database_bytes::numeric >= budget_bytes::numeric * 0.85 then 'warning' else 'ok' end
+  );
+end;
+$$;
+revoke all on function public.cfm_database_storage_diagnostics(boolean) from public, anon, authenticated;
+grant execute on function public.cfm_database_storage_diagnostics(boolean) to service_role;
+
+notify pgrst, 'reload schema';

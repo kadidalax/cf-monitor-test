@@ -1,7 +1,7 @@
-import React, { useCallback, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useState } from 'react';
 import { Popover } from '@radix-ui/themes';
 import { Popover as PopoverPrimitive } from 'radix-ui';
-import MiniPingChart from './MiniPingChart';
+const MiniPingChart = lazy(() => import('./MiniPingChart'));
 
 interface MiniPingChartFloatProps {
   uuid: string;
@@ -57,7 +57,9 @@ export default function MiniPingChartFloat({
           maxWidth: 'calc(100vw - 24px)',
         }}
       >
-        <MiniPingChart uuid={uuid} width="100%" height={chartHeight} limit={limit} rangeHours={rangeHours} includeHidden={includeHidden} />
+        <Suspense fallback={<div role="status" style={{ height: chartHeight, display: 'grid', placeItems: 'center' }}>正在加载图表…</div>}>
+          <MiniPingChart uuid={uuid} width="100%" height={chartHeight} limit={limit} rangeHours={rangeHours} includeHidden={includeHidden} />
+        </Suspense>
       </Popover.Content>
     </Popover.Root>
   );

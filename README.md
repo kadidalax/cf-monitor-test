@@ -47,14 +47,16 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 面板部署
 
-在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 部署会先确认同一仓库、同一提交的 GitHub CI 已成功，再构建并发布；CI 未通过或无法核实时会停止。本地运行 `npm run deploy` 仍执行完整检查、构建和测试。
+
+首次部署若提示没有可用 CI，请打开自己的 GitHub 仓库 **Actions** 并启用工作流，选择 **CI → Run workflow**，选择待部署的分支或标签。确认运行的提交编码与 Cloudflare 日志中的完整提交编码一致，等待成功后重试部署。如果没有 **CI** 或 **Run workflow**，请先同步最新版，确保默认分支包含 `.github/workflows/ci.yml`。
 
 ### Fork 原仓库部署【推荐，方便更新】
 
 
 1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview** 页面复制 `Project URL`；打开 **Project Settings -> API Keys -> Publishable and secret API keys**，复制 **Secret keys** 中的 `default` Secret key，格式通常为 `sb_secret_...`。
-3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。到Actions 选择**Agent Release** 点击**Run workflow** 填入创建自己的版本号，再次点击**Run workflow** 创建自己仓库的Agent 安装脚本。
+3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)，创建自己的仓库。打开 **Actions** 并启用工作流，先按上方说明运行 **CI**；成功后选择 **Agent Release → Run workflow**，填入自己的版本号，再次点击 **Run workflow** 创建自己仓库的 Agent 安装文件。
 4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
 5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
 6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。

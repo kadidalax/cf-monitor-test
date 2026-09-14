@@ -1,3 +1,4 @@
+import { useDialogSession } from '../../hooks/useDialogSession';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DndContext,
@@ -339,7 +340,6 @@ export default function AdminWebsites() {
   const monitorOrderRef = useRef(0);
   const monitorUpdatesRef = useRef<Array<(current: WebsiteMonitor[]) => WebsiteMonitor[]> | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [monitors, setMonitors] = useState<WebsiteMonitor[]>([]);
   const updateMonitors = (update: WebsiteMonitor[] | ((current: WebsiteMonitor[]) => WebsiteMonitor[])) => {
     if (!monitorsMountedRef.current) return;
@@ -358,6 +358,8 @@ export default function AdminWebsites() {
   const [sortDir, setSortDir] = useState<WebsiteSortDir>('asc');
   const [editOpen, setEditOpen] = useState(false);
   const [editMonitor, setEditMonitor] = useState<WebsiteMonitor | null>(null);
+  const editSession = useDialogSession(editOpen, editMonitor?.id);
+  const { saving } = editSession;
   const [deleteMonitor, setDeleteMonitor] = useState<WebsiteMonitor | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -569,7 +571,8 @@ export default function AdminWebsites() {
       toast.error('最小状态码不能大于最大状态码');
       return;
     }
-    setSaving(true);
+    const owner = editSession.begin();
+    if (!owner) return;
     try {
       const payload = { ...form, name: form.name.trim(), url: form.url.trim() };
       const result = editMonitor
@@ -585,13 +588,15 @@ export default function AdminWebsites() {
         }
         return savedMonitor ? [...current, savedMonitor] : current;
       });
-      toast.success(editMonitor ? '已保存' : '已添加');
-      changeEditOpen(false);
+      if (editSession.isCurrent(owner)) {
+        toast.success(editMonitor ? '已保存' : '已添加');
+        changeEditOpen(false);
+      }
       notifyWebsiteMonitorsUpdated(savedMonitor ? { upsert: [savedMonitor] } : true);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存失败');
+      if (editSession.isCurrent(owner)) toast.error(error instanceof Error ? error.message : '保存失败');
     } finally {
-      setSaving(false);
+      editSession.finish(owner);
     }
   };
 
@@ -633,20 +638,26 @@ export default function AdminWebsites() {
 
   const setSelectedVisibility = async (hidden: boolean) => {
     const targets = monitors.filter((monitor) => selectedWebsites.includes(monitor.id));
-    try {
-      await Promise.all(targets.map((monitor) => apiFetch('/admin/websites/visibility', {
-        method: 'POST',
-        body: JSON.stringify({ id: monitor.id, hidden }),
-      }).then((result) => assertSuccess(result, '设置失败'))));
-      toast.success(`已${hidden ? '隐藏' : '公开'} ${targets.length} 个网站`);
-      setSelectedWebsites([]);
-      const ids = new Set(targets.map((monitor) => monitor.id));
+    const results = await Promise.allSettled(targets.map((monitor) => apiFetch('/admin/websites/visibility', {
+      method: 'POST',
+      body: JSON.stringify({ id: monitor.id, hidden }),
+    }).then((result) => assertSuccess(result, '设置失败'))));
+    const succeeded = targets.filter((_, index) => results[index].status === 'fulfilled');
+    const ids = new Set(succeeded.map((monitor) => monitor.id));
+    const failedCount = targets.length - succeeded.length;
+    setSelectedWebsites((current) => current.filter((id) => !ids.has(id)));
+    if (succeeded.length > 0) {
       updateMonitors((current) => current.map((monitor) => ids.has(monitor.id) ? { ...monitor, hidden } : monitor));
-      notifyWebsiteMonitorsUpdated({
-        upsert: targets.map((monitor) => ({ ...monitor, hidden })),
-      });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '设置失败');
+      // This invalidation also rereads the authoritative list in the current tab.
+      notifyWebsiteMonitorsUpdated({ upsert: succeeded.map((monitor) => ({ ...monitor, hidden })) });
+    }
+    if (failedCount > 0) {
+      toast.error(`成功 ${succeeded.length} / 失败 ${failedCount}，失败网站仍保持选中，可重试`);
+      if (succeeded.length === 0) {
+        await loadMonitors(true).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '刷新失败'));
+      }
+    } else {
+      toast.success(`已${hidden ? '隐藏' : '公开'} ${succeeded.length} 个网站`);
     }
   };
 

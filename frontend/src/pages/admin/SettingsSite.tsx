@@ -203,7 +203,8 @@ export default function SettingsSite() {
     setLogoSaving(true);
     try {
       const result = await apiFetch('/admin/site-logo', { method: 'POST', body: form });
-      const siteLogoUrl = typeof result.site_logo_url === 'string' ? result.site_logo_url : '';
+      if (result.success !== true || typeof result.site_logo_url !== 'string' || !result.site_logo_url) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
+      const siteLogoUrl = result.site_logo_url;
       setSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
       setOriginalSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
       setSettingsScope('site', confirmed => ({ ...confirmed, site_logo_url: siteLogoUrl }));
@@ -220,7 +221,8 @@ export default function SettingsSite() {
   const handleResetLogo = async () => {
     setLogoSaving(true);
     try {
-      await apiFetch('/admin/site-logo/reset', { method: 'POST' });
+      const result = await apiFetch('/admin/site-logo/reset', { method: 'POST' });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       setSettings((prev) => ({ ...prev, site_logo_url: '' }));
       setOriginalSettings((prev) => ({ ...prev, site_logo_url: '' }));
       setSettingsScope('site', confirmed => ({ ...confirmed, site_logo_url: '' }));

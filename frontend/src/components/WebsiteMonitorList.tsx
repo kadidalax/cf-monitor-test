@@ -32,14 +32,16 @@ function statusText(status: WebsiteMonitorStatus) {
 }
 
 function uptimePercent(checks: WebsiteHeartbeatPoint[]) {
-  if (checks.length === 0) return '0%';
+  if (checks.length === 0) return '暂无记录';
   const ok = checks.filter((check) => check.ok).length;
   return `${Math.round((ok / checks.length) * 100)}%`;
 }
 
 function lastSeenText(value: string | null) {
-  if (!value) return '现在';
-  const diff = Math.max(0, Date.now() - new Date(value).getTime());
+  if (!value) return '尚未检测';
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return '尚未检测';
+  const diff = Math.max(0, Date.now() - timestamp);
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return '现在';
   if (minutes < 60) return `${minutes}m 之前`;
@@ -53,7 +55,8 @@ function isTcpMonitor(monitor: WebsiteMonitorSummary) {
 }
 
 function statusLine(monitor: WebsiteMonitorSummary) {
-  const latency = `${monitor.last_latency_ms ?? 0}ms`;
+  const latency = monitor.last_latency_ms === null || !Number.isFinite(monitor.last_latency_ms)
+    ? '—' : `${monitor.last_latency_ms}ms`;
   if (isTcpMonitor(monitor)) return `${statusText(monitor.status)} · TCP · ${latency}`;
   if (monitor.status === 'down') return `${statusText(monitor.status)} · HTTP ${monitor.last_raw_status_code ?? monitor.last_status_code ?? '-'} · ${latency}`;
   return `${statusText(monitor.status)} · ${latency}`;

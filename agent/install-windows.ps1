@@ -310,7 +310,17 @@ function Normalize-HttpUrl {
     throw "$Name must use an http:// or https:// URL without credentials, query, or fragment."
   }
   $path = if ($AllowPath -and $uri.AbsolutePath -ne "/") { $uri.AbsolutePath.TrimEnd("/") } else { "" }
+  if ($AllowPath -and $uri.Scheme -ne 'https') {
+    throw 'Content mirrors must use HTTPS; use -Proxy for an HTTP CONNECT proxy.'
+  }
   return "$($uri.Scheme)://$($uri.Authority)$path"
+}
+
+function Assert-TrustedChecksumUrl {
+  param([string]$Url)
+  $prefix = 'https://github.com/' + $repository + '/releases/'
+  $pattern = '\A' + [Regex]::Escape($prefix) + '(?:latest/download|download/[A-Za-z0-9](?:[A-Za-z0-9._+-]|%2[Bb]){0,127})/SHA256SUMS\z'
+  if ($Url -notmatch $pattern) { throw 'Checksum URL must be an official repository HTTPS release SHA256SUMS.' }
 }
 
 function Invoke-DownloadFile {
@@ -328,14 +338,36 @@ function Invoke-DownloadFile {
   }
 
   $downloadParams = @{
-    Uri = $Url
     UseBasicParsing = $true
     OutFile = $OutFile
+    PassThru = $true
+    MaximumRedirection = 0
+    ErrorAction = 'Stop'
   }
   if (-not [string]::IsNullOrWhiteSpace($Proxy)) {
     $downloadParams.Proxy = $Proxy
   }
-  Invoke-WebRequest @downloadParams
+  $uri = [Uri]$Url
+  for ($redirect = 0; $redirect -lt 10; $redirect++) {
+    if ($uri.Scheme -ne 'https' -or $uri.UserInfo) { throw 'HTTPS download required.' }
+    $downloadParams.Uri = $uri
+    try {
+      $response = Invoke-WebRequest @downloadParams
+    } catch {
+      $response = $_.Exception.Response
+      if (-not $response -or [int]$response.StatusCode -notin 301, 302, 303, 307, 308) { throw 'HTTPS download failed.' }
+    }
+    if ([int]$response.StatusCode -in 301, 302, 303, 307, 308) {
+      if (-not $response.Headers.Location) { throw 'Missing redirect location.' }
+      $uri = [Uri]::new($uri, [string]$response.Headers.Location)
+      continue
+    }
+    if ([int]$response.StatusCode -ne 200 -or -not (Test-Path -LiteralPath $OutFile -PathType Leaf) -or (Get-Item -LiteralPath $OutFile).Length -eq 0) {
+      throw 'Incomplete HTTPS download.'
+    }
+    return
+  }
+  throw 'Too many download redirects.'
 }
 
 function New-AgentTemporaryDirectory {
@@ -355,7 +387,9 @@ function Resolve-BuildDirectory {
   } else {
     $SourceUrl
   }
-  $archiveUrl = Join-GitHubProxy $archiveUrl
+  if (-not $archiveUrl.StartsWith("https://github.com/$repository/archive/", [StringComparison]::Ordinal) -or $archiveUrl -match '(/\.\.?/|[%@?#\s])') {
+    throw 'Source URL must be an official repository HTTPS archive.'
+  }
   $sourceWorkDir = New-AgentTemporaryDirectory
   $archivePath = Join-Path $sourceWorkDir 'source.zip'
   $extractDir = Join-Path $sourceWorkDir 'source'
@@ -396,11 +430,7 @@ function Get-DefaultBinaryUrl {
 }
 
 function Get-DefaultChecksumUrl {
-  $url = "$(Get-AgentAssetBase)/SHA256SUMS"
-  if (-not [string]::IsNullOrWhiteSpace($BinaryBaseUrl)) {
-    return $url
-  }
-  return Join-GitHubProxy $url
+  return "$($releaseBase.TrimEnd('/'))/SHA256SUMS"
 }
 
 function Get-AgentAssetBase {
@@ -420,6 +450,7 @@ function Test-DownloadedChecksum {
     [string]$Url
   )
 
+  Assert-TrustedChecksumUrl $Url
   if ($DryRun) {
     Write-Host "[dry-run] verify SHA256SUMS for $FileName from $Url"
     return
@@ -741,6 +772,7 @@ if ($BinaryPath -eq "" -and $BinaryUrl -ne "") {
   if ([string]::IsNullOrWhiteSpace($ChecksumUrl) -and -not $autoBinaryUrl) {
     throw "Custom -BinaryUrl requires -ChecksumUrl for SHA256 verification."
   }
+  Assert-TrustedChecksumUrl $ChecksumUrl
   $downloadOut = Join-Path (New-AgentTemporaryDirectory) 'cf-vps-monitor-agent.exe'
   Invoke-DownloadFile -Url $BinaryUrl -OutFile $downloadOut
   Test-DownloadedChecksum -Path $downloadOut -FileName (Split-Path $BinaryUrl -Leaf) -Url $ChecksumUrl
@@ -805,17 +837,17 @@ $runnerContent = @"
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 `$logPath = Join-Path `$PSScriptRoot "state\agent.log"
+`$env:CF_MONITOR_LOG_FILE = `$logPath
 `$runnerLogPath = Join-Path `$PSScriptRoot "state\runner.log"
 Set-Location `$PSScriptRoot
 
 try {
   `$agentPath = Join-Path `$PSScriptRoot "cf-vps-monitor-agent.exe"
-  `$command = '"' + `$agentPath + '" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay >> "' + `$logPath + '" 2>&1'
-  & `$env:ComSpec /d /c `$command
+  & `$agentPath --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay
   `$exitCode = `$LASTEXITCODE
 } catch {
   `$exitCode = 1
-  `$_.Exception.Message | Out-File -FilePath `$runnerLogPath -Append -Encoding UTF8
+  ('Agent runner failed: ' + `$_.Exception.GetType().Name + ' at ' + (Get-Date -Format o)) | Set-Content -LiteralPath `$runnerLogPath -Encoding UTF8
 }
 exit `$exitCode
 "@

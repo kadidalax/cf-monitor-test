@@ -152,6 +152,7 @@ test('AUD-06 native backup restoration synchronizes SQL, durable metadata and Ag
   assert.deepEqual((await (await stub.fetch('https://do/live')).json()).online, ['new-node']);
 
   const rows = Array.from({ length: 1000 }, (_, index) => ({ uuid: `bulk-node-${index}`, name: `Bulk node ${index}`,
+    token_hash: `sha256:${(index + 1).toString(16).padStart(64, '0')}`,
     cpu_name: 'c'.repeat(200), remark: 'r'.repeat(200) }));
   await restore(rows);
   assert.equal(viewer.closeFrame, null);

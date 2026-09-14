@@ -1,52 +1,52 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import test from 'node:test';
+import { productionModule } from '../../test/helpers/production-module.mjs';
 
-const tmp = await mkdtemp(join(tmpdir(), 'cf-monitor-agent-command-'));
-const projectLinksSource = await readFile(new URL('./projectLinks.ts', import.meta.url), 'utf8');
-const commandSource = await readFile(new URL('./agentInstallCommand.ts', import.meta.url), 'utf8');
-await writeFile(join(tmp, 'projectLinks.ts'), projectLinksSource);
-await writeFile(join(tmp, 'agentInstallCommand.ts'), commandSource.replace("from './projectLinks'", "from './projectLinks.ts'"));
-
-const { buildAgentInstallCommand, buildAgentUninstallAllCommand, defaultAgentInstallOptions } = await import(pathToFileURL(join(tmp, 'agentInstallCommand.ts')).href);
-const { CF_MONITOR_REPOSITORY } = await import(pathToFileURL(join(tmp, 'projectLinks.ts')).href);
-
+const { buildAgentInstallCommand, buildAgentUninstallAllCommand, defaultAgentInstallOptions } = productionModule('src/utils/agentInstallCommand.ts');
+const { CF_MONITOR_REPOSITORY } = productionModule('src/utils/projectLinks.ts');
 const base = {
   serverUrl: 'https://panel.example',
-  token: 'token123',
+  token: '',
   options: { ...defaultAgentInstallOptions },
   instanceId: '33bc95df-513d-41be-8d98-30979fb17029',
   nodeName: 'node-123',
 };
 
-assert.equal(
-  buildAgentInstallCommand({ platform: 'unix', ...base }),
-  `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/dev/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029'`,
-);
+// Parse this fixture's simple quoted arguments as data. Download execution and
+// quoting-sensitive strings have separate behavior/PowerShell AST coverage.
+function argumentsWithoutCredential(command) {
+  const tail = command.split('sh "$d/install.sh" ')[1];
+  assert.ok(tail, 'the completed temporary script must be the invoked artifact');
+  const args = [...tail.matchAll(/'([^']*)'/g)].map(match => match[1]);
+  const credentialIndex = args.indexOf('-t');
+  if (credentialIndex >= 0) {
+    assert.ok(args[credentialIndex + 1], 'an Agent credential placeholder must be forwarded');
+    args.splice(credentialIndex, 2);
+  }
+  return args;
+}
 
-assert.equal(
-  buildAgentInstallCommand({
-    platform: 'unix',
-    ...base,
-    options: { ...defaultAgentInstallOptions, trafficResetDay: '15', downloadProxy: '127.0.0.1:10808' },
-  }),
-  `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/dev/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-r' '15' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029' '--proxy' 'http://127.0.0.1:10808'`,
-);
+const expectedBase = ['-s', 'https://panel.example', '-n', 'node-123', '-i', '33bc95df-513d-41be-8d98-30979fb17029'];
 
-assert.equal(
-  buildAgentInstallCommand({
-    platform: 'unix',
-    ...base,
-    options: { ...defaultAgentInstallOptions, installMode: 'user' },
-  }),
-  `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/dev/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029' '--install-mode' 'user'`,
-);
+test('Unix install preserves the repository script, node identity and credential argument', () => {
+  const command = buildAgentInstallCommand({ platform: 'unix', ...base });
+  assert.ok(command.includes("https://raw.githubusercontent.com/" + CF_MONITOR_REPOSITORY + "/refs/heads/dev/agent/install.sh"));
+  assert.deepEqual(argumentsWithoutCredential(command), expectedBase);
+});
 
-assert.equal(
-  buildAgentUninstallAllCommand({ platform: 'unix' }),
-  `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/dev/agent/install.sh' | sh -s -- '--uninstall-all' '--yes'`,
-);
+test('Unix install forwards traffic reset and CONNECT settings', () => {
+  const command = buildAgentInstallCommand({ platform: 'unix', ...base,
+    options: { ...defaultAgentInstallOptions, trafficResetDay: '15', downloadProxy: '127.0.0.1:10808' } });
+  assert.deepEqual(argumentsWithoutCredential(command),
+    ['-s', 'https://panel.example', '-r', '15', '-n', 'node-123', '-i', base.instanceId, '--proxy', 'http://127.0.0.1:10808']);
+});
 
-await rm(tmp, { recursive: true, force: true });
+test('Unix install keeps explicit user mode', () => {
+  const command = buildAgentInstallCommand({ platform: 'unix', ...base,
+    options: { ...defaultAgentInstallOptions, installMode: 'user' } });
+  assert.deepEqual(argumentsWithoutCredential(command), [...expectedBase, '--install-mode', 'user']);
+});
+
+test('Unix full uninstall preserves both explicit confirmation switches', () => {
+  assert.deepEqual(argumentsWithoutCredential(buildAgentUninstallAllCommand({ platform: 'unix' })), ['--uninstall-all', '--yes']);
+});

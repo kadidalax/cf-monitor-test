@@ -77,7 +77,9 @@ export function createTrafficLimitFormValue(limit?: number, type?: string | null
 
   const unit: TrafficLimitUnit = bytes >= BYTES_PER_TB ? 'TB' : 'GB';
   const factor = unit === 'TB' ? BYTES_PER_TB : BYTES_PER_GB;
-  const value = Number((bytes / factor).toFixed(2));
+  // Editable values must round-trip to the original byte count. Formatting a
+  // quota to two decimals here silently changes it on an unrelated name edit.
+  const value = bytes / factor;
 
   return {
     mode: 'quota',

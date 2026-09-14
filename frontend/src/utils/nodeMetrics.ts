@@ -1,11 +1,23 @@
 import type { LiveDataMap, LiveRecord } from '../types';
-import { formatBytes, formatSpeed, formatUptime } from './format';
-import { diskMeasurementMetadata } from './diskMeasurement';
+import { formatBytes, formatSpeed, formatUptime } from './format.ts';
+import { diskMeasurementMetadata } from './diskMeasurement.ts';
 
 export type NodeStatus = 'online' | 'offline' | 'unknown';
 
 export function metricNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+export function sumMetrics(...values: unknown[]): number | null {
+  const metrics = values.map(metricNumber);
+  return metrics.some(value => value === null) ? null : (metrics as number[]).reduce((total, value) => total + value, 0);
+}
+
+export function cpuCapacity(record: Partial<LiveRecord> = {}, metadata?: number): number | undefined {
+  const reported = resourceTotal(record.cpu_capacity);
+  if (reported !== null) return reported;
+  if (record.metric_errors?.cpu === 'container_scope_unavailable') return undefined;
+  return resourceTotal(metadata) ?? undefined;
 }
 
 export function resourceTotal(reported: unknown, metadata?: number): number | null {

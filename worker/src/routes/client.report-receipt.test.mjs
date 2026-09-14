@@ -11,13 +11,14 @@ function context(reply) {
   return {
     env: { LIVE_DATA: { idFromName: value => value, get: () => ({ fetch: reply }) } },
     req: { raw: new Request('https://monitor.example.test/api/report'), header: () => undefined },
+    get: () => undefined,
   };
 }
 
 for (const status of [409, 503]) {
   test(`ordinary HTTP reports propagate a rejected durable receipt (${status})`, async () => {
     await assert.rejects(updateLiveReport(context(async () => Response.json({ error: 'Report was not accepted' }, { status })),
-      'node', 'Fixture', false, normalizeMonitorReport({ cpu: 23 }), Date.now()));
+      'node', 'Fixture', false, normalizeMonitorReport({ cpu: 23 }), Date.now()), /Live report persistence was not acknowledged/);
   });
 }
 

@@ -1,4 +1,5 @@
 export * from './types';
+export { consumeMfaFactor, rehashUserPassword, reencryptTotpSecret, type MfaFactorConfirmation } from './auth-confirmation';
 
 import type { AppDatabase } from './provider';
 import * as sba from './supabase-api/client';
@@ -50,6 +51,24 @@ export async function getClientCreateConflict(database: QueryDatabase, uuid: str
 
 export async function listClients(database: QueryDatabase, _fresh = false): Promise<t.Client[]> {
   return sba.getSupabaseAdminClients(database.env);
+}
+
+export async function listPendingClientSyncs(
+  database: QueryDatabase,
+  options: { uuids?: string[]; limit?: number } = {},
+): Promise<t.ClientSyncChange[]> {
+  return sba.listSupabasePendingClientSyncs(database.env, options);
+}
+
+export async function acknowledgeClientSync(database: QueryDatabase, uuid: string, revision: string): Promise<boolean> {
+  return sba.acknowledgeSupabaseClientSync(database.env, uuid, revision);
+}
+
+export async function acknowledgeClientSyncs(
+  database: QueryDatabase,
+  changes: Array<Pick<t.ClientSyncChange, 'uuid' | 'revision'>>,
+): Promise<number> {
+  return sba.acknowledgeSupabaseClientSyncs(database.env, changes);
 }
 
 export async function countClientCapacityTargets(database: QueryDatabase): Promise<t.ClientCapacityCounts> {
@@ -390,6 +409,12 @@ export async function listDueWebsiteMonitors(database: QueryDatabase, now: strin
   return sba.listSupabaseDueWebsiteMonitors(database.env, now, limit);
 }
 
+export async function listPendingWebsiteNotifications(
+  database: QueryDatabase, now: string, limit = 50, afterId = 0,
+): Promise<t.WebsiteMonitor[]> {
+  return sba.listSupabasePendingWebsiteNotifications(database.env, now, limit, afterId);
+}
+
 export async function recordWebsiteCheck(database: QueryDatabase, check: t.WebsiteCheckInput): Promise<t.WebsiteMonitor | null> {
   return sba.recordSupabaseWebsiteCheck(database.env, check);
 }
@@ -627,6 +652,10 @@ export async function getHistoryStorageBytes(database: QueryDatabase): Promise<t
 
 export async function getHistoryStorageUsage(database: QueryDatabase): Promise<t.HistoryStorageUsage> {
   return sba.getSupabaseHistoryStorageUsage(database.env);
+}
+
+export async function getDatabaseStorageDiagnostics(database: QueryDatabase, forceRefresh = false): Promise<t.DatabaseStorageDiagnostics> {
+  return sba.getSupabaseDatabaseStorageDiagnostics(database.env, forceRefresh);
 }
 
 export async function getExpiredRowCounts(

@@ -8,7 +8,8 @@ import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
 import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
-import { getAgentClientIdentityByToken } from './client';
+import { enforceAgentAuthAttemptLimit, enforceAgentAuthFailureLimit, getAgentClientIdentityByToken } from './client';
+import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { hasAdminSession, invalidatePublicMetadataCache } from './public';
@@ -239,14 +240,25 @@ function jwtSecret(c: WsContext): string {
 
 wsRoutes.get('/clients/report', async (c) => {
   const token = bearerToken(c) || String(c.req.query('token') || '').trim();
-
-  if (!token) {
-    return c.json({ error: 'Missing token' }, 401);
+  const attemptLimited = await enforceAgentAuthAttemptLimit(c, token);
+  if (attemptLimited) return attemptLimited;
+  if (!token || !isAgentTokenShape(token)) {
+    const failureLimited = await enforceAgentAuthFailureLimit(c, token);
+    if (failureLimited) return failureLimited;
+    return c.json({ error: token ? 'Invalid token' : 'Missing token' }, 401);
+  }
+  if (!isWebSocketUpgrade(c)) {
+    return c.json({ error: 'WebSocket upgrade required' }, 400);
+  }
+  if (!requestHasValidOrigin(c)) {
+    return c.json({ error: 'Invalid WebSocket Origin' }, 403);
   }
 
   const database = getDatabase(c.env);
   const client = await getAgentClientIdentityByToken(database, token, c.env, getCloudflareClientIp(c, ''));
   if (!client) {
+    const failureLimited = await enforceAgentAuthFailureLimit(c, token);
+    if (failureLimited) return failureLimited;
     return c.json({ error: 'Invalid token' }, 401);
   }
   const region = requestRegion(c);
@@ -274,13 +286,6 @@ wsRoutes.get('/clients/report', async (c) => {
     }
   }
 
-  if (!isWebSocketUpgrade(c)) {
-    return c.json({ error: 'WebSocket upgrade required' }, 400);
-  }
-  if (!requestHasValidOrigin(c)) {
-    return c.json({ error: 'Invalid WebSocket Origin' }, 403);
-  }
-
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
 
@@ -291,6 +296,7 @@ wsRoutes.get('/clients/report', async (c) => {
   url.searchParams.set('name', client.name);
   url.searchParams.set('hidden', client.hidden ? '1' : '0');
   url.searchParams.set('role', 'agent');
+  url.searchParams.set('auth_hash', await hashAgentToken(token));
   if (sourceIpIsPublic) url.searchParams.set('source_ip', sourceIp);
   if (region) url.searchParams.set('region', region);
 
@@ -317,13 +323,7 @@ wsRoutes.get('/ws/live-token', async (c) => {
 
 wsRoutes.get('/ws/live', async (c) => {
   if (!isWebSocketUpgrade(c)) {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
-    const url = new URL(c.req.url);
-    const includeHidden = url.searchParams.get('include_hidden') === '1' && await hasAdminSession(c);
-    if (includeHidden) url.searchParams.set('include_hidden', '1');
-    else url.searchParams.delete('include_hidden');
-    return stub.fetch(new Request(url.toString(), { method: 'GET' }));
+    return liveClientsResponse(c);
   }
   if (!requestHasValidOrigin(c)) {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
@@ -358,7 +358,7 @@ wsRoutes.get('/ws/live', async (c) => {
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });
 
-wsRoutes.get('/live/clients', async (c) => {
+async function liveClientsResponse(c: WsContext): Promise<Response> {
   const limited = await enforceLiveClientsRateLimit(c, requestIp(c));
   if (limited) return limited;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
@@ -370,6 +370,8 @@ wsRoutes.get('/live/clients', async (c) => {
   const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };
   c.header('Cache-Control', includeHidden ? 'no-store' : `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
   return c.json(snapshot);
-});
+}
+
+wsRoutes.get('/live/clients', liveClientsResponse);
 
 export { wsRoutes };

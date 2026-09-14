@@ -15,6 +15,7 @@ const directoryDiskScanTimeout = 30 * time.Second
 
 type directoryCollectorOptions struct {
 	service          string
+	logFile          string
 	once, check      bool
 	include, exclude string
 	total            containerDiskTotalValue
@@ -61,6 +62,15 @@ func handleDirectoryCollectorCLI(args []string, output io.Writer) (bool, int) {
 		fmt.Fprintln(output, "directory disk collector is required")
 		return true, 0
 	}
+	if options.logFile != "" {
+		writer, err := openDirectoryCollectorLog(options.logFile)
+		if err != nil {
+			fmt.Fprintf(output, "disk collector log initialization failed: %v\n", err)
+			return true, 1
+		}
+		defer writer.Close()
+		output = writer
+	}
 	if err := runDirectoryCollector(options, output); err != nil {
 		fmt.Fprintf(output, "disk collector failed: %v\n", err)
 		return true, 1
@@ -73,6 +83,7 @@ func parseDirectoryCollectorOptions(args []string, output io.Writer) (directoryC
 	flags := flag.NewFlagSet("local disk collector", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&options.service, "disk-usage-collector", "", "Collect root directory allocation for this service")
+	flags.StringVar(&options.logFile, "log-file", "", "Bounded local log in a root-controlled directory")
 	flags.BoolVar(&options.once, "disk-usage-once", false, "Collect once and exit")
 	flags.BoolVar(&options.check, "disk-usage-check", false, "Exit 0 when required, 3 when not required")
 	flags.StringVar(&options.include, "mount-include", "", "Selected disk mountpoints/devices")
@@ -81,7 +92,7 @@ func parseDirectoryCollectorOptions(args []string, output io.Writer) (directoryC
 	if err := flags.Parse(args); err != nil {
 		return options, err
 	}
-	if flags.NArg() != 0 || (options.check && (options.service != "" || options.once)) || (!options.check && !directoryCollectorServiceName(options.service)) {
+	if flags.NArg() != 0 || (options.check && (options.service != "" || options.once || options.logFile != "")) || (!options.check && !directoryCollectorServiceName(options.service)) {
 		return options, errors.New("choose --disk-usage-check or --disk-usage-collector SERVICE_NAME with an optional --disk-usage-once")
 	}
 	set := map[string]bool{}

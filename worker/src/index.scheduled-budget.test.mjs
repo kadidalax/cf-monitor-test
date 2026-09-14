@@ -6,9 +6,11 @@ import * as dispatch from './utils/notification-dispatch.ts';
 import * as offline from './utils/offline-notification.ts';
 import * as websites from './utils/website-monitor.ts';
 import * as templates from './utils/notification-templates.ts';
+import * as loadWindow from './utils/load-notification-window.ts';
 import { buildAdminSettings } from './settings/schema.ts';
 import { createTestDatabase, rpc } from '../../scripts/test-support/postgres.mjs';
 import { loadTypeScriptFunctions } from '../../scripts/test-support/typescript.mjs';
+import { createWorkerLoader } from '../test-support/worker-module.mjs';
 
 const budgetUrl = new URL('./utils/scheduled-budget.ts', import.meta.url);
 const budgets = existsSync(budgetUrl) ? await import(budgetUrl) : {};
@@ -25,11 +27,17 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
     static now() { return clock; }
   }
   const env = { SUPABASE_URL: 'https://synthetic.supabase.test', SUPABASE_SECRET_KEY: 'sb_secret_synthetic',
-    LIVE_DATA: { idFromName: value => value, get: () => ({ fetch: async (_url, init) => {
-      const items = JSON.parse(init.body).clients;
+    LIVE_DATA: { idFromName: value => value, get: () => ({ fetch: async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const body = await request.json();
+      if (new URL(request.url).pathname === '/client-sync/batch') {
+        return Response.json({ success: true, applied: body.changes.map(({ uuid, revision }) => ({ uuid, revision })) });
+      }
+      const items = body.clients;
       return Response.json({ ok: true, clients: Object.fromEntries(items.map(item => [item.uuid, { lastSeen: base - 86_400_000, offline: true, streak: 3 }])) });
     } }) } };
   const queries = await loadTypeScriptFunctions(new URL('./db/queries.ts', import.meta.url), null, { sba, redactDatabaseSecrets: value => value });
+  const { synchronizePendingClientChanges } = createWorkerLoader({ db: queries }).load('worker/src/utils/client-sync.ts');
   const connection = { provider: 'supabase-api', env };
   const health = async (_db, component, status) => {
     await queries.getSetting(connection, `health:${component}`);
@@ -79,13 +87,21 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
   } else {
     await database.exec("insert into website_monitors(name,url,interval_sec,timeout_sec,grace_period_sec,agent_probe_mode) select 'Website '||n,'https://website.example.com/'||n,86400,30,86400,'off' from generate_series(1,50) n;");
   }
+  const websitePipeline = createWorkerLoader({ db: queries, overrides: {
+    'worker/src/utils/scheduled-budget.ts': budgets,
+    'worker/src/utils/website-monitor.ts': websites,
+    'worker/src/utils/notification-templates.ts': templates,
+  }, globals: { Date: ClockDate } }).load('worker/src/utils/website-notifications.ts');
   const functions = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), null, {
     ...dispatch, ...offline, ...websites, ...templates, ...budgets,
+    ...websitePipeline,
+    ...loadWindow,
+    synchronizePendingClientChanges,
     ...(budgets.ScheduledBudget ? { ScheduledBudget: class extends budgets.ScheduledBudget { constructor() { super({ now: () => clock }); } } } : {}),
     Date: ClockDate, db: queries, getDatabase: () => connection, buildAdminSettings,
     bestEffortRecordHealthEvent: health, errorDetail: error => String(error),
     SCHEDULED_CURSOR_KEY: 'maintenance_cron_cursors',
-    SCHEDULED_SETTING_KEYS: [...dispatch.NOTIFICATION_DISPATCH_SETTING_KEYS, 'maintenance_cron_cursors', 'maintenance_last_cleanup_at', 'record_preserve_time', 'ping_record_preserve_time', 'audit_log_preserve_time', 'offline_confirm_rounds'],
+    SCHEDULED_SETTING_KEYS: [...dispatch.NOTIFICATION_DISPATCH_SETTING_KEYS, ...loadWindow.LOAD_NOTIFICATION_POLICY_SETTING_KEYS, 'maintenance_cron_cursors', 'maintenance_last_cleanup_at', 'record_preserve_time', 'ping_record_preserve_time', 'audit_log_preserve_time', 'offline_confirm_rounds'],
     RECORD_CLEANUP_LAST_RUN_KEY: 'maintenance_last_cleanup_at', RECORD_CLEANUP_INTERVAL_MS: 86_400_000,
   });
   return {
@@ -94,6 +110,8 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
       requests = 0;
       const started = clock;
       await functions.runScheduled(env);
+      const syncHealth = (await database.query("select value from settings where key='health:cron_client_sync'")).rows[0]?.value;
+      assert.notEqual(syncHealth && JSON.parse(syncHealth).status, 'error', 'the client-sync stage must execute without a missing fixture dependency');
       const result = { requests, elapsed: clock - started };
       clock += 120_000;
       return result;

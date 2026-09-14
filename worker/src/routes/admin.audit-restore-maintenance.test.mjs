@@ -8,19 +8,27 @@ for (const invalidExisting of [false, true]) test(`AUD-06/R-D05: restoring websi
   const messages = [];
   const jobs = [];
   let restored = false;
+  let clients = [], pending = [];
   const db = {
     getBackupConfigurationSnapshot: async () => ({ clients: [], settings: {}, ping_tasks: [],
       offline_notifications: [], expiry_notifications: [], load_notifications: [],
       website_monitors: invalidExisting ? [{ id: 77, name: 'Broken existing reference', url: 'https://example.com',
         agent_probe_mode: 'selected', agent_probe_clients: ['missing-existing-agent'] }] : [] }),
-    listClients: async () => [], getAllSettings: async () => ({}),
+    listClients: async () => clients, getAllSettings: async () => ({}),
     listPingTasks: async () => [], listWebsiteMonitors: async () => [],
     listOfflineNotifications: async () => [], listExpiryNotifications: async () => [], listLoadNotifications: async () => [],
-    restoreBackupData: async () => { restored = true; },
+    restoreBackupData: async (_db, backup) => {
+      restored = true; clients = backup.clients || [];
+      pending = clients.map((client, index) => ({ uuid: client.uuid, revision: String(index + 1), client }));
+    },
+    listPendingClientSyncs: async () => pending,
+    acknowledgeClientSyncs: async (_db, changes) => { assert.equal(changes.length, pending.length); pending = []; return changes.length; },
     cleanupOrphanClientData: async () => ({}), insertAuditLog: async () => {},
   };
   const env = { LIVE_DATA: { idFromName: id => id, get: () => ({ fetch: async request => {
-    messages.push({ path: new URL(request.url).pathname, body: await request.json().catch(() => null), restored });
+    const path = new URL(request.url).pathname, body = await request.json().catch(() => null);
+    messages.push({ path, body, restored });
+    if (path === '/client-sync/batch') return Response.json({ success: true, applied: body.changes.map(({ uuid, revision }) => ({ uuid, revision })) });
     return Response.json({ success: true });
   } }) } };
   const { adminRoutes } = createWorkerLoader({ db }).load('worker/src/routes/admin.ts');

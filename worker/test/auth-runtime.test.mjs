@@ -86,10 +86,12 @@ test('AUD-01/AUD-05: actual workerd, middleware and PostgreSQL enforce complete 
     assert.equal(allowed.status, 400, await allowed.clone().text());
   });
 
-  await t.test('a recovery code completes login once and cannot be replayed', async () => {
+  await t.test('a recovery code confirms one login and cannot authorize a different challenge', async () => {
     const next = await (await post('/api/login', credentials)).json();
     const body = { challenge: next.challenge, method: 'recovery_code', code: recovery.codes[0] };
     assert.equal((await post('/api/login/mfa', body)).status, 200);
-    assert.equal((await post('/api/login/mfa', body)).status, 401);
+    assert.equal((await post('/api/login/mfa', body)).status, 200, 'same operation recovers its durable confirmation');
+    const another = await (await post('/api/login', credentials)).json();
+    assert.equal((await post('/api/login/mfa', { ...body, challenge: another.challenge })).status, 401);
   });
 });

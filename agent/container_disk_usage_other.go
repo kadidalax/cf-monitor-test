@@ -15,3 +15,7 @@ func readDirectoryDiskCache(string, string, time.Time) (diskUsageSnapshot, error
 func runDirectoryCollector(directoryCollectorOptions, io.Writer) error {
 	return errors.New("directory disk collector is supported only on Linux")
 }
+
+func openDirectoryCollectorLog(string) (io.WriteCloser, error) {
+	return nil, errors.New("directory disk collector logging is supported only on Linux")
+}

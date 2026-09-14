@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./Notifications.tsx', import.meta.url), 'utf8');
-const css = readFileSync(new URL('../../index.css', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../../admin.css', import.meta.url), 'utf8');
 
 assert.match(source, /<Select\.Item value="webhook">Webhook<\/Select\.Item>/);
 assert.match(source, /webhookOpen/);

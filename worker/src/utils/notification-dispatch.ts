@@ -1,7 +1,7 @@
 import type * as db from '../db/queries';
 import { normalizeRecipients, sendSmtpEmail, type SmtpConfig, type SmtpResult } from './email.ts';
 import type { NotificationMessage } from './notification-templates.ts';
-import { formatTelegramHtmlText, sendTelegramMessage } from './telegram.ts';
+import { formatTelegramHtmlText, isTelegramResponseSuccessful, sendTelegramMessage } from './telegram.ts';
 import { sendWebhookMessage, type WebhookFormat, type WebhookSendResult } from './webhook.ts';
 import { isMaskedSecretPreview } from './secret-preview.ts';
 import type { StoredHealthComponent } from './observability.ts';
@@ -174,9 +174,8 @@ async function dispatchTelegram(
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     });
-    if (response.body) await response.body.cancel().catch(() => undefined);
-    if (!response.ok) {
-      await record(deps, database, 'telegram', 'error', `Telegram HTTP ${response.status}`, {
+    if (!(await isTelegramResponseSuccessful(response))) {
+      await record(deps, database, 'telegram', 'error', `Telegram response not confirmed (HTTP ${response.status})`, {
         auditAction: 'telegram_error',
         auditUser,
       });
@@ -186,7 +185,7 @@ async function dispatchTelegram(
     return true;
   } catch (error) {
     if (error instanceof ScheduledBudgetExceeded) throw error;
-    await record(deps, database, 'telegram', 'error', `Telegram send failed: ${errorDetail(error)}`, {
+    await record(deps, database, 'telegram', 'error', 'Telegram request failed', {
       auditAction: 'telegram_error',
       auditUser,
     });

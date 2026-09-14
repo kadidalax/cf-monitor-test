@@ -48,6 +48,13 @@ export type ScheduledClientRow = Pick<Client, 'uuid' | 'name' | 'created_at' | '
 export type ClientTokenMeta = Pick<Client, 'uuid' | 'token' | 'token_hash' | 'name'>;
 export type ClientIdentity = Pick<Client, 'uuid' | 'token' | 'token_last_used_ip' | 'token_rotated_at' | 'created_at' | 'name' | 'hidden'>;
 
+export interface ClientSyncChange {
+  uuid: string;
+  // Decimal text preserves PostgreSQL bigint precision across JSON and the DO.
+  revision: string;
+  client: Client | null;
+}
+
 export interface ClientVisibility {
   uuid: string;
   hidden: boolean;
@@ -59,24 +66,24 @@ export interface ClientCapacityCounts {
 }
 
 export interface MonitorRecord {
-  id?: number;
+  id?: number | string;
   client: string;
   time: string;
-  cpu: number;
+  cpu: number | null;
   gpu: number;
-  ram: number;
-  ram_total: number;
-  swap: number;
-  swap_total: number;
+  ram: number | null;
+  ram_total: number | null;
+  swap: number | null;
+  swap_total: number | null;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
   temp: number | null;
   disk: number;
   disk_total: number;
-  net_in: number;
-  net_out: number;
-  net_total_up: number;
-  net_total_down: number;
+  net_in: number | null;
+  net_out: number | null;
+  net_total_up: number | null;
+  net_total_down: number | null;
   process_count: number;
   connections: number;
   connections_udp: number;
@@ -90,6 +97,7 @@ export interface PagedResult<T> {
   limit: number;
   has_more: boolean;
   next_cursor?: string;
+  next_cursor_key?: string;
 }
 
 export type LoadNotificationMetric = 'cpu' | 'ram' | 'load' | 'disk' | 'temp';
@@ -133,7 +141,8 @@ export interface GPUInfo {
 }
 
 export type GPUHistoryRecord = GPUInfo & {
-  id?: number;
+  id?: number | string;
+  device_ordinal?: number;
   client: string;
   time: string;
 };
@@ -218,7 +227,7 @@ export interface PingTask {
 export type PingTaskEstimateRow = Pick<PingTask, 'id' | 'name' | 'clients' | 'all_clients' | 'interval_sec'>;
 
 export interface PingHistoryRecord {
-  id?: number;
+  id?: number | string;
   client: string;
   task_id: number;
   time: string;
@@ -410,6 +419,7 @@ export interface LoadNotificationInput {
 
 export interface ClientReferenceCleanupResult {
   ping_tasks_updated: number;
+  website_monitors_updated?: number;
   load_notifications_updated: number;
   load_notifications_deleted: number;
   expiry_notifications_deleted: number;
@@ -452,6 +462,23 @@ export interface HistoryStorageUsage {
     estimated_live_storage_bytes: number;
     allocated_bytes: number;
   }>;
+}
+
+export interface DatabaseStorageDiagnostics {
+  measurement: 'database-allocation';
+  database_allocated_bytes: number;
+  application_allocated_bytes: number;
+  other_allocated_bytes: number;
+  tables: Record<string, { allocated_bytes: number }>;
+  theme_payload_bytes: number;
+  theme_count: number;
+  theme_asset_count: number;
+  theme_measurement: 'stored-text-including-base64-and-metadata';
+  measured_at: string;
+  cache_seconds: number;
+  budget_bytes: number;
+  theme_quota_bytes: number;
+  status: 'ok' | 'warning' | 'critical';
 }
 
 export interface BoundedTableRowCounts {

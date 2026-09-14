@@ -31,6 +31,7 @@ async function estimate({ pingCount = 2, recordEnabled = true, viewMinutes = 0 }
       listPingTaskEstimateRows: async () => pingTasks,
       getHistoryStorageBytes: async () => ({ total: 0 }),
       getHistoryStorageUsage: async () => null,
+      getDatabaseStorageDiagnostics: async () => null,
     },
   });
   return functions.buildCapacityEstimate({}, { forceCounts: true });

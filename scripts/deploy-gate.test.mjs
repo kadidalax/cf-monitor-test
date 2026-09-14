@@ -13,6 +13,7 @@ function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus =
   const source = deploymentSource.replace(/^import .+;\r?$/gm, '').replaceAll('import.meta.url', JSON.stringify(deploymentUrl.href));
   const calls = [];
   const writes = [];
+  const secretNames = [];
   class Exit extends Error { constructor(status) { super('fixture process exit'); this.status = status; } }
   const fakeProcess = { platform: process.platform, execPath: process.execPath, argv: ['node', fileURLToPath(deploymentUrl), ...args],
     env: { SUPABASE_URL: 'https://synthetic.supabase.co', JWT_SECRET: 'synthetic-jwt-secret', SUPABASE_SECRET_KEY: 'sb_secret_synthetic', ...env },
@@ -31,13 +32,34 @@ function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus =
     new Function('mkdirSync', 'readFileSync', 'rmSync', 'writeFileSync', 'dirname', 'join', 'fileURLToPath', 'spawnSync', 'process', 'console', 'prepareCloudflareVerificationEnv', source)(
       path => writes.push(path),
       () => 'name = "synthetic-worker"\nmain = "worker/src/index.ts"\n[vars]\nSUPABASE_URL = "https://PROJECT_REF.supabase.co"\n',
-      path => writes.push(path), path => writes.push(path), dirname, join, fileURLToPath, spawn, fakeProcess,
+      path => writes.push(path), (path, contents) => {
+        writes.push(path);
+        if (path.endsWith('wrangler-secrets.json')) secretNames.push(...Object.keys(JSON.parse(contents)));
+      }, dirname, join, fileURLToPath, spawn, fakeProcess,
       { log() {}, error() {} },
       () => { if (preparationFails) throw new Error('Synthetic tool preparation failure'); return fakeProcess.env; },
     );
   } catch (error) { if (!(error instanceof Exit)) throw error; status = error.status; }
-  return { status, calls, writes };
+  return { status, calls, writes, secretNames };
 }
+
+test('SEC02 optional MFA data keys from Builds reach the Worker secret deployment', () => {
+  const result = runDeployment({ env: {
+    WORKERS_CI: '1', MFA_SECRET: 'synthetic-current-mfa-data-key-000000000000000',
+    MFA_PREVIOUS_SECRET: 'synthetic-previous-mfa-data-key-1111111111111',
+    MFA_LEGACY_SECRET: 'synthetic-retained-mfa-data-key-2222222222222',
+  } });
+  assert.equal(result.status, 0);
+  for (const name of ['MFA_SECRET', 'MFA_PREVIOUS_SECRET', 'MFA_LEGACY_SECRET']) {
+    assert.ok(result.secretNames.includes(name), `${name} must not be silently ignored`);
+  }
+});
+
+test('SEC02 existing deployments can omit independent keys during staged migration', () => {
+  const result = runDeployment({ env: { WORKERS_CI: '1' } });
+  assert.equal(result.status, 0);
+  assert.equal(result.secretNames.some(name => name.startsWith('MFA_')), false);
+});
 
 test('AUD-19 behavior-test failure stops deployment before configuration or Wrangler side effects', () => {
   const result = runDeployment({ verificationStatus: 1 });

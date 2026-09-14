@@ -7,11 +7,13 @@ import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { LIVE_POLL_SETTINGS_UPDATED_EVENT } from '../../contexts/livePolling';
 import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
-import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
+import { getChangedSettings, mergeConfirmedSettingsDraft, type SettingsMap } from '../../utils/settingsDiff';
 import { notifyPublicDataUpdated } from '../../utils/publicDataEvents';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 import { buildResourceEstimates, type ResourceEstimate } from '../../../../worker/src/utils/capacity-estimate';
 import CapacityResources from '../../components/admin/CapacityResources';
+import DatabaseStoragePanel from '../../components/admin/DatabaseStoragePanel';
+import { STORAGE_BUDGETS, storageBudgetError } from '../../utils/storageBudgets';
 
 interface CapacityEstimate {
   clients: number;
@@ -23,6 +25,7 @@ interface CapacityEstimate {
   record_high_watermark_bytes?: number;
   // Physical allocation is diagnostic; live data estimates drive the history budget.
   history_total_bytes?: number | null;
+  database_storage_diagnostics?: unknown;
   history_storage_usage?: {
     estimated_live_storage_bytes: number;
     allocated_bytes: number;
@@ -606,6 +609,8 @@ export default function SettingsGeneral() {
 
   const handleSave = useCallback(async () => {
     if (!settingsReady || loading || loadError || saving) return;
+    const budgetError = storageBudgetError(settings);
+    if (budgetError) { toast.error(budgetError); return; }
     const payload = {
       ...settings,
       record_preserve_time: String(derived.retentionHours),
@@ -631,12 +636,13 @@ export default function SettingsGeneral() {
         body: JSON.stringify(changedSettings),
       });
       if (result.success) {
-        setSettings(payload);
+        setSettings((current) => mergeConfirmedSettingsDraft(current, settings, payload));
         setOriginalSettings(payload);
         setSettingsScope('general', payload);
         window.dispatchEvent(new CustomEvent(LIVE_POLL_SETTINGS_UPDATED_EVENT, { detail: payload }));
         notifyPublicDataUpdated();
         toast.success('设置已保存');
+        if (changedSettings.database_storage_budget_bytes !== undefined || changedSettings.theme_storage_quota_bytes !== undefined) void refreshCapacity();
       } else {
         toast.error(result.error || '保存失败');
       }
@@ -645,7 +651,7 @@ export default function SettingsGeneral() {
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, derived, originalSettings, setSettingsScope, settings, settingsReady, loading, loadError, saving]);
+  }, [apiFetch, derived, originalSettings, setSettingsScope, settings, settingsReady, loading, loadError, saving, refreshCapacity]);
 
   const handleMaintenanceCleanup = useCallback(async () => {
     setCleaning(true);
@@ -801,6 +807,22 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
+                label="数据库整体预算（字节）"
+                description="默认 500 MiB，按实际数据库方案填写。整体物理占用达到 85% 提醒、95% 显示容量紧张"
+                value={getSettingValue(settings, 'database_storage_budget_bytes', String(STORAGE_BUDGETS.database_storage_budget_bytes.fallback))}
+                onChange={value => updateSetting('database_storage_budget_bytes', value)}
+                type="number"
+                width="100%"
+              />
+              <SettingInput
+                label="主题累计内容限额（字节）"
+                description="默认 32 MiB；主题文件、自定义样式与配置共用此额度。超过后可删除闲置主题或缩小内容"
+                value={getSettingValue(settings, 'theme_storage_quota_bytes', String(STORAGE_BUDGETS.theme_storage_quota_bytes.fallback))}
+                onChange={value => updateSetting('theme_storage_quota_bytes', value)}
+                type="number"
+                width="100%"
+              />
+              <SettingInput
                 label="历史写入熔断行数（行）"
                 description="次要熔断线，与容量熔断谁先到谁生效。行数只是容量的粗糙代理且不含索引开销，一般不需要改动"
                 value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
@@ -887,6 +909,7 @@ export default function SettingsGeneral() {
                 />
               </div>
               <CapacityResources resources={derived.resourceEstimates} comparisonMonthDays={derived.comparisonMonthDays} />
+              <DatabaseStoragePanel value={capacity?.database_storage_diagnostics} />
               <Text as="p" size="1" color="gray">
                 历史表物理分配：{derived.hasAllocatedBytes ? formatBytes(derived.historyAllocatedBytes) : '未读取'}。删除后未必缩小；可复用空间尚无法精确测量。平台实际配额以 Supabase 控制台为准。
               </Text>

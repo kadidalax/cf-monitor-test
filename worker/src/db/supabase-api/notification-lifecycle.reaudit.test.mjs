@@ -132,14 +132,14 @@ for (const kind of ['expiry', 'load']) for (const restorePoint of ['none', 'befo
       let restores = 0;
       let sends = 0;
       const restore = async () => {
-        restores += 1;
         await rpc(sql, 'cfm_restore_backup_data', { input_backup: {
-          clients: [{ uuid: client, name: 'Restored same ID', expired_at: iso(start + 86_400_000) }],
+          clients: [{ uuid: client, name: 'Restored same ID', token_hash: `sha256:${'a'.repeat(64)}`, expired_at: iso(start + 86_400_000) }],
           ...(kind === 'expiry'
             ? { expiry_notifications: [{ client, enable: true, advance_days: 7, last_notified: null }] }
             : { load_notifications: [{ id: 7, name: 'Restored same rule ID', clients: [], metric: 'cpu', threshold: 80,
               ratio: 0.8, interval_min: 15, last_notified: null }] }),
         } });
+        restores += 1;
       };
       const loader = createWorkerLoader({ db: null, expose: { 'worker/src/index.ts': ['runExpiryCheck', 'runLoadCheck'] }, globals: {
         fetch: async (url, init) => {
@@ -242,7 +242,7 @@ test('R-D06 a legacy sent token is minted without resending and cannot cross a s
       input_client: 'node-a', input_time: iso(start), input_token: prior.token,
     }), true);
     await rpc(sql, 'cfm_restore_backup_data', { input_backup: {
-      clients: [{ uuid: 'node-a', name: 'Replacement', expired_at: iso(start + 86_400_000) }],
+      clients: [{ uuid: 'node-a', name: 'Replacement', token_hash: `sha256:${'a'.repeat(64)}`, expired_at: iso(start + 86_400_000) }],
       expiry_notifications: [{ client: 'node-a', enable: true, advance_days: 7, last_notified: null }],
     } });
     const next = await claim('expiry:node-a');

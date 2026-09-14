@@ -5,7 +5,7 @@ import { Activity, ArrowDown, ArrowUp, BarChart3, TrendingUp } from 'lucide-reac
 import Flag from './Flag';
 import PriceTags from './PriceTags';
 import MiniPingChartFloat from './MiniPingChartFloat';
-import { diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { cpuCapacity, diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic';
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
@@ -235,8 +235,8 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const uptimeLabel = formatMetricUptime(d.uptime);
   const memDetail = `${formatMetricBytes(memory.used)} / ${formatMetricBytes(memory.total)}`;
   const diskDetail = disk.detail;
-  const cpuDetail = formatCpuCardLabel(client.cpu_name, client.cpu_cores);
-  const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
+  const cpuDetail = formatCpuCardLabel(client.cpu_name, cpuCapacity(d, client.cpu_cores));
+  const cpuTitle = formatCpuSpec(client.cpu_name, cpuCapacity(d, client.cpu_cores));
 
   const trafficUsed = (() => {
     if (!client.traffic_limit || client.traffic_limit <= 0) return 0;

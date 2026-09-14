@@ -6,13 +6,15 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
+import { synchronizePendingClientChanges } from '../utils/client-sync';
 import { AuthConfigurationError, generateToken } from '../auth/jwt';
-import { decryptTotpSecret, encryptTotpSecret, generateRecoveryCodes, hashRecoveryCode } from '../auth/mfa';
+import { decryptTotpSecret, encryptTotpSecret, generateRecoveryCodes, MfaConfigurationError } from '../auth/mfa';
+import { confirmUserMfaFactor } from '../auth/mfa-factor';
 import { generateMfaSetupToken, generateMfaToken, verifyMfaSetupToken } from '../auth/mfa-token';
 import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
-import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
+import { clearMfaStepUpCookie, getAdminSessionToken, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
 import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
   BACKUP_ENCRYPTION_ALGORITHM,
@@ -30,6 +32,7 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
+import { LOAD_NOTIFICATION_POLICY_SETTING_KEYS, buildLoadNotificationPolicy, effectiveLoadNotificationIntervalMin } from '../utils/load-notification-window';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification, pickNotificationSettingOverrides } from '../utils/notification-dispatch';
 import { maskSecretPreview, isMaskedSecretPreview } from '../utils/secret-preview';
 import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
@@ -119,6 +122,8 @@ const CAPACITY_ESTIMATE_SETTING_KEYS = [
   'record_high_watermark_rows',
   'record_high_watermark_bytes',
   'audit_log_preserve_time',
+  'database_storage_budget_bytes',
+  'theme_storage_quota_bytes',
   'capacity_daily_view_minutes',
 ];
 const CAPACITY_ESTIMATE_SETTING_KEY_SET = new Set(CAPACITY_ESTIMATE_SETTING_KEYS);
@@ -142,6 +147,8 @@ const SETTINGS_SCOPE_KEYS = {
     'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
     'record_high_watermark_bytes',
+    'database_storage_budget_bytes',
+    'theme_storage_quota_bytes',
     'capacity_daily_view_minutes',
     'offline_confirm_rounds',
   ],
@@ -458,13 +465,20 @@ async function writeAdminClientsSnapshot(
 function applyAdminClientsSnapshot(
   clients: Array<Omit<db.Client, 'token' | 'token_hash'>>,
   snapshot: AdminClientsSnapshot | null,
+  beforeRead?: AdminClientsSnapshot | null,
 ): Array<Omit<db.Client, 'token' | 'token_hash'>> {
   if (!snapshot) return clients;
   const removed = new Set(snapshot.removed);
   const byUuid = new Map(clients.map(client => [client.uuid, client]));
   for (const uuid of removed) byUuid.delete(uuid);
   for (const client of snapshot.clients) {
-    if (!removed.has(client.uuid)) byUuid.set(client.uuid, { ...byUuid.get(client.uuid), ...client });
+    const existing = byUuid.get(client.uuid);
+    // SQL owns membership. Only a node first seen after the query started may
+    // supplement it; an old cached node missing from SQL was already deleted.
+    if (!existing && !(beforeRead !== undefined && snapshot.updatedAt > (beforeRead?.updatedAt ?? 0) &&
+      !beforeRead?.clients.some(previous => previous.uuid === client.uuid))) continue;
+    if (existing && (Date.parse(existing.updated_at || '') || 0) > (Date.parse(client.updated_at || '') || 0)) continue;
+    if (!removed.has(client.uuid)) byUuid.set(client.uuid, { ...existing, ...client });
   }
   return [...byUuid.values()];
 }
@@ -496,9 +510,9 @@ async function listAdminPingTasksCached(database: db.QueryDatabase, force = fals
   return tasks;
 }
 
-async function syncLiveClientMeta(c: AdminContext, client: LiveClientMeta): Promise<void> {
+export async function syncLiveClientMeta(c: AdminContext, client: LiveClientMeta): Promise<void> {
   const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/client-meta', {
+  const response = await stub.fetch(new Request('https://do/client-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -508,35 +522,23 @@ async function syncLiveClientMeta(c: AdminContext, client: LiveClientMeta): Prom
       hidden: Boolean(client.hidden),
     }),
   }));
+  await requireLiveSynchronization(response);
 }
 
-async function syncAgentAuthClient(c: AdminContext, client: db.Client): Promise<void> {
-  if (!client.token_hash) return;
-  const { token: _token, ...safeClient } = client;
-  const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/agent-auth', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client: { ...safeClient, token: '' } }),
-  }));
+async function requireLiveSynchronization(response: Response): Promise<void> {
+  const body = await response.json().catch(() => null) as { success?: unknown } | null;
+  if (!response.ok || body?.success !== true) throw new Error('Durable client synchronization was not acknowledged');
 }
 
-async function removeLiveClient(c: AdminContext, uuid: string): Promise<void> {
-  const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/client-remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uuid }),
-  }));
-}
-
-async function disconnectLiveClient(c: AdminContext, uuid: string): Promise<void> {
-  const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/client-remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uuid, keepMetadata: true }),
-  }));
+async function synchronizeClientWrite(c: AdminContext, uuids: string[]): Promise<Response | null> {
+  try {
+    await synchronizePendingClientChanges(getDatabase(c.env), c.env, { uuids });
+    return null;
+  } catch {
+    c.header('Retry-After', '2');
+    return c.json({ error: '更改已保存，但实时状态同步尚未完成，后台将自动重试。请稍后刷新确认。',
+      committed: true, synchronized: false }, 503);
+  }
 }
 
 export async function getClientCreateConflict(database: db.QueryDatabase, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
@@ -1139,7 +1141,7 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     };
   }
 
-  const [clientCapacityCounts, rawSettings, pingTasks, historyByteSizes, historyStorageUsage] = await Promise.all([
+  const [clientCapacityCounts, rawSettings, pingTasks, historyByteSizes, historyStorageUsage, databaseStorageDiagnostics] = await Promise.all([
     db.countClientCapacityTargets(database),
     db.getSettingsByKeys(database, CAPACITY_ESTIMATE_SETTING_KEYS),
     db.listPingTaskEstimateRows(database),
@@ -1147,6 +1149,7 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     // The latter scans visible tuples, so the complete response is cached for 30s.
     db.getHistoryStorageBytes(database).catch(() => null),
     db.getHistoryStorageUsage(database).catch(() => null),
+    db.getDatabaseStorageDiagnostics(database, Boolean(options.forceCounts)).catch(() => null),
   ]);
   const clientCount = clientCapacityCounts.clients;
   const gpuClientCount = clientCapacityCounts.gpu_clients;
@@ -1292,6 +1295,7 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     // Allocated files can remain large after DELETE. The live estimate is the
     // recoverable history budget; physical allocation remains a diagnostic.
     history_storage_usage: historyStorageUsage ?? null,
+    database_storage_diagnostics: databaseStorageDiagnostics ?? null,
     row_counts_checked_at: rowCounts?.checked_at ?? null,
     row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
     row_counts_cache_key: rowCounts?.cache_key ?? null,
@@ -1460,6 +1464,7 @@ adminRoutes.get('/clients', async (c) => {
   const metrics: TimingMetric[] = [];
   const refresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
   let snapshot = await timed(metrics, 'do_snapshot', () => readAdminClientsSnapshot(c));
+  const beforeRead = snapshot;
   const baseVersion = snapshot?.updatedAt ?? null;
   if (!refresh) {
     if (snapshot && snapshot.complete && snapshot.removed.length === 0) {
@@ -1475,8 +1480,8 @@ adminRoutes.get('/clients', async (c) => {
   const clients = await timed(metrics, cacheHit ? 'memory_cache' : 'db_list_clients', () => listAdminClientsCached(database, refresh || repairAdminClientsSnapshot));
   snapshot = await timed(metrics, 'do_snapshot_after_read', () => readAdminClientsSnapshot(c));
   repairAdminClientsSnapshot = Boolean(snapshot && (!snapshot.complete || snapshot.removed.length > 0));
-  const safeClients = applyAdminClientsSnapshot(clients.map(hideAdminClientToken), snapshot);
-  if (!snapshot || repairAdminClientsSnapshot) {
+  const safeClients = applyAdminClientsSnapshot(clients.map(hideAdminClientToken), snapshot, beforeRead);
+  if (refresh || !snapshot || repairAdminClientsSnapshot) {
     runAdminBackground(c, (async () => {
       const databaseIds = new Set(clients.map(client => client.uuid));
       const saved = await writeAdminClientsSnapshot(c, safeClients, {
@@ -1534,10 +1539,10 @@ adminRoutes.post('/clients/add', async (c) => {
     invalidateAgentClientAuthCache({ uuid, token });
     invalidateAllowedClientIdsCache();
     invalidateCapacityEstimateCache();
+    const syncFailure = await synchronizeClientWrite(c, [uuid]);
+    if (syncFailure) return syncFailure;
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
-        syncLiveClientMeta(c, safeClient).catch(() => undefined),
-        syncAgentAuthClient(c, createdClient).catch(() => undefined),
         publicMetadataPurge.catch(() => undefined),
         purgeAdminClientsEdgeCache(c),
       ]);
@@ -1577,10 +1582,10 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
     invalidateAgentClientAuthCache({ uuid });
     invalidateCapacityEstimateCache();
+    const syncFailure = await synchronizeClientWrite(c, [uuid]);
+    if (syncFailure) return syncFailure;
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
-        syncLiveClientMeta(c, safeClient).catch(() => undefined),
-        syncAgentAuthClient(c, updatedClient).catch(() => undefined),
         publicMetadataPurge.catch(() => undefined),
         purgeAdminClientsEdgeCache(c),
       ]);
@@ -1602,13 +1607,10 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
   if (!parsed.ok) return parsed.response;
   const database = getDatabase(c.env);
   const result = await timed(metrics, 'db_delete', () => db.deleteClient(database, uuid));
+  const syncFailure = await synchronizeClientWrite(c, [uuid]);
+  if (syncFailure) return syncFailure;
   if (result.removed === 0) {
-    await timed(metrics, 'post_write_cache', async () => {
-      await Promise.all([
-        removeLiveClient(c, uuid).catch(() => undefined),
-        purgeAdminClientsEdgeCache(c),
-      ]);
-    });
+    await timed(metrics, 'post_write_cache', () => purgeAdminClientsEdgeCache(c));
     setServerTiming(c, metrics);
     return c.json({ error: '客户端不存在', removed: 0 }, 404);
   }
@@ -1620,7 +1622,6 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
   invalidateCapacityEstimateCache();
   await timed(metrics, 'post_write_cache', async () => {
     await Promise.all([
-      removeLiveClient(c, uuid).catch(() => undefined),
       publicMetadataPurge.catch(() => undefined),
       purgeAdminClientsEdgeCache(c),
     ]);
@@ -1681,15 +1682,14 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   }
 
   const updatedClient = await db.rotateClientToken(database, uuid, token);
+  if (!updatedClient) return c.json({ error: '客户端不存在' }, 404);
   invalidateAdminClientsCache();
   invalidateAdminPublicMetadata(c);
   invalidateAgentClientAuthCache(client);
   invalidateAgentClientAuthCache({ uuid, token });
-  await Promise.all([
-    disconnectLiveClient(c, uuid).catch(() => undefined),
-    updatedClient ? syncAgentAuthClient(c, updatedClient) : Promise.resolve(),
-    purgeAdminClientsEdgeCache(c),
-  ]);
+  const syncFailure = await synchronizeClientWrite(c, [uuid]);
+  if (syncFailure) return syncFailure;
+  await purgeAdminClientsEdgeCache(c);
   await db.insertAuditLog(database, c.get('username')!, 'client_token_rotate', `重置客户端 Token: ${client.name || uuid}`);
   return c.json({ success: true, token });
 });
@@ -1752,8 +1752,9 @@ adminRoutes.post('/clients/batch-hide', async (c) => {
     const missing = uuids.filter(uuid => !existingByUuid.has(uuid));
     const visibleClients = clients.filter(client => !Boolean(client.hidden));
     const changed = await db.updateClientsHidden(database, visibleClients.map(client => client.uuid), true);
+    const syncFailure = await synchronizeClientWrite(c, uuids);
+    if (syncFailure) return syncFailure;
     for (const client of clients) {
-      await syncLiveClientMeta(c, { ...client, hidden: true });
       invalidateAgentClientAuthCache(client);
     }
 
@@ -1787,9 +1788,8 @@ adminRoutes.post('/clients/batch-remove', async (c) => {
     const missing = uuids.filter(uuid => !existingByUuid.has(uuid));
     const result = await db.deleteClients(database, existingUuids);
     const removed = result.removed;
-    for (const uuid of existingUuids) {
-      await removeLiveClient(c, uuid);
-    }
+    const syncFailure = await synchronizeClientWrite(c, uuids);
+    if (syncFailure) return syncFailure;
     const deletedRecords = result.deleted_records;
     const cleanup = await db.pruneClientReferencesForClients(database, existingUuids);
 
@@ -2490,10 +2490,16 @@ adminRoutes.post('/notification/expiry/edit', async (c) => {
 });
 
 // 负载通知列表
+adminRoutes.get('/notification/load/policy', async (c) => {
+  const policy = buildLoadNotificationPolicy(await db.getSettingsByKeys(getDatabase(c.env), [...LOAD_NOTIFICATION_POLICY_SETTING_KEYS], true));
+  return c.json(policy);
+});
+
 adminRoutes.get('/notification/load', async (c) => {
   const database = getDatabase(c.env);
   const notifications = await db.listLoadNotifications(database, true);
-  return c.json(notifications);
+  const policy = buildLoadNotificationPolicy(await db.getSettingsByKeys(database, [...LOAD_NOTIFICATION_POLICY_SETTING_KEYS], true));
+  return c.json(notifications.map(rule => ({ ...rule, effective_interval_min: effectiveLoadNotificationIntervalMin(rule.interval_min, policy) })));
 });
 
 // 添加负载通知
@@ -2503,7 +2509,8 @@ adminRoutes.post('/notification/load/add', async (c) => {
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
     const database = getDatabase(c.env);
-    const validated = validateLoadNotificationInput(body, await getAllowedClientIdsForLoadNotification(database, body));
+    const policy = buildLoadNotificationPolicy(await db.getSettingsByKeys(database, [...LOAD_NOTIFICATION_POLICY_SETTING_KEYS], true));
+    const validated = validateLoadNotificationInput(body, await getAllowedClientIdsForLoadNotification(database, body), { minimumIntervalMin: policy.minimum_interval_min });
     if (!validated.ok) {
       return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
     }
@@ -2521,7 +2528,8 @@ adminRoutes.post('/notification/load/edit', async (c) => {
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
     const database = getDatabase(c.env);
-    const validated = validateLoadNotificationInput(body, await getAllowedClientIdsForLoadNotification(database, body), { requireId: true });
+    const policy = buildLoadNotificationPolicy(await db.getSettingsByKeys(database, [...LOAD_NOTIFICATION_POLICY_SETTING_KEYS], true));
+    const validated = validateLoadNotificationInput(body, await getAllowedClientIdsForLoadNotification(database, body), { requireId: true, minimumIntervalMin: policy.minimum_interval_min });
     if (!validated.ok) {
       return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
     }
@@ -2572,10 +2580,11 @@ adminRoutes.post('/notification/load/:id', async (c) => {
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
     const database = getDatabase(c.env);
+    const policy = buildLoadNotificationPolicy(await db.getSettingsByKeys(database, [...LOAD_NOTIFICATION_POLICY_SETTING_KEYS], true));
     const validated = validateLoadNotificationInput(
       { ...body, id },
       await getAllowedClientIdsForLoadNotification(database, body),
-      { requireId: true },
+      { requireId: true, minimumIntervalMin: policy.minimum_interval_min },
     );
     if (!validated.ok) {
       return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
@@ -2596,29 +2605,6 @@ type MfaMethod = 'totp' | 'recovery_code';
 
 function readMfaMethod(value: unknown): MfaMethod | null {
   return value === 'totp' || value === 'recovery_code' ? value : null;
-}
-
-async function verifyUserMfaFactor(
-  database: db.QueryDatabase,
-  user: db.User,
-  method: MfaMethod,
-  code: string,
-  env: Bindings,
-): Promise<boolean> {
-  if (!user.totp_enabled_at || !user.totp_secret_enc) return false;
-  if (method === 'recovery_code') {
-    try {
-      return db.consumeRecoveryCode(database, user.uuid, await hashRecoveryCode(code, env));
-    } catch (error) {
-      if (error instanceof AuthConfigurationError) throw error;
-      return false;
-    }
-  }
-
-  const secret = await decryptTotpSecret(user.totp_secret_enc, user.uuid, env);
-  const result = await verifyTotpCode(secret, code);
-  return Boolean(result.valid && result.step !== undefined &&
-    await db.consumeTotpStep(database, user.uuid, result.step));
 }
 
 async function replaceRotatedAdminSession(c: AdminContext, previousSessionVersion: number, user: db.User): Promise<void> {
@@ -2728,7 +2714,6 @@ adminRoutes.post('/account/mfa/enable', async (c) => {
   );
   if (!updated) return c.json({ error: '用户不存在' }, 404);
   await replaceRotatedAdminSession(c, user.session_version, updated);
-  await db.insertAuditLog(database, user.username, 'mfa_enabled', '启用 TOTP 双重身份验证', 'warning');
   return c.json({ success: true, recovery_codes: recovery.codes });
 });
 
@@ -2742,7 +2727,6 @@ adminRoutes.post('/account/mfa/recovery-codes', async (c) => {
   const updated = await db.replaceUserRecoveryCodes(database, user.uuid, recovery.hashes);
   if (!updated) return c.json({ error: '无法更新恢复码' }, 409);
   await replaceRotatedAdminSession(c, user.session_version, updated);
-  await db.insertAuditLog(database, user.username, 'mfa_recovery_codes_regenerated', '重新生成恢复码', 'warning');
   return c.json({ success: true, recovery_codes: recovery.codes });
 });
 
@@ -2755,7 +2739,6 @@ adminRoutes.post('/account/mfa/disable', async (c) => {
   const updated = await db.disableUserTotp(database, user.uuid);
   if (!updated) return c.json({ error: '用户不存在' }, 404);
   await replaceRotatedAdminSession(c, user.session_version, updated);
-  await db.insertAuditLog(database, user.username, 'mfa_disabled', '关闭 TOTP 双重身份验证', 'warning');
   return c.json({ success: true });
 });
 
@@ -2785,33 +2768,37 @@ adminRoutes.post('/account/mfa/step-up', async (c) => {
     return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
   }
 
-  let verified = false;
+  let confirmation: db.MfaFactorConfirmation;
   try {
-    verified = await verifyUserMfaFactor(database, user, method, code, c.env);
+    confirmation = await confirmUserMfaFactor(database, user, {
+      method, code, purpose: 'mfa-step-up', operationToken: getAdminSessionToken(c) || '',
+    }, c.env);
   } catch (error) {
     if (error instanceof AuthConfigurationError) {
       return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
     }
-    console.error('[auth] failed to verify MFA step-up:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '双重身份验证配置损坏，请使用管理员恢复功能' }, 500);
+    if (error instanceof MfaConfigurationError) {
+      return c.json({ code: 'MFA_CONFIGURATION_ERROR', error: '服务端双重验证密钥配置不可用，请检查当前及保留的加密密钥' }, 500);
+    }
+    return c.json({ code: 'MFA_TEMPORARY_UNAVAILABLE', error: '暂时无法确认验证结果，请稍后使用同一验证码或恢复码重试' }, 503);
   }
-  if (!verified) {
+  if (!confirmation.verified) {
     const failedAt = Date.now();
     await recordLoginFailure(database, buckets, failedAt, states);
     await auditLoginFailure(database, user.username, clientIp, 'invalid_mfa_step_up', failedAt);
     return c.json({ code: 'MFA_INVALID', error: '验证码或恢复码无效' }, 401);
   }
 
-  await clearLoginFailures(database, buckets, states);
+  const verifiedAt = Date.parse(confirmation.verified_at!);
   const token = await generateMfaToken({
     userId: user.uuid,
     username: user.username,
     sessionVersion: user.session_version,
     purpose: 'mfa-step-up',
-  }, c.env);
+  }, c.env, verifiedAt);
   setMfaStepUpCookie(c, token);
-  await db.insertAuditLog(database, user.username, 'mfa_step_up', '完成敏感操作二次确认');
-  return c.json({ success: true, expires_in: 300 });
+  if ([...states.values()].some(Boolean)) runAdminBackground(c, clearLoginFailures(database, buckets, states));
+  return c.json({ success: true, expires_in: Math.max(0, Math.floor((verifiedAt + 300_000 - Date.now()) / 1000)) });
 });
 // 修改用户名
 adminRoutes.post('/account/username', async (c) => {
@@ -2923,6 +2910,7 @@ adminRoutes.post('/account/chpasswd', async (c) => {
     if (!updatedUser) {
       return c.json({ error: '用户不存在' }, 404);
     }
+    await deleteAdminSessionEdgeCache(c, userId, user.session_version);
     invalidateAdminSessionCache(userId);
 
     let token: string;
@@ -3135,16 +3123,26 @@ adminRoutes.post('/upload/backup', async (c) => {
     invalidateCapacityEstimateCache();
     invalidateWebsiteMonitorPublicState(c);
     if (validated.backup.clients !== undefined) {
-      const authoritativeClients = await db.listClients(database, true);
-      const synchronization = await liveDataStub(c).fetch(new Request('https://do/clients-restore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clients: authoritativeClients.map(hideAdminClientToken) }),
-      }));
-      const result = await synchronization.json().catch(() => null);
-      if (!synchronization.ok || !result || typeof result !== 'object' || !('success' in result) || result.success !== true) {
-        throw new Error('Restored client state synchronization failed');
+      let snapshotSynchronized = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const beforeRead = await readAdminClientsSnapshot(c);
+        const authoritativeClients = await db.listClients(database, true);
+        const synchronization = await liveDataStub(c).fetch(new Request('https://do/clients-restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clients: authoritativeClients.map(hideAdminClientToken), expected_version: beforeRead?.updatedAt ?? 0 }),
+        }));
+        const result = await synchronization.json().catch(() => null);
+        if (synchronization.status === 409 && result && typeof result === 'object'
+          && 'code' in result && result.code === 'CLIENT_SNAPSHOT_CHANGED') continue;
+        if (!synchronization.ok || !result || typeof result !== 'object' || !('success' in result) || result.success !== true) {
+          throw new Error('Restored client state synchronization failed');
+        }
+        snapshotSynchronized = true;
+        break;
       }
+      if (!snapshotSynchronized) throw new Error('Restored client snapshot changed repeatedly');
+      await synchronizePendingClientChanges(database, c.env, { drain: true });
     }
     await refreshLivePingTasks(c);
     realtimeSynchronized = true;

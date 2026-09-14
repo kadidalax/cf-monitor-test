@@ -130,7 +130,9 @@ test('R-D04 DingTalk also accepts the strict string-zero code in its official ex
   assert.equal(result.ok, true);
 });
 
-for (const format of ['generic', 'custom', 'slack', 'discord']) {
+// Discord requires a saved-message receipt; its contract is covered in
+// webhook.audit-discord-receipt.test.mjs.
+for (const format of ['generic', 'custom', 'slack']) {
   test(`R-D04 ${format} keeps its HTTP success contract for arbitrary response fields`, async () => {
     const result = await loadSender()({ url: hookUrl, format }, notification, {
       fetch: async () => Response.json({ code: 19024, errcode: 93000, arbitrary: 'application-specific' }),

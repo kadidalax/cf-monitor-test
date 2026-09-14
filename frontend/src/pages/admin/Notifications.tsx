@@ -1,3 +1,4 @@
+import { useDialogSession } from '../../hooks/useDialogSession';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Flex, Text, Button, TextField,
@@ -12,7 +13,7 @@ import { useApi } from '../../contexts/AuthContext';
 import { useAdminAction } from '../../hooks/useAdminAction';
 import { SettingCard, SettingInput, SettingTextarea } from '../../components/admin/SettingCard';
 import { summarizeSelectionValue } from '../../utils/batchPrefill';
-import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
+import { getChangedSettings, mergeConfirmedSettingsDraft, type SettingsMap } from '../../utils/settingsDiff';
 
 const notificationTabValues = ['settings', 'offline', 'expiry', 'load'] as const;
 
@@ -54,6 +55,7 @@ type LoadNotification = {
   threshold?: number;
   ratio?: number;
   interval_min?: number;
+  effective_interval_min?: number;
   clients?: string[];
   all_clients?: boolean;
 };
@@ -61,6 +63,27 @@ type LoadNotificationForm = Partial<LoadNotification> & {
   clients?: string[];
   all_clients?: boolean;
 };
+type LoadNotificationPolicy = {
+  minimum_interval_min: number;
+  sample_interval_sec: number;
+  history_enabled: boolean;
+};
+
+function validateLoadPolicy(value: unknown): LoadNotificationPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('采样策略格式异常');
+  const policy = value as Partial<LoadNotificationPolicy>;
+  if (typeof policy.minimum_interval_min !== 'number' || !Number.isInteger(policy.minimum_interval_min)
+    || policy.minimum_interval_min < 1 || policy.minimum_interval_min > 10080
+    || typeof policy.sample_interval_sec !== 'number' || !Number.isFinite(policy.sample_interval_sec)
+    || policy.sample_interval_sec <= 0 || typeof policy.history_enabled !== 'boolean') {
+    throw new Error('采样策略格式异常');
+  }
+  return policy as LoadNotificationPolicy;
+}
+
+function effectiveLoadInterval(item: LoadNotification, policy: LoadNotificationPolicy | null): number {
+  return Math.max(item.interval_min ?? 15, item.effective_interval_min ?? 0, policy?.minimum_interval_min ?? 0);
+}
 const emptyTabState: Record<NotificationTab, boolean> = {
   settings: false,
   offline: false,
@@ -91,6 +114,15 @@ function loadMetricUnit(metric?: string): string {
   return '%';
 }
 
+function validateNotificationList(value: unknown, timing: 'grace_period' | 'advance_days') {
+  if (!Array.isArray(value) || value.some((item) => !item || typeof item.client !== 'string'
+    || (item.enable !== undefined && typeof item.enable !== 'boolean')
+    || (item[timing] !== undefined && (typeof item[timing] !== 'number' || !Number.isFinite(item[timing]))))) {
+    throw new Error('通知数据格式异常，请重试');
+  }
+  return value;
+}
+
 export default function AdminNotifications() {
   const apiFetch = useApi();
   const { run: runAction, pendingActions } = useAdminAction();
@@ -103,10 +135,12 @@ export default function AdminNotifications() {
     [initialTab]: true,
   });
   const [loadedTabs, setLoadedTabs] = useState<Record<NotificationTab, boolean>>(emptyTabState);
+  const [tabErrors, setTabErrors] = useState<Partial<Record<NotificationTab, string>>>({});
   const [offlineNotifications, setOfflineNotifications] = useState<OfflineNotification[]>([]);
   const [expiryNotifications, setExpiryNotifications] = useState<ExpiryNotification[]>([]);
   const [clients, setClients] = useState<NotificationClient[]>([]);
   const [loadNotifications, setLoadNotifications] = useState<LoadNotification[]>([]);
+  const [loadPolicy, setLoadPolicy] = useState<LoadNotificationPolicy | null>(null);
   const [settings, setSettings] = useState<SettingsMap>({});
   const [originalSettings, setOriginalSettings] = useState<SettingsMap>({});
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -146,6 +180,11 @@ export default function AdminNotifications() {
   const [loadDialogOpen, setLoadDialogOpen] = useState(false);
   const [editingLoad, setEditingLoad] = useState<LoadNotification | null>(null);
   const [loadForm, setLoadForm] = useState<LoadNotificationForm>({});
+  const offlineEditSession = useDialogSession(editDialogOpen, editingOffline);
+  const offlineBatchSession = useDialogSession(batchDialogOpen);
+  const expiryEditSession = useDialogSession(expiryEditDialogOpen, editingExpiry);
+  const expiryBatchSession = useDialogSession(expiryBatchDialogOpen);
+  const loadEditSession = useDialogSession(loadDialogOpen, editingLoad?.id);
 
   useEffect(() => {
     setActiveTab(toNotificationTab(urlTab));
@@ -172,7 +211,10 @@ export default function AdminNotifications() {
 
     const promise = apiFetch('/admin/clients')
       .then((data) => {
-        const nextClients = Array.isArray(data) ? data as NotificationClient[] : [];
+        if (!Array.isArray(data) || data.some((item) => !item || typeof item.uuid !== 'string')) {
+          throw new Error('服务器数据格式异常，请重试');
+        }
+        const nextClients = data as NotificationClient[];
         clientsRef.current = nextClients;
         setClients(nextClients);
         clientsLoadedRef.current = true;
@@ -185,16 +227,16 @@ export default function AdminNotifications() {
     return promise;
   }, [apiFetch]);
 
-  const loadSettingsTab = useCallback(async (force = false) => {
+  const loadSettingsTab = useCallback(async (force = false, submitted?: SettingsMap) => {
     if (!force && loadedTabs.settings) return;
     setTabBusy('settings', true);
     try {
       const settingsData = await apiFetch('/admin/settings?scope=notification');
       if (settingsData && typeof settingsData === 'object') {
         const nextSettings = settingsData as SettingsMap;
-        setSettings(nextSettings);
+        setSettings((current) => submitted ? mergeConfirmedSettingsDraft(current, submitted, nextSettings) : nextSettings);
         setOriginalSettings(nextSettings);
-        syncChannelCards(nextSettings.notification_method || 'telegram');
+        if (!submitted) syncChannelCards(nextSettings.notification_method || 'telegram');
       }
       markTabLoaded('settings');
     } catch (error) {
@@ -208,14 +250,15 @@ export default function AdminNotifications() {
     if (!force && loadedTabs.offline) return;
     setTabBusy('offline', true);
     const results = await Promise.allSettled([
-      apiFetch('/admin/notification/offline'),
+      apiFetch('/admin/notification/offline').then((data) => validateNotificationList(data, 'grace_period')),
       ensureClientsLoaded(),
     ]);
     const [offData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
     if (Array.isArray(offData)) setOfflineNotifications(offData as OfflineNotification[]);
     if (results.some((result) => result.status === 'rejected')) {
-      toast.error('离线通知数据加载失败，请稍后刷新');
+      setTabErrors((prev) => ({ ...prev, offline: '离线通知数据加载失败，状态未知，请重试' }));
     } else {
+      setTabErrors((prev) => ({ ...prev, offline: undefined }));
       markTabLoaded('offline');
     }
     setTabBusy('offline', false);
@@ -225,14 +268,15 @@ export default function AdminNotifications() {
     if (!force && loadedTabs.expiry) return;
     setTabBusy('expiry', true);
     const results = await Promise.allSettled([
-      apiFetch('/admin/notification/expiry'),
+      apiFetch('/admin/notification/expiry').then((data) => validateNotificationList(data, 'advance_days')),
       ensureClientsLoaded(),
     ]);
     const [expiryData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
     if (Array.isArray(expiryData)) setExpiryNotifications(expiryData as ExpiryNotification[]);
     if (results.some((result) => result.status === 'rejected')) {
-      toast.error('到期通知数据加载失败，请稍后刷新');
+      setTabErrors((prev) => ({ ...prev, expiry: '到期通知数据加载失败，状态未知，请重试' }));
     } else {
+      setTabErrors((prev) => ({ ...prev, expiry: undefined }));
       markTabLoaded('expiry');
     }
     setTabBusy('expiry', false);
@@ -242,19 +286,30 @@ export default function AdminNotifications() {
     if (!force && loadedTabs.load) return;
     setTabBusy('load', true);
     const results = await Promise.allSettled([
-      apiFetch('/admin/notification/load'),
+      apiFetch('/admin/notification/load').then((value: unknown) => {
+        if (!Array.isArray(value) || value.some(item => !item || typeof item !== 'object'
+          || !Number.isSafeInteger(item.id) || item.id <= 0
+          || !Number.isInteger(item.interval_min) || item.interval_min < 1
+          || (item.effective_interval_min !== undefined && (!Number.isInteger(item.effective_interval_min) || item.effective_interval_min < 1)))) {
+          throw new Error('负载通知数据格式异常');
+        }
+        return value;
+      }),
       ensureClientsLoaded(),
+      apiFetch('/admin/notification/load/policy').then(validateLoadPolicy),
     ]);
-    const [loadRulesData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    const [loadRulesData, , policyData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
     if (Array.isArray(loadRulesData)) {
       setLoadNotifications((loadRulesData as LoadNotification[]).map((item) => ({
         ...item,
         clients: Array.isArray(item.clients) ? item.clients : [],
       })));
     }
+    if (policyData) setLoadPolicy(policyData as LoadNotificationPolicy);
     if (results.some((result) => result.status === 'rejected')) {
-      toast.error('负载通知数据加载失败，请稍后刷新');
+      setTabErrors((prev) => ({ ...prev, load: '负载通知或采样策略读取失败，状态未知，请重试' }));
     } else {
+      setTabErrors((prev) => ({ ...prev, load: undefined }));
       markTabLoaded('load');
     }
     setTabBusy('load', false);
@@ -295,7 +350,14 @@ export default function AdminNotifications() {
   }, [clients, searchTerm]);
 
   // ─── Offline: toggle ───
+  const canEditOffline = loadedTabs.offline && !tabErrors.offline && !tabLoading.offline;
+  const canEditExpiry = loadedTabs.expiry && !tabErrors.expiry && !tabLoading.expiry;
+  const canEditLoad = loadedTabs.load && !!loadPolicy && !tabErrors.load && !tabLoading.load;
+  const loadIntervalInvalid = !Number.isInteger(loadForm.interval_min ?? 15)
+    || (loadForm.interval_min ?? 15) < (loadPolicy?.minimum_interval_min ?? 4)
+    || (loadForm.interval_min ?? 15) > 10080;
   const toggleOffline = (clientUuid: string, enable: boolean) => runAction('offline:' + clientUuid, async () => {
+    if (!canEditOffline) return;
     const result = await apiFetch('/admin/notification/offline/edit', {
       method: 'POST',
       body: JSON.stringify({ client: clientUuid, enable, grace_period: notificationMap.get(clientUuid)?.grace_period ?? DEFAULT_GRACE_PERIOD_SEC }),
@@ -310,6 +372,7 @@ export default function AdminNotifications() {
 
   // ─── Offline: single edit ───
   const openEditDialog = (clientUuid: string) => {
+    if (!canEditOffline) return;
     const existing = notificationMap.get(clientUuid);
     setEditingOffline(clientUuid);
     setEditForm({
@@ -320,6 +383,9 @@ export default function AdminNotifications() {
   };
 
   const saveSingleEdit = () => runAction('offline:edit', async () => {
+    const owner = offlineEditSession.capture();
+    if (!owner) return;
+    if (!canEditOffline) return;
     if (!editingOffline) return;
     const result = await apiFetch('/admin/notification/offline/edit', {
       method: 'POST',
@@ -331,7 +397,7 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success('已更新');
-      setEditDialogOpen(false);
+      if (offlineEditSession.isCurrent(owner)) setEditDialogOpen(false);
       await loadOfflineTab(true);
     } else {
       toast.error(result.error || '更新失败');
@@ -340,6 +406,7 @@ export default function AdminNotifications() {
 
   // ─── Offline: batch edit ───
   const openBatchDialog = () => {
+    if (!canEditOffline) return;
     if (selectedClients.length === 0) {
       toast.error('请先选择服务器');
       return;
@@ -358,6 +425,9 @@ export default function AdminNotifications() {
   };
 
   const saveBatchEdit = () => runAction('offline:batch', async () => {
+    const owner = offlineBatchSession.capture();
+    if (!owner) return;
+    if (!canEditOffline) return;
     const payload = selectedClients.map((uuid) => ({
       client: uuid,
       enable: batchForm.enable,
@@ -369,8 +439,8 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success(`已批量更新 ${selectedClients.length} 个节点`);
-      setBatchDialogOpen(false);
-      setSelectedClients([]);
+      if (offlineBatchSession.isCurrent(owner)) setBatchDialogOpen(false);
+      if (offlineBatchSession.isCurrent(owner)) setSelectedClients([]);
       await loadOfflineTab(true);
     } else {
       toast.error('批量更新失败');
@@ -386,10 +456,11 @@ export default function AdminNotifications() {
   };
 
   const toggleExpiry = (clientUuid: string, enable: boolean) => runAction('expiry:' + clientUuid, async () => {
+    if (!canEditExpiry) return;
     const existing = expiryNotificationMap.get(clientUuid);
     const result = await apiFetch('/admin/notification/expiry/edit', {
       method: 'POST',
-      body: JSON.stringify({ client: clientUuid, enable, advance_days: existing?.advance_days || 7 }),
+      body: JSON.stringify({ client: clientUuid, enable, advance_days: existing?.advance_days ?? DEFAULT_EXPIRY_ADVANCE_DAYS }),
     });
     if (result.success) {
       toast.success(enable ? '已开启到期通知' : '已关闭到期通知');
@@ -400,6 +471,7 @@ export default function AdminNotifications() {
   });
 
   const openExpiryEditDialog = (clientUuid: string) => {
+    if (!canEditExpiry) return;
     const existing = expiryNotificationMap.get(clientUuid);
     setEditingExpiry(clientUuid);
     setExpiryEditForm({
@@ -410,6 +482,9 @@ export default function AdminNotifications() {
   };
 
   const saveExpirySingleEdit = () => runAction('expiry:edit', async () => {
+    const owner = expiryEditSession.capture();
+    if (!owner) return;
+    if (!canEditExpiry) return;
     if (!editingExpiry) return;
     const result = await apiFetch('/admin/notification/expiry/edit', {
       method: 'POST',
@@ -421,7 +496,7 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success('已更新');
-      setExpiryEditDialogOpen(false);
+      if (expiryEditSession.isCurrent(owner)) setExpiryEditDialogOpen(false);
       await loadExpiryTab(true);
     } else {
       toast.error(result.error || '更新失败');
@@ -429,6 +504,7 @@ export default function AdminNotifications() {
   });
 
   const openExpiryBatchDialog = () => {
+    if (!canEditExpiry) return;
     if (selectedClients.length === 0) {
       toast.error('请先选择服务器');
       return;
@@ -445,6 +521,9 @@ export default function AdminNotifications() {
   };
 
   const saveExpiryBatchEdit = () => runAction('expiry:batch', async () => {
+    const owner = expiryBatchSession.capture();
+    if (!owner) return;
+    if (!canEditExpiry) return;
     const payload = selectedClients.map((uuid) => ({
       client: uuid,
       enable: expiryBatchForm.enable,
@@ -456,8 +535,8 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success(`已批量更新 ${selectedClients.length} 个节点`);
-      setExpiryBatchDialogOpen(false);
-      setSelectedClients([]);
+      if (expiryBatchSession.isCurrent(owner)) setExpiryBatchDialogOpen(false);
+      if (expiryBatchSession.isCurrent(owner)) setSelectedClients([]);
       await loadExpiryTab(true);
     } else {
       toast.error('批量更新失败');
@@ -532,7 +611,7 @@ export default function AdminNotifications() {
         body: JSON.stringify(changedSettings),
       });
       if (result.success) {
-        await loadSettingsTab(true);
+        await loadSettingsTab(true, settings);
         toast.success('通知设置已保存');
       } else {
         toast.error(result.error || '保存失败');
@@ -546,13 +625,14 @@ export default function AdminNotifications() {
 
   // ─── Load: crud ───
   const openLoadAdd = () => {
+    if (!canEditLoad || !loadPolicy) return;
     setEditingLoad(null);
     setLoadForm({
       name: '',
       metric: 'cpu',
       threshold: 80,
       ratio: 0.8,
-      interval_min: 15,
+      interval_min: Math.max(15, loadPolicy.minimum_interval_min),
       clients: [],
       all_clients: true,
     });
@@ -560,6 +640,7 @@ export default function AdminNotifications() {
   };
 
   const openLoadEdit = (item: LoadNotification) => {
+    if (!canEditLoad) return;
     setEditingLoad(item);
     setLoadForm({
       ...item,
@@ -569,6 +650,13 @@ export default function AdminNotifications() {
   };
 
   const saveLoadNotification = () => runAction('load:save', async () => {
+    const owner = loadEditSession.capture();
+    if (!owner) return;
+    if (!canEditLoad || !loadPolicy) return;
+    if (loadIntervalInvalid) {
+      toast.error(`统计窗口必须是 ${loadPolicy.minimum_interval_min} 到 10080 分钟之间的整数`);
+      return;
+    }
     if (!loadForm.all_clients && !loadForm.clients?.length) {
       toast.error('请至少选择一台服务器');
       return;
@@ -585,7 +673,7 @@ export default function AdminNotifications() {
       });
       if (result.success) {
         toast.success('已更新');
-        setLoadDialogOpen(false);
+        if (loadEditSession.isCurrent(owner)) setLoadDialogOpen(false);
         await loadLoadTab(true);
       } else {
         toast.error(result.error || '更新失败');
@@ -597,7 +685,7 @@ export default function AdminNotifications() {
       });
       if (result.success) {
         toast.success('已添加');
-        setLoadDialogOpen(false);
+        if (loadEditSession.isCurrent(owner)) setLoadDialogOpen(false);
         await loadLoadTab(true);
       } else {
         toast.error(result.error || '添加失败');
@@ -721,7 +809,7 @@ export default function AdminNotifications() {
     <Button
       variant="soft"
       onClick={openBatchDialog}
-      disabled={tabLoading.offline || selectedClients.length === 0}
+      disabled={!canEditOffline || selectedClients.length === 0}
     >
       <Pencil size={14} /> 批量编辑 ({selectedClients.length})
     </Button>
@@ -729,12 +817,12 @@ export default function AdminNotifications() {
     <Button
       variant="soft"
       onClick={openExpiryBatchDialog}
-      disabled={tabLoading.expiry || selectedClients.length === 0}
+      disabled={!canEditExpiry || selectedClients.length === 0}
     >
       <Pencil size={14} /> 批量编辑 ({selectedClients.length})
     </Button>
   ) : (
-    <Button onClick={openLoadAdd} disabled={tabLoading.load}><Plus size={14} /> 新建规则</Button>
+    <Button onClick={openLoadAdd} disabled={!canEditLoad}><Plus size={14} /> 新建规则</Button>
   );
 
   return (
@@ -1145,6 +1233,10 @@ export default function AdminNotifications() {
 
           {/* ─── Offline Tab ─── */}
           <Tabs.Content value="offline">
+            {tabErrors.offline && <Flex role="alert" align="center" gap="3" mb="3">
+              <Text color="red">{tabErrors.offline}</Text>
+              <Button variant="soft" disabled={tabLoading.offline} onClick={() => void loadOfflineTab(true)}>重试</Button>
+            </Flex>}
             {tabLoading.offline ? (
               <Loading />
             ) : (
@@ -1160,6 +1252,7 @@ export default function AdminNotifications() {
                   <Table.Row>
                     <Table.ColumnHeaderCell width="40px">
                       <Checkbox
+                        aria-label="选择当前筛选的全部服务器"
                         checked={selectedClients.length === filteredClients.length && filteredClients.length > 0}
                         onCheckedChange={toggleSelectAll}
                       />
@@ -1188,6 +1281,7 @@ export default function AdminNotifications() {
                       <Table.Row key={client.uuid}>
                         <Table.Cell>
                           <Checkbox
+                            aria-label={`选择 ${client.name || client.uuid}`}
                             checked={selectedClients.includes(client.uuid)}
                             onCheckedChange={(checked) => {
                               if (checked) {
@@ -1204,20 +1298,22 @@ export default function AdminNotifications() {
                         </Table.Cell>
                         <Table.Cell>
                           <Switch
+                            aria-label={`${client.name || client.uuid} 的离线通知`}
                             size="1"
                             checked={enabled}
                             onCheckedChange={(v) => toggleOffline(client.uuid, v)}
-                            disabled={pendingActions.has(`offline:${client.uuid}`)}
+                            disabled={!canEditOffline || pendingActions.has(`offline:${client.uuid}`)}
                           />
+                          {!canEditOffline && <Text size="1" color="gray">状态未知</Text>}
                         </Table.Cell>
                         <Table.Cell>
-                          <Text size="2">{gracePeriod}</Text>
+                          <Text size="2">{canEditOffline ? gracePeriod : '—'}</Text>
                         </Table.Cell>
                         <Table.Cell>
                           <Text size="1" color="gray">{lastNotifiedText}</Text>
                         </Table.Cell>
                         <Table.Cell>
-                          <Button size="1" variant="soft" onClick={() => openEditDialog(client.uuid)}>
+                          <Button size="1" variant="soft" disabled={!canEditOffline} onClick={() => openEditDialog(client.uuid)}>
                             <Pencil size={13} /> 编辑
                           </Button>
                         </Table.Cell>
@@ -1234,6 +1330,10 @@ export default function AdminNotifications() {
 
           {/* ─── Expiry Tab ─── */}
           <Tabs.Content value="expiry">
+            {tabErrors.expiry && <Flex role="alert" align="center" gap="3" mb="3">
+              <Text color="red">{tabErrors.expiry}</Text>
+              <Button variant="soft" disabled={tabLoading.expiry} onClick={() => void loadExpiryTab(true)}>重试</Button>
+            </Flex>}
             {tabLoading.expiry ? (
               <Loading />
             ) : (
@@ -1249,6 +1349,7 @@ export default function AdminNotifications() {
                   <Table.Row>
                     <Table.ColumnHeaderCell width="40px">
                       <Checkbox
+                        aria-label="选择当前筛选的全部服务器"
                         checked={selectedClients.length === filteredClients.length && filteredClients.length > 0}
                         onCheckedChange={toggleSelectAll}
                       />
@@ -1281,6 +1382,7 @@ export default function AdminNotifications() {
                       <Table.Row key={client.uuid}>
                         <Table.Cell>
                           <Checkbox
+                            aria-label={`选择 ${client.name || client.uuid}`}
                             checked={selectedClients.includes(client.uuid)}
                             onCheckedChange={(checked) => {
                               if (checked) {
@@ -1297,14 +1399,16 @@ export default function AdminNotifications() {
                         </Table.Cell>
                         <Table.Cell>
                           <Switch
+                            aria-label={`${client.name || client.uuid} 的到期通知`}
                             size="1"
                             checked={enabled}
                             onCheckedChange={(v) => toggleExpiry(client.uuid, v)}
-                            disabled={pendingActions.has(`expiry:${client.uuid}`)}
+                            disabled={!canEditExpiry || pendingActions.has(`expiry:${client.uuid}`)}
                           />
+                          {!canEditExpiry && <Text size="1" color="gray">状态未知</Text>}
                         </Table.Cell>
                         <Table.Cell>
-                          <Text size="2">{advanceDays} 天</Text>
+                          <Text size="2">{canEditExpiry ? `${advanceDays} 天` : '—'}</Text>
                         </Table.Cell>
                         <Table.Cell>
                           <Text size="1" color={client.expired_at ? 'gray' : 'amber'}>{expiredAtText}</Text>
@@ -1313,7 +1417,7 @@ export default function AdminNotifications() {
                           <Text size="1" color="gray">{lastNotifiedText}</Text>
                         </Table.Cell>
                         <Table.Cell>
-                          <Button size="1" variant="soft" onClick={() => openExpiryEditDialog(client.uuid)}>
+                          <Button size="1" variant="soft" disabled={!canEditExpiry} onClick={() => openExpiryEditDialog(client.uuid)}>
                             <Pencil size={13} /> 编辑
                           </Button>
                         </Table.Cell>
@@ -1330,13 +1434,26 @@ export default function AdminNotifications() {
 
           {/* ─── Load Tab ─── */}
           <Tabs.Content value="load">
+            {tabErrors.load && (
+              <Flex gap="2" align="center" mb="3">
+                <Text role="alert" color="red" size="2">{tabErrors.load}</Text>
+                <Button size="1" variant="soft" onClick={() => void loadLoadTab(true)} disabled={tabLoading.load}>重试</Button>
+              </Flex>
+            )}
+            {loadPolicy && !tabErrors.load && (
+              <Text as="p" size="2" color={loadPolicy.history_enabled ? 'gray' : 'amber'} mb="3">
+                {loadPolicy.history_enabled
+                  ? `稳定上报时，约每 ${loadPolicy.sample_interval_sec} 秒留存一个样本，统计窗口至少 ${loadPolicy.minimum_interval_min} 分钟；不足两条有效样本时不触发。重复通知间隔与统计窗口相同。`
+                  : '历史记录已关闭，负载告警已暂停；启用历史记录并累积足够样本后恢复。'}
+              </Text>
+            )}
             {tabLoading.load ? (
               <Loading />
             ) : loadNotifications.length === 0 ? (
               <Flex justify="center" py="6" direction="column" align="center" gap="2">
                 <TrendingUp size={32} color="var(--gray-6)" />
                 <Text color="gray">暂无负载通知规则</Text>
-                <Button variant="soft" size="1" onClick={openLoadAdd}><Plus size={14} /> 新建规则</Button>
+                <Button variant="soft" size="1" onClick={openLoadAdd} disabled={!canEditLoad}><Plus size={14} /> 新建规则</Button>
               </Flex>
             ) : (
               <div style={{ maxHeight: 'calc(100vh - 320px)', overflow: 'auto' }}>
@@ -1347,7 +1464,7 @@ export default function AdminNotifications() {
                     <Table.ColumnHeaderCell width="88px"><NotificationTableHeader label="指标" /></Table.ColumnHeaderCell>
                     <Table.ColumnHeaderCell width="88px"><NotificationTableHeader label="阈值" unit="%" /></Table.ColumnHeaderCell>
                     <Table.ColumnHeaderCell width="88px"><NotificationTableHeader label="达标率" /></Table.ColumnHeaderCell>
-                    <Table.ColumnHeaderCell width="112px"><NotificationTableHeader label="监测间隔" unit="分钟" /></Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="144px"><NotificationTableHeader label="统计窗口" unit="分钟" /></Table.ColumnHeaderCell>
                     <Table.ColumnHeaderCell width="100px"><NotificationTableHeader label="范围" /></Table.ColumnHeaderCell>
                     <Table.ColumnHeaderCell width="132px"><NotificationTableHeader label="操作" /></Table.ColumnHeaderCell>
                   </Table.Row>
@@ -1367,7 +1484,12 @@ export default function AdminNotifications() {
                       <Table.Cell><Badge variant="soft" size="1">{item.metric || 'cpu'}</Badge></Table.Cell>
                       <Table.Cell><Text size="2">{item.threshold ?? 80}{loadMetricUnit(item.metric)}</Text></Table.Cell>
                       <Table.Cell><Text size="2">{((item.ratio ?? 0.8) * 100).toFixed(0)}%</Text></Table.Cell>
-                      <Table.Cell><Text size="2">{item.interval_min || 15} min</Text></Table.Cell>
+                      <Table.Cell>
+                        <Text as="div" size="2">{canEditLoad ? `生效 ${effectiveLoadInterval(item, loadPolicy)} 分钟` : '状态未知'}</Text>
+                        {canEditLoad && effectiveLoadInterval(item, loadPolicy) > (item.interval_min ?? 15) && (
+                          <Text as="div" size="1" color="amber">原设 {item.interval_min} 分钟，已按采样策略扩大</Text>
+                        )}
+                      </Table.Cell>
                       <Table.Cell>
                         <Badge variant="soft" size="1" color={item.all_clients || !item.clients || item.clients.length === 0 ? 'blue' : 'amber'}>
                           {item.all_clients || !item.clients || item.clients.length === 0 ? '全节点' : `${item.clients?.length || 0} 节点`}
@@ -1375,7 +1497,7 @@ export default function AdminNotifications() {
                       </Table.Cell>
                       <Table.Cell>
                         <Flex gap="1" wrap="nowrap" style={{ whiteSpace: 'nowrap' }}>
-                          <Button size="1" variant="soft" onClick={() => openLoadEdit(item)}>
+                          <Button size="1" variant="soft" onClick={() => openLoadEdit(item)} disabled={!canEditLoad}>
                             <Pencil size={13} /> 编辑
                           </Button>
                           <Button size="1" variant="soft" color="red" onClick={() => deleteLoadNotification(item.id)} disabled={pendingActions.has(`load:delete:${item.id}`)}>
@@ -1602,15 +1724,20 @@ export default function AdminNotifications() {
               </label>
             </Flex>
             <label>
-              <Text size="2" weight="bold">监测间隔 (分钟)</Text>
+              <Text size="2" weight="bold">统计窗口 (分钟)</Text>
               <TextField.Root
                 type="number"
-                min={1}
-                max={240}
-                value={loadForm.interval_min || 15}
+                min={loadPolicy?.minimum_interval_min ?? 4}
+                max={10080}
+                aria-invalid={loadIntervalInvalid}
+                aria-describedby="load-window-help"
+                value={loadForm.interval_min ?? 15}
                 onChange={(e) => setLoadForm({ ...loadForm, interval_min: Number(e.target.value) })}
                 mt="1"
               />
+              <Text as="p" id="load-window-help" role={loadIntervalInvalid ? 'alert' : undefined} size="1" color={loadIntervalInvalid ? 'red' : 'gray'} mt="1">
+                当前采样策略要求至少 {loadPolicy?.minimum_interval_min ?? 4} 分钟，以覆盖两次采样。重复通知间隔与统计窗口相同。
+              </Text>
             </label>
             <label>
               <Flex align="center" gap="2">
@@ -1646,7 +1773,7 @@ export default function AdminNotifications() {
           </Flex>
           <Flex gap="2" justify="end" mt="4">
             <Button variant="soft" color="gray" onClick={() => setLoadDialogOpen(false)}>取消</Button>
-            <Button onClick={saveLoadNotification} disabled={pendingActions.has('load:save')}>{editingLoad ? '保存' : '创建'}</Button>
+            <Button onClick={saveLoadNotification} disabled={!canEditLoad || loadIntervalInvalid || pendingActions.has('load:save')}>{editingLoad ? '保存' : '创建'}</Button>
           </Flex>
         </Dialog.Content>
       </Dialog.Root>

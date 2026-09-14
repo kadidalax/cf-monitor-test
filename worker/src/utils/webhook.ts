@@ -3,6 +3,7 @@ import { currentScheduledBudget, scheduledFetch, ScheduledBudgetExceeded } from 
 
 export const WEBHOOK_MESSAGE_MAX_CHARS = 4000;
 export const WEBHOOK_DISCORD_MAX_CHARS = 1900;
+export const WEBHOOK_WECOM_MAX_BYTES = 2048;
 export const WEBHOOK_RESPONSE_ERROR_MAX_CHARS = 1024;
 export const WEBHOOK_TIMEOUT_MS = 5000;
 const WEBHOOK_PROVIDER_RESPONSE_MAX_BYTES = 16 * 1024;
@@ -119,6 +120,19 @@ export function validateWebhookUrl(
 
 function truncateMessage(value: string, max: number): string {
   return value.length > max ? value.slice(0, max) : value;
+}
+
+function truncateUtf8Message(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const size = encoder.encode(character).byteLength;
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    end += character.length;
+  }
+  return value.slice(0, end);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -253,7 +267,9 @@ export async function buildWebhookRequest(config: WebhookConfig, notification: N
   if (!validated.ok) throw new Error(validated.error);
 
   const timestamp = Math.floor(nowMs / 1000).toString();
-  const text = truncateMessage(notification.body, config.format === 'discord' ? WEBHOOK_DISCORD_MAX_CHARS : WEBHOOK_MESSAGE_MAX_CHARS);
+  const text = config.format === 'wecom'
+    ? truncateUtf8Message(notification.body, WEBHOOK_WECOM_MAX_BYTES)
+    : truncateMessage(notification.body, config.format === 'discord' ? WEBHOOK_DISCORD_MAX_CHARS : WEBHOOK_MESSAGE_MAX_CHARS);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   let requestUrl = validated.url;
   let bodyObject: unknown;
@@ -262,9 +278,13 @@ export async function buildWebhookRequest(config: WebhookConfig, notification: N
     case 'slack':
       bodyObject = { text };
       break;
-    case 'discord':
+    case 'discord': {
+      const url = new URL(validated.url);
+      url.searchParams.set('wait', 'true');
+      requestUrl = url.toString();
       bodyObject = { content: text, allowed_mentions: { parse: [] } };
       break;
+    }
     case 'feishu':
       bodyObject = { msg_type: 'text', content: { text } };
       if (config.secret) {
@@ -312,9 +332,10 @@ function normalizeErrorBodyText(value: string): string {
 }
 
 async function readErrorBody(response: Response): Promise<string> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     if (!response.body) return '';
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
     while (size < WEBHOOK_RESPONSE_ERROR_MAX_CHARS) {
@@ -325,10 +346,6 @@ async function readErrorBody(response: Response): Promise<string> {
       const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value;
       chunks.push(chunk);
       size += chunk.byteLength;
-      if (value.byteLength > remaining) {
-        await reader.cancel().catch(() => undefined);
-        break;
-      }
     }
     const bytes = new Uint8Array(size);
     let offset = 0;
@@ -339,14 +356,19 @@ async function readErrorBody(response: Response): Promise<string> {
     return normalizeErrorBodyText(new TextDecoder().decode(bytes));
   } catch {
     return '';
+  } finally {
+    if (reader) {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
   }
 }
 
-type BusinessWebhookFormat = 'feishu' | 'dingtalk' | 'wecom';
+type BusinessWebhookFormat = 'feishu' | 'dingtalk' | 'wecom' | 'discord';
 type BusinessResponse = { ok: true } | { ok: false; error: string; retryable: boolean };
 
 function isBusinessWebhookFormat(format: WebhookFormat): format is BusinessWebhookFormat {
-  return format === 'feishu' || format === 'dingtalk' || format === 'wecom';
+  return format === 'feishu' || format === 'dingtalk' || format === 'wecom' || format === 'discord';
 }
 
 async function readBusinessResponse(response: Response, format: BusinessWebhookFormat): Promise<BusinessResponse> {
@@ -381,7 +403,13 @@ async function readBusinessResponse(response: Response, format: BusinessWebhookF
     return invalid;
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid;
-  const code = (value as Record<string, unknown>)[format === 'feishu' ? 'code' : 'errcode'];
+  const message = value as Record<string, unknown>;
+  if (format === 'discord') {
+    const confirmed = ['id', 'channel_id'].every(field =>
+      typeof message[field] === 'string' && /^[1-9]\d{0,19}$/.test(message[field]));
+    return confirmed ? { ok: true } : invalid;
+  }
+  const code = message[format === 'feishu' ? 'code' : 'errcode'];
   if (code === 0 || (format === 'dingtalk' && code === '0')) return { ok: true };
   if (typeof code !== 'number' || !Number.isSafeInteger(code)) return invalid;
   const retryable = format === 'feishu' ? code === 11232

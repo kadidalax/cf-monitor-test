@@ -87,6 +87,10 @@ func cgroupAncestorPaths(root, leaf string) []string {
 }
 
 func memoryCgroupPaths(cgroupRoot, procSelfCgroup string) []cgroupMemoryPath {
+	return controllerCgroupPaths(cgroupRoot, procSelfCgroup, "memory")
+}
+
+func controllerCgroupPaths(cgroupRoot, procSelfCgroup, controller string) []cgroupMemoryPath {
 	data, err := os.ReadFile(procSelfCgroup)
 	if err != nil {
 		return nil
@@ -102,7 +106,7 @@ func memoryCgroupPaths(cgroupRoot, procSelfCgroup string) []cgroupMemoryPath {
 			continue
 		}
 		v2 := fields[1] == ""
-		if !v2 && !strings.Contains(","+fields[1]+",", ",memory,") {
+		if !v2 && !strings.Contains(","+fields[1]+",", ","+controller+",") {
 			continue
 		}
 		processPath := fields[2]
@@ -112,13 +116,13 @@ func memoryCgroupPaths(cgroupRoot, procSelfCgroup string) []cgroupMemoryPath {
 			continue
 		}
 		if mountErr == nil {
-			result = append(result, mountedMemoryCgroups(string(mountData), processPath, v2)...)
+			result = append(result, mountedControllerCgroups(string(mountData), processPath, v2, controller)...)
 			continue
 		}
 		// Compatibility for systems without mountinfo and synthetic fixtures.
 		roots := []string{cgroupRoot}
 		if !v2 {
-			roots = []string{filepath.Join(cgroupRoot, "memory"), cgroupRoot}
+			roots = []string{filepath.Join(cgroupRoot, fields[1]), filepath.Join(cgroupRoot, controller), cgroupRoot}
 		}
 		for _, root := range roots {
 			leaf := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(processPath, "/")))
@@ -131,6 +135,10 @@ func memoryCgroupPaths(cgroupRoot, procSelfCgroup string) []cgroupMemoryPath {
 }
 
 func mountedMemoryCgroups(mountinfo, processPath string, v2 bool) []cgroupMemoryPath {
+	return mountedControllerCgroups(mountinfo, processPath, v2, "memory")
+}
+
+func mountedControllerCgroups(mountinfo, processPath string, v2 bool, controller string) []cgroupMemoryPath {
 	type candidate struct {
 		group cgroupMemoryPath
 		depth int
@@ -146,7 +154,7 @@ func mountedMemoryCgroups(mountinfo, processPath string, v2 bool) []cgroupMemory
 		if len(before) < 6 || len(after) < 3 {
 			continue
 		}
-		if (v2 && after[0] != "cgroup2") || (!v2 && (after[0] != "cgroup" || !strings.Contains(","+after[2]+",", ",memory,"))) {
+		if (v2 && after[0] != "cgroup2") || (!v2 && (after[0] != "cgroup" || !strings.Contains(","+after[2]+",", ","+controller+","))) {
 			continue
 		}
 		mountRoot, mountPoint := unescape.Replace(before[3]), unescape.Replace(before[4])

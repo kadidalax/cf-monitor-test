@@ -2,23 +2,28 @@ import type { GPUInfo, MonitorRecord } from '../db/queries';
 
 type JsonObject = Record<string, unknown>;
 
+type MetricErrors = Partial<Record<'cpu' | 'ram' | 'swap' | 'network',
+  'collection_failed' | 'container_scope_unavailable' | 'warming_up'>>;
+
 export type MonitorReportPayload = JsonObject & {
-  cpu: number;
+  cpu: number | null;
+  cpu_capacity?: number;
+  metric_errors?: MetricErrors;
   gpu: number;
-  ram: number;
-  ram_total: number;
-  swap: number;
-  swap_total: number;
+  ram: number | null;
+  ram_total: number | null;
+  swap: number | null;
+  swap_total: number | null;
   load: number | null;
   temp: number | null;
   disk: number | null;
   disk_total: number | null;
   disk_source?: 'directory';
   disk_sampled_at?: number;
-  net_in: number;
-  net_out: number;
-  net_total_up: number;
-  net_total_down: number;
+  net_in: number | null;
+  net_out: number | null;
+  net_total_up: number | null;
+  net_total_down: number | null;
   process_count: number;
   connections: number;
   connections_udp: number;
@@ -77,6 +82,25 @@ function boundedNullableNumber(min: number, max: number, primary: unknown, ...fa
   return boundedNumber(min, max, primary, ...fallbacks);
 }
 
+// The public and durable representations share this fixed vocabulary; raw
+// collection errors can contain host details and must never be forwarded.
+export function selectMetricAvailability(report: JsonObject): Pick<MonitorReportPayload, 'cpu_capacity' | 'metric_errors'> {
+  const result: Pick<MonitorReportPayload, 'cpu_capacity' | 'metric_errors'> = {};
+  if (typeof report.cpu_capacity === 'number' && Number.isFinite(report.cpu_capacity) && report.cpu_capacity > 0) {
+    result.cpu_capacity = report.cpu_capacity;
+  }
+  const errors = asObject(report.metric_errors);
+  const metricErrors: MetricErrors = {};
+  for (const metric of ['cpu', 'ram', 'swap', 'network'] as const) {
+    const reason = errors[metric];
+    if (reason === 'collection_failed' || reason === 'container_scope_unavailable' || reason === 'warming_up') {
+      metricErrors[metric] = reason;
+    }
+  }
+  if (Object.keys(metricErrors).length) result.metric_errors = metricErrors;
+  return result;
+}
+
 function measuredTemperature(value: unknown): number | null {
   const temperature = numberFrom(value);
   return temperature !== undefined && temperature >= -100 && temperature <= MAX_TEMPERATURE_C
@@ -124,20 +148,20 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
 
   const normalized: MonitorReportPayload = {
     ...report,
-    cpu: boundedNumber(0, MAX_PERCENT, report.cpu, cpu.usage),
+    cpu: boundedNullableNumber(0, MAX_PERCENT, report.cpu, cpu.usage),
     gpu: boundedNumber(0, MAX_PERCENT, report.gpu, gpuData.average_usage),
-    ram: boundedNumber(0, MAX_COUNTER_VALUE, report.ram, ram.used),
-    ram_total: boundedNumber(0, MAX_COUNTER_VALUE, report.ram_total, ram.total),
-    swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
-    swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
+    ram: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.ram, ram.used),
+    ram_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.ram_total, ram.total),
+    swap: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
+    swap_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
     load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
     temp: measuredTemperature(report.temp),
     disk: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
     disk_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
-    net_in: boundedNumber(0, MAX_COUNTER_VALUE, report.net_in, network.down),
-    net_out: boundedNumber(0, MAX_COUNTER_VALUE, report.net_out, network.up),
-    net_total_up: boundedNumber(0, MAX_COUNTER_VALUE, report.net_total_up, network.totalUp),
-    net_total_down: boundedNumber(0, MAX_COUNTER_VALUE, report.net_total_down, network.totalDown),
+    net_in: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.net_in, network.down),
+    net_out: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.net_out, network.up),
+    net_total_up: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.net_total_up, network.totalUp),
+    net_total_down: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.net_total_down, network.totalDown),
     process_count: boundedInteger(0, MAX_COUNT_VALUE, report.process_count, report.process),
     connections: boundedInteger(0, MAX_COUNT_VALUE, report.connections, connections.tcp),
     connections_udp: boundedInteger(0, MAX_COUNT_VALUE, report.connections_udp, connections.udp),
@@ -145,6 +169,10 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     version: boundedString(report.version, 64),
     gpus,
   };
+  const availability = selectMetricAvailability(normalized);
+  delete normalized.cpu_capacity;
+  delete normalized.metric_errors;
+  Object.assign(normalized, availability);
   // Cached measurements carry their own sampling clock, independent of the
   // Agent report/Worker receipt clocks. An invalid pair must not look native.
   delete normalized.disk_source;
@@ -173,20 +201,20 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
   return {
     client,
     time,
-    cpu: report.cpu || 0,
+    cpu: report.cpu,
     gpu: report.gpu || 0,
-    ram: report.ram || 0,
-    ram_total: report.ram_total || 0,
-    swap: report.swap || 0,
-    swap_total: report.swap_total || 0,
+    ram: report.ram,
+    ram_total: report.ram_total,
+    swap: report.swap,
+    swap_total: report.swap_total,
     load: report.load ?? null,
     temp: report.temp,
     disk: report.disk ?? 0,
     disk_total: diskAvailable ? report.disk_total || 0 : 0,
-    net_in: report.net_in || 0,
-    net_out: report.net_out || 0,
-    net_total_up: report.net_total_up || 0,
-    net_total_down: report.net_total_down || 0,
+    net_in: report.net_in,
+    net_out: report.net_out,
+    net_total_up: report.net_total_up,
+    net_total_down: report.net_total_down,
     process_count: report.process_count || 0,
     connections: report.connections || 0,
     connections_udp: report.connections_udp || 0,

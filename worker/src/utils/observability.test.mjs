@@ -34,6 +34,8 @@ function createScheduledHealthFixture({ failLoad = false } = {}) {
       listOfflineNotifications: async () => [],
       listExpiryNotifications: async () => [],
       listDueWebsiteMonitors: async () => [],
+      listPendingWebsiteNotifications: async () => [],
+      listPendingClientSyncs: async () => [],
       listClients: async () => [],
       tryClaimAuditThrottle: async () => true,
       insertAuditLog: async (_database, user, action, detail, level) => { audits.push({ user, action, detail, level }); },
@@ -163,7 +165,7 @@ before(async () => {
 });
 
 test('注册表本身无重复', () => {
-  assert.equal(STORED_HEALTH_COMPONENTS.length, 18, '注册表条数变了：确认是有意增删，再改这个数字');
+  assert.equal(STORED_HEALTH_COMPONENTS.length, 19, '注册表条数变了：确认是有意增删，再改这个数字');
   assert.equal(
     new Set(STORED_HEALTH_COMPONENTS).size,
     STORED_HEALTH_COMPONENTS.length,

@@ -92,10 +92,10 @@ function normalizeReleaseTag(value?: string | null) {
 export function normalizeProxyUrl(value: string, allowPath = true) {
   const raw = value.trim();
   if (!raw) return '';
-  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `${allowPath ? 'https' : 'http'}://${raw}`;
   try {
     const url = new URL(withScheme);
-    if ((url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password && url.hostname && !url.search && !url.hash) {
+    if ((url.protocol === 'https:' || (!allowPath && url.protocol === 'http:')) && !url.username && !url.password && url.hostname && !url.search && !url.hash) {
       const path = allowPath && url.pathname !== '/' ? url.pathname.replace(/\/+$/g, '') : '';
       return `${url.origin}${path}`;
     }
@@ -123,7 +123,7 @@ export function cfMonitorAgentScriptRefFromRevision(revision?: string | null) {
 
 export function cfMonitorAgentScriptUrl(
   scriptFile: 'install.sh' | 'install-linux.sh' | 'install-windows.ps1',
-  ghproxy = '',
+  _ghproxy = '',
   releaseTag = '',
   scriptRef = '',
 ) {
@@ -132,7 +132,7 @@ export function cfMonitorAgentScriptUrl(
   const base = tag
       ? `https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${tag}`
       : `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${ref}/agent`;
-  return proxiedUrl(`${base}/${scriptFile}`, ghproxy);
+  return `${base}/${scriptFile}`;
 }
 
 export function cfMonitorAgentBinaryUrl(platform: AgentInstallPlatform, ghproxy = '') {
@@ -174,8 +174,14 @@ function normalizeInstanceId(value?: string) {
   return (cleaned || 'default').slice(0, 48);
 }
 
-function shPipe(downloadCommand: string, args: string[]) {
-  return `${downloadCommand} | sh -s -- ${args.map(shellQuote).join(' ')}`;
+function shellDownloadAndRun(url: string, args: string[], proxy = '') {
+  const proxyArg = proxy ? ` --proxy ${shellQuote(proxy)}` : '';
+  return `(set -eu; umask 077; d=$(mktemp -d "\${TMPDIR:-/tmp}/cf-monitor-install.XXXXXX"); trap 'rm -f "$d/install.sh"; rmdir "$d"' 0; curl -fsSL --proto '=https' --proto-redir '=https' --retry 3${proxyArg} -o "$d/install.sh" ${shellQuote(url)}; test -s "$d/install.sh"; sh "$d/install.sh" ${args.map(shellQuote).join(' ')})`;
+}
+
+function powershellDownloadAndRun(url: string, args: string, proxy = '') {
+  const proxyArg = proxy ? ` -Proxy ${psQuote(proxy)}` : '';
+  return powershellCommand(`$ErrorActionPreference='Stop'; $d=Join-Path ([IO.Path]::GetTempPath()) ('cf-monitor-install-'+[Guid]::NewGuid().ToString('N')); $p=Join-Path $d 'install-windows.ps1'; try { $null=New-Item -ItemType Directory -Path $d; $u=[uri]${psQuote(url)}; for($i=0;$i -lt 10;$i++){ if($u.Scheme -ne 'https' -or $u.UserInfo){throw 'HTTPS download required'}; try { $r=Invoke-WebRequest -Uri $u -UseBasicParsing -OutFile $p -PassThru -MaximumRedirection 0 -ErrorAction Stop${proxyArg} } catch { $r=$_.Exception.Response; if(!$r -or [int]$r.StatusCode -notin 301,302,303,307,308){throw} }; if([int]$r.StatusCode -in 301,302,303,307,308){ if(!$r.Headers.Location){throw 'Missing redirect location'}; $u=[uri]::new($u,[string]$r.Headers.Location); continue }; if([int]$r.StatusCode -ne 200){throw 'Download failed'}; break }; if($i -eq 10 -or !(Test-Path -LiteralPath $p -PathType Leaf) -or (Get-Item -LiteralPath $p).Length -eq 0){throw 'Incomplete download'}; $global:LASTEXITCODE=0; & $p ${args}; exit $LASTEXITCODE } catch { Write-Error 'Agent installer download or execution failed' -ErrorAction Continue; exit 1 } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue }`);
 }
 
 export function buildAgentInstallCommand({
@@ -227,10 +233,7 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return shPipe(
-        `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef))}`,
-        args,
-      );
+      return shellDownloadAndRun(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef), args, downloadProxy);
     }
     case 'windows': {
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
@@ -248,9 +251,7 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('-MountExclude', mountExclude);
       if (nicInclude) args.push('-NicInclude', nicInclude);
       if (nicExclude) args.push('-NicExclude', nicExclude);
-      return powershellCommand(
-        `iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}`,
-      );
+      return powershellDownloadAndRun(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef), args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' '), downloadProxy);
     }
     default:
       return '';
@@ -271,13 +272,11 @@ export function buildAgentUninstallAllCommand({
     cfMonitorAgentScriptUrl(file, proxy, '', scriptRef);
   switch (platform) {
     case 'windows':
-      return powershellCommand(
-        `iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes`,
-      );
+      return powershellDownloadAndRun(scriptUrl('install-windows.ps1'), '-UninstallAll -Yes');
     case 'unix':
     default:
-      return shPipe(
-        `wget -qO- ${shellQuote(scriptUrl('install.sh'))}`,
+      return shellDownloadAndRun(
+        scriptUrl('install.sh'),
         ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
       );
   }

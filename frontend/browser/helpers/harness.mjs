@@ -65,7 +65,7 @@ export function fixture() {
   };
 }
 
-export async function createHarness({ selection = 'ALL', playwrightModule } = {}) {
+export async function createHarness({ selection = 'ALL', playwrightModule, production = process.argv.includes('--production') } = {}) {
   let modulePath;
   try {
     modulePath = playwrightModule ? resolve(playwrightModule) : require.resolve('playwright');
@@ -73,14 +73,20 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
     throw new Error('Browser fixture prerequisite: install Playwright locally or pass --playwright-module <installed entry point>.', { cause: error });
   }
   const { chromium } = await import(pathToFileURL(modulePath).href);
-  const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
+  const { createServer, preview } = await import(pathToFileURL(require.resolve('vite')).href);
   const { default: react } = await import(pathToFileURL(require.resolve('@vitejs/plugin-react')).href);
   const temporaryRoot = join(project, '.tmp', 'frontend-reaudit-browser');
   const envDir = join(temporaryRoot, 'empty-env');
   await mkdir(envDir, { recursive: true });
   process.chdir(frontend);
   const startedAt = new Date().toISOString();
-  const server = await createServer({
+  const previewServer = production ? await preview({ root: frontend, configFile: false, envDir,
+    preview: { host: '127.0.0.1', port: 0, strictPort: false }, logLevel: 'error' }) : null;
+  const server = previewServer ? {
+    resolvedUrls: previewServer.resolvedUrls,
+    listen: async () => {},
+    close: () => new Promise((resolve, reject) => previewServer.httpServer.close(error => error ? reject(error) : resolve())),
+  } : await createServer({
     root: frontend, configFile: false, envDir,
     cacheDir: join(temporaryRoot, 'vite-cache'), plugins: [react()],
     define: { __BUILD_TIME__: JSON.stringify(startedAt) },
@@ -226,8 +232,11 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
   }
 
   async function finish() {
-    const receipt = { startedAt, finishedAt: new Date().toISOString(), browser: await browser.version(), selection, sourceMode: 'Current Vite source; empty environment; synthetic API interception; external requests blocked', results };
-    console.log(JSON.stringify(receipt, null, 2));
+    const receipt = { startedAt, finishedAt: new Date().toISOString(), browser: await browser.version(), selection, sourceMode: `${production ? 'Current production build' : 'Current Vite source'}; empty environment; synthetic API interception; external requests blocked`, results };
+    console.log(JSON.stringify(receipt, (key, value) => {
+      if (/password|secret|token|authorization|csrf|challenge|recovery_codes|^code$|_key$/i.test(key)) return value ? '[redacted]' : value;
+      return value;
+    }, 2));
     await browser.close();
     await server.close();
     if (!results.length) throw new Error(`No browser tests selected: ${selection}`);

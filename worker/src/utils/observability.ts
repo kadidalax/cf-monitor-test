@@ -48,6 +48,7 @@ export const STORED_HEALTH_COMPONENTS = [
   'webhook',
   'notification',
   'cron_cleanup',
+  'cron_client_sync',
   'cron_load',
   'cron_offline',
   'cron_expiry',

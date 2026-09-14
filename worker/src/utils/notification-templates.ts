@@ -1,3 +1,5 @@
+import type { LoadNotificationMetric } from '../db/types.ts';
+
 export type NotificationMessage = {
   subject: string;
   body: string;
@@ -108,6 +110,7 @@ export function buildExpiryNotification(input: {
 export function buildLoadNotification(input: {
   ruleName: string;
   nodeName: string;
+  metric: LoadNotificationMetric;
   metricLabel: string;
   avgValue: number;
   threshold: number;
@@ -115,11 +118,12 @@ export function buildLoadNotification(input: {
   requiredRatio: number;
   eventTime?: string | Date;
 }): NotificationMessage {
+  const unit = input.metric === 'temp' ? '°C' : input.metric === 'load' ? '' : '%';
   return eventMessage({
     emoji: '⚠️',
     event: '负载告警',
     clients: input.nodeName,
-    message: `${input.ruleName || `${input.metricLabel} 告警`}；${input.metricLabel} 平均 ${input.avgValue.toFixed(1)}% (阈值 ${input.threshold}%)；超标率 ${(input.exceedRatio * 100).toFixed(0)}% / ${(input.requiredRatio * 100).toFixed(0)}%`,
+    message: `${input.ruleName || `${input.metricLabel} 告警`}；${input.metricLabel} 平均 ${input.avgValue.toFixed(1)}${unit} (阈值 ${input.threshold}${unit})；超标率 ${(input.exceedRatio * 100).toFixed(0)}% / ${(input.requiredRatio * 100).toFixed(0)}%`,
     time: input.eventTime,
   });
 }
@@ -143,7 +147,7 @@ export function buildWebsiteAlertNotification(input: {
 export function buildWebsiteRecoveryNotification(input: {
   name: string;
   url: string;
-  downMinutes: number;
+  downMinutes: number | null;
   statusCode: number | null;
   latencyMs: number | null;
   eventTime?: string | Date;
@@ -152,7 +156,7 @@ export function buildWebsiteRecoveryNotification(input: {
     emoji: '🟢',
     event: '网站恢复',
     clients: input.name,
-    message: `${input.url}；HTTP ${input.statusCode ?? 'unknown'}；延迟 ${input.latencyMs ?? 0}ms；故障时长 ${input.downMinutes} 分钟`,
+    message: `${input.url}；HTTP ${input.statusCode ?? 'unknown'}；延迟 ${input.latencyMs ?? 0}ms；${input.downMinutes === null ? '故障时长未知' : `故障时长 ${input.downMinutes} 分钟`}`,
     time: input.eventTime,
   });
 }

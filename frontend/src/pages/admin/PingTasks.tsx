@@ -1,3 +1,4 @@
+import { useDialogSession } from '../../hooks/useDialogSession';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
@@ -66,7 +67,8 @@ function TaskDialog({
   onSaved: (task?: PingTask) => void;
 }) {
   const apiFetch = useApi();
-  const [saving, setSaving] = useState(false);
+  const editSession = useDialogSession(open, editingTask?.id);
+  const { saving } = editSession;
   const [formData, setFormData] = useState<Record<string, unknown>>({});
 
   useEffect(() => {
@@ -122,7 +124,8 @@ function TaskDialog({
       return;
     }
 
-    setSaving(true);
+    const owner = editSession.begin();
+    if (!owner) return;
 
     const payload = {
       name,
@@ -144,16 +147,16 @@ function TaskDialog({
         });
 
       if (result.success) {
-        toast.success(editingTask ? '编辑成功' : '添加成功');
-        onOpenChange(false);
+        if (editSession.isCurrent(owner)) toast.success(editingTask ? '编辑成功' : '添加成功');
+        if (editSession.isCurrent(owner)) onOpenChange(false);
         onSaved(result.task);
       } else {
-        toast.error(result.error || '保存失败');
+        if (editSession.isCurrent(owner)) toast.error(result.error || '保存失败');
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存失败');
+      if (editSession.isCurrent(owner)) toast.error(error instanceof Error ? error.message : '保存失败');
     } finally {
-      setSaving(false);
+      editSession.finish(owner);
     }
   };
 

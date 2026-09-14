@@ -25,6 +25,7 @@ assert.equal(normalizePublicMonitorRecord(base).load, 0, '缺字段仍按 0');
 
 // 真正非法的值仍要丢弃整条，别把校验放没了
 assert.equal(normalizePublicMonitorRecord({ ...base, load: 'high' }), null, '字符串负载应丢弃整条');
-assert.equal(normalizePublicMonitorRecord({ ...base, cpu: null }), null, '其他字段为 null 仍丢弃整条');
+assert.equal(normalizePublicMonitorRecord({ ...base, cpu: null }).cpu, null, 'CPU 未采集也保留同一行其他指标');
+assert.equal(normalizePublicMonitorRecord({ ...base, cpu: 'high' }), null, '字符串 CPU 仍丢弃整条');
 
 console.log('ok - publicHistory 负载 null 解析');

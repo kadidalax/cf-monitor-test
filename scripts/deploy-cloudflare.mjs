@@ -11,6 +11,7 @@ const deployConfig = join(root, 'worker', '.tmp', 'wrangler-deploy.toml');
 const deploySecretsFile = join(root, 'worker', '.tmp', 'wrangler-secrets.json');
 const requiredSecrets = ['JWT_SECRET'];
 const supabaseSecretNames = ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
+const optionalSecretNames = ['MFA_SECRET', 'MFA_PREVIOUS_SECRET', 'MFA_LEGACY_SECRET'];
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const isWorkersBuild = process.env.WORKERS_CI === '1';
@@ -154,7 +155,7 @@ function writeDeployConfig() {
 
 function writeDeploySecretsFile() {
   const secrets = Object.fromEntries(
-    [...requiredSecrets, ...supabaseSecretNames]
+    [...requiredSecrets, ...supabaseSecretNames, ...optionalSecretNames]
       .map(name => [name, process.env[name]?.trim() || ''])
       .filter(([, value]) => value),
   );

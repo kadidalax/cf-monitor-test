@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
+import { SupabaseApiError } from '../db/supabase-api/client';
 import {
   base64ToBytes,
   buildThemeCss,
@@ -48,6 +49,14 @@ const LEGACY_THEME_ALIASES: Record<string, string> = {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function themeQuotaResponse(c: ThemeContext, error: unknown): Response | null {
+  if (!(error instanceof SupabaseApiError) || !error.message.includes('CFM_THEME_STORAGE_QUOTA_EXCEEDED')) return null;
+  return c.json({
+    code: 'theme_storage_quota_exceeded',
+    error: '已达到主题累计存储限额。请删除不用的主题，或在通用设置中提高主题存储配额后重试。',
+  }, 409);
 }
 
 function isUploadedFile(value: unknown): value is { arrayBuffer(): Promise<ArrayBuffer> } {
@@ -248,7 +257,13 @@ adminThemeRoutes.post('/upload', async (c) => {
     parsed.theme.custom_css = existing.custom_css;
   }
 
-  await db.upsertTheme(database, parsed.theme, parsed.assets);
+  try {
+    await db.upsertTheme(database, parsed.theme, parsed.assets);
+  } catch (error) {
+    const response = themeQuotaResponse(c, error);
+    if (response) return response;
+    throw error;
+  }
   invalidatePublicMetadataCache();
   await db.insertAuditLog(database, c.get('username')!, 'theme_upload', `上传主题: ${parsed.theme.short}`);
   return c.json({ success: true, theme: themeSummary({ ...parsed.theme, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }, await db.getSetting(database, 'active_theme') || 'default') });
@@ -279,12 +294,25 @@ adminThemeRoutes.post('/settings', async (c) => {
     return c.json({ error: `自定义 CSS 不能超过 ${MAX_THEME_CUSTOM_CSS_BYTES} 字节` }, 413);
   }
   const database = getDatabase(c.env);
-  const theme = isBuiltinTheme(short) ? await ensureBuiltinTheme(database, short) : await db.getTheme(database, short);
+  let theme: db.Theme | null;
+  try {
+    theme = isBuiltinTheme(short) ? await ensureBuiltinTheme(database, short) : await db.getTheme(database, short);
+  } catch (error) {
+    const response = themeQuotaResponse(c, error);
+    if (response) return response;
+    throw error;
+  }
   if (!theme) return c.json({ error: '主题不存在' }, 404);
   const manifest = normalizeThemeManifest(JSON.parse(theme.manifest_json));
   const config = validateThemeConfig(manifest, parsed.body.config);
   if (!config.ok) return c.json({ error: config.error }, 400);
-  await db.updateThemeSettings(database, short, JSON.stringify(config.config), customCss);
+  try {
+    await db.updateThemeSettings(database, short, JSON.stringify(config.config), customCss);
+  } catch (error) {
+    const response = themeQuotaResponse(c, error);
+    if (response) return response;
+    throw error;
+  }
   invalidatePublicMetadataCache();
   await db.insertAuditLog(database, c.get('username')!, 'theme_settings', `配置主题: ${short}`);
   return c.json({ success: true });

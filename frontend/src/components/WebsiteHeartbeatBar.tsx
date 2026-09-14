@@ -16,7 +16,8 @@ function heartbeatResultText(check: WebsiteHeartbeatPoint) {
   const result = check.effective_status === 'down' || !check.ok ? '失效' : '正常';
   const statusCode = check.raw_status_code ?? check.status_code;
   const http = statusCode == null ? '' : ` · HTTP ${statusCode}`;
-  return `${new Date(check.checked_at).toLocaleString()} · ${result}${http} · ${check.latency_ms ?? 0}ms`;
+  const latency = check.latency_ms === null || !Number.isFinite(check.latency_ms) ? '—' : `${check.latency_ms}ms`;
+  return `${new Date(check.checked_at).toLocaleString()} · ${result}${http} · ${latency}`;
 }
 
 type HeartbeatTooltip = {

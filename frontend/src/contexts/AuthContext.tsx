@@ -35,7 +35,15 @@ const AuthContext = createContext<AuthContextType>({
 const AUTH_USER_STORAGE_KEY = 'cf_monitor_user';
 
 async function readJson(res: Response) {
-  return res.json().catch(() => ({}));
+  try {
+    const data = await res.json();
+    if (!data || typeof data !== 'object') throw new Error('Invalid JSON response');
+    return data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    if (!res.ok) return {};
+    throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
+  }
 }
 
 function readStoredUser(): User | null {

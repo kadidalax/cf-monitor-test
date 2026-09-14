@@ -11,6 +11,7 @@ import { normalizeDisplayTheme } from '../utils/displayTheme';
 import { fetchPublicSettings } from '../utils/publicSettings';
 import { formatAppVersion } from '../utils/version';
 import { normalizeMfaCode, type MfaMethod } from '../utils/mfa';
+import { hasValidNewPasswordLength, NEW_PASSWORD_GUIDANCE } from '../utils/passwordPolicy';
 
 type RecoveryStatus = {
   admin_present: boolean;
@@ -151,6 +152,10 @@ export default function Login() {
       toast.error('请填写 Supabase Secret key、用户名和新密码');
       return;
     }
+    if (!hasValidNewPasswordLength(recoveryPassword)) {
+      toast.error(NEW_PASSWORD_GUIDANCE);
+      return;
+    }
 
     setRecoveryLoading(true);
     try {
@@ -166,7 +171,11 @@ export default function Login() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        toast.error(data.error || '重置失败');
+        toast.error(data?.error || '重置失败');
+        return;
+      }
+      if (data?.success !== true || (data.mode !== 'created' && data.mode !== 'reset')) {
+        toast.error('服务器响应异常，结果无法确认，请刷新核对后再操作');
         return;
       }
       toast.success(data.mode === 'created' ? '管理员已创建' : '管理员密码已重置');
@@ -367,6 +376,7 @@ export default function Login() {
                     type={showRecoveryPassword ? 'text' : 'password'}
                     placeholder="请输入新密码"
                     value={recoveryPassword}
+                    aria-describedby="recovery-new-password-help"
                     onChange={(e) => setRecoveryPassword(e.target.value)}
                     autoComplete="new-password"
                     style={{ width: '100%', paddingRight: 40 }}
@@ -387,6 +397,7 @@ export default function Login() {
                 </div>
               </label>
 
+              <Text id="recovery-new-password-help" size="1" color="gray">{NEW_PASSWORD_GUIDANCE}</Text>
               <Button
                 type="submit"
                 size="3"

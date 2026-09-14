@@ -31,9 +31,9 @@ test('R-D03 upgrades an unversioned database and keeps configuration identity st
     assert.equal(await rpc(sql, 'cfm_mark_website_monitor_notified', { input_id: 31, input_time: new Date().toISOString() }), false,
       'legacy marker calls lack the event observation and cannot mutate state');
     const grants = (await sql.query(`select
-      has_function_privilege('anon','public.cfm_mark_website_monitor_notified(integer,text,jsonb)','execute') as anon,
-      has_function_privilege('authenticated','public.cfm_mark_website_monitor_notified(integer,text,jsonb)','execute') as authenticated,
-      has_function_privilege('service_role','public.cfm_mark_website_monitor_notified(integer,text,jsonb)','execute') as service,
+      has_function_privilege('anon','public.cfm_mark_website_monitor_notified(bigint,text,jsonb)','execute') as anon,
+      has_function_privilege('authenticated','public.cfm_mark_website_monitor_notified(bigint,text,jsonb)','execute') as authenticated,
+      has_function_privilege('service_role','public.cfm_mark_website_monitor_notified(bigint,text,jsonb)','execute') as service,
       to_regprocedure('public.cfm_mark_website_monitor_notified(integer,text)') is null as old_removed
     `)).rows[0];
     assert.deepEqual(grants, { anon: false, authenticated: false, service: true, old_removed: true });

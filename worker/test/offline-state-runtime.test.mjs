@@ -101,7 +101,8 @@ test('native Durable Object storage retains offline HTTP and WebSocket metrics a
     assert.equal((await snapshot()).last_known['offline-http'].cpu, 19);
   });
   await mutate('client-remove', { uuid: 'offline-ws' });
-  await mutate('clients-restore', { clients: controls });
+  const beforeRestore = await (await stub.fetch('https://do/admin-clients-snapshot')).json();
+  assert.equal((await mutate('clients-restore', { clients: controls, expected_version: beforeRestore.updatedAt })).status, 200);
   await f.restart();
   stub = await getStub();
   const cleared = await snapshot(true);

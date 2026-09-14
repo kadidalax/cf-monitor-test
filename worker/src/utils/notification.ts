@@ -1,3 +1,5 @@
+import { buildLoadNotificationPolicy } from './load-notification-window.ts';
+
 const LOAD_NOTIFICATION_METRICS = new Set(['cpu', 'ram', 'load', 'disk', 'temp']);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -87,7 +89,7 @@ export function validateExpiryNotificationInput(
 export function validateLoadNotificationInput(
   input: unknown,
   allowedClientIds: Set<string>,
-  options: { requireId?: boolean } = {},
+  options: { requireId?: boolean; minimumIntervalMin?: number } = {},
 ): {
   ok: true;
   item: {
@@ -148,9 +150,10 @@ export function validateLoadNotificationInput(
     errors.push('ratio 必须是 0 到 1 之间的数字');
   }
 
-  const intervalMin = integerField(input.interval_min ?? 15);
-  if (!Number.isInteger(intervalMin) || intervalMin < 1 || intervalMin > 10080) {
-    errors.push('interval_min 必须是 1 到 10080 分钟之间的整数');
+  const intervalMin = numberField(input.interval_min ?? 15);
+  const minimumIntervalMin = options.minimumIntervalMin ?? buildLoadNotificationPolicy().minimum_interval_min;
+  if (!Number.isInteger(intervalMin) || intervalMin < minimumIntervalMin || intervalMin > 10080) {
+    errors.push(`统计窗口必须是 ${minimumIntervalMin} 到 10080 分钟之间的整数，以覆盖至少两次有效采样`);
   }
 
   if (errors.length > 0) return { ok: false, errors };

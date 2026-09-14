@@ -1,3 +1,4 @@
+import { useDialogSession } from '../../hooks/useDialogSession';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   DndContext,
@@ -601,7 +602,8 @@ function FieldInput({
 
 function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClient | null; open: boolean; onOpenChange: (v: boolean) => void; onSaved: (uuid: string, patch: Partial<AdminClient>, saved?: Partial<AdminClient> & { uuid: string }) => void }) {
   const apiFetch = useApi();
-  const [saving, setSaving] = useState(false);
+  const editSession = useDialogSession(open, client?.uuid);
+  const { saving } = editSession;
   const [form, setForm] = useState<Record<string, unknown>>({});
 
   useEffect(() => {
@@ -620,7 +622,8 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
 
   const handleSave = async () => {
     if (!client) return;
-    setSaving(true);
+    const owner = editSession.begin();
+    if (!owner) return;
     try {
       const payload = { ...form } as Record<string, unknown>;
       const price = Number(payload.price ?? 0);
@@ -648,15 +651,15 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
         const saved = result.client && typeof result.client === 'object' && typeof result.client.uuid === 'string'
           ? result.client as Partial<AdminClient> & { uuid: string }
           : undefined;
-        toast.success('保存成功');
-        onOpenChange(false);
+        if (editSession.isCurrent(owner)) toast.success('保存成功');
+        if (editSession.isCurrent(owner)) onOpenChange(false);
         onSaved(client.uuid, payload as Partial<AdminClient>, saved);
       }
-      else toast.error(result.error || '保存失败');
+      else if (editSession.isCurrent(owner)) toast.error(result.error || '保存失败');
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : '保存失败');
+      if (editSession.isCurrent(owner)) toast.error(e instanceof Error ? e.message : '保存失败');
     } finally {
-      setSaving(false);
+      editSession.finish(owner);
     }
   };
 

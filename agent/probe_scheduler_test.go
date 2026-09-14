@@ -589,7 +589,7 @@ func TestAUD23BasicReportsContinueWhileTwentyProbesTimeOut(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	preparer := &reportPreparer{lastBasicInfoAt: time.Now(), collect: func(interval int) Report {
-		return Report{CPU: 42, Timestamp: time.Now().UnixMilli(), ReportInterval: interval, Version: "fixture"}
+		return Report{CPU: float64Metric(42), Timestamp: time.Now().UnixMilli(), ReportInterval: interval, Version: "fixture"}
 	}}
 	go func() { done <- runWebSocketSession(conn, preparer, state, 3*time.Second, time.Second) }()
 	defer func() {

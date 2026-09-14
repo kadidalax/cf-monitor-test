@@ -16,6 +16,7 @@ import { clientRoutes } from './routes/client';
 import { wsRoutes } from './routes/websocket';
 import { setupRoutes } from './routes/setup';
 import * as db from './db/queries';
+import { synchronizePendingClientChanges } from './utils/client-sync';
 import { DatabaseConfigurationError, getDatabase, withDatabase } from './db/provider';
 import { validateAdminSession } from './auth/admin-session';
 import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from './auth/jwt';
@@ -29,18 +30,13 @@ import { currentScheduledBudget, rotateScheduledItems, scheduledItems, Scheduled
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
-import {
-  checkWebsiteMonitorHttp,
-  shouldNotifyWebsiteDown,
-  shouldNotifyWebsiteRecovery,
-} from './utils/website-monitor';
+import { runWebsiteMonitoring } from './utils/website-notifications';
+import { LOAD_NOTIFICATION_POLICY_SETTING_KEYS, buildLoadNotificationPolicy, effectiveLoadNotificationIntervalMin } from './utils/load-notification-window';
 import {
   buildExpiryNotification,
   buildLoadNotification,
   buildNodeRecoveryNotification,
   buildOfflineNotification,
-  buildWebsiteAlertNotification,
-  buildWebsiteRecoveryNotification,
   type NotificationMessage,
 } from './utils/notification-templates';
 import { evaluateOfflineNotificationEvent, DEFAULT_OFFLINE_GRACE_PERIOD_SEC, DEFAULT_OFFLINE_CONFIRM_ROUNDS } from './utils/offline-notification';
@@ -57,6 +53,9 @@ type RuntimeBindings = {
   SUPABASE_SECRET_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   JWT_SECRET?: string;
+  MFA_SECRET?: string;
+  MFA_PREVIOUS_SECRET?: string;
+  MFA_LEGACY_SECRET?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
   CURRENT_GIT_COMMIT?: string;
 };
@@ -72,6 +71,7 @@ export type Variables = {
   clientHidden?: boolean;
   clientRecord?: MonitorClient;
   agentTokenKey?: string;
+  clientAuthTokenHash?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -348,33 +348,24 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
   }
 
   const safeMethod = isSafeMethod(c.req.method);
-  if (await getAdminSessionEdgeCache(payload)) {
+  if (safeMethod && await getAdminSessionEdgeCache(payload)) {
     c.set('userId', payload.userId);
     c.set('username', payload.username);
-    if (!safeMethod && !verifyAdminCsrfToken(c)) {
-      return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
-    }
-    if (!safeMethod) {
-      return withDatabase(c.env, async (database) => {
-        const stepUpResponse = await requireMfaStepUp(c, database, payload);
-        if (stepUpResponse) return stepUpResponse;
-        await next();
-        return undefined;
-      });
-    }
     await next();
     return undefined;
   }
 
   return withDatabase(c.env, async (database) => {
-    const sessionUser = await validateAdminSession(database, payload);
+    // Writes require an authoritative version. On a read-cache miss, bypass
+    // the shorter isolate cache too so its age never extends the 30-second TTL.
+    const sessionUser = await validateAdminSession(database, payload, { fresh: true });
     if (!sessionUser) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
 
     c.set('userId', sessionUser.uuid);
     c.set('username', sessionUser.username);
-    putAdminSessionEdgeCache(c, payload);
+    if (safeMethod) putAdminSessionEdgeCache(c, payload);
     if (!safeMethod && !verifyAdminCsrfToken(c)) {
       try {
         const path = new URL(c.req.url).pathname;
@@ -433,6 +424,7 @@ type ScheduledAdminSettings = ReturnType<typeof buildAdminSettings>;
 type ScheduledMonitorClient = ScheduledClientRow;
 const SCHEDULED_SETTING_KEYS = [
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
+  ...LOAD_NOTIFICATION_POLICY_SETTING_KEYS,
   'record_preserve_time',
   'ping_record_preserve_time',
   'audit_log_preserve_time',
@@ -448,6 +440,7 @@ interface ScheduledRunContext extends ScheduledCursorContext {
   getSettings(): Promise<ScheduledSettings>;
   getAdminSettings(): Promise<ScheduledAdminSettings>;
   getClients(clientIds?: string[]): Promise<ScheduledMonitorClient[]>;
+  getScheduledCursor?(key: string): Promise<string | undefined>;
 }
 
 function normalizeScheduledClientIds(clientIds: string[] | undefined): string[] | null {
@@ -485,6 +478,9 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
     database,
     env,
     budget: currentScheduledBudget(),
+    async getScheduledCursor(key) {
+      return (await loadCursors())[key];
+    },
     async orderScheduledItems<T>(key: string, items: readonly T[], identify: (item: T) => string): Promise<T[]> {
       const state = await loadCursors();
       const start = Math.max(0, items.findIndex(item => identify(item) === state[key]));
@@ -786,6 +782,7 @@ async function runExpiryCheck(context: ScheduledRunContext, now: Date): Promise<
 
 type LoadNotificationPlan = {
   rule: LoadNotification;
+  intervalMin: number;
   ratio: number;
   label: string;
   targetClients: string[];
@@ -803,6 +800,8 @@ type LoadNotificationGroup = {
 async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listLoadNotifications(context.database, true);
   if (notifications.length === 0) return;
+  const policy = buildLoadNotificationPolicy(await context.getAdminSettings());
+  if (!policy.history_enabled) return;
 
   const hasAllClientRule = notifications.some(rule => rule.clients.length === 0);
   const scheduledClientIds = hasAllClientRule
@@ -814,7 +813,8 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
   const groups = new Map<string, LoadNotificationGroup>();
 
   for (const rule of notifications) {
-    const intervalMs = Math.max(1, Number(rule.interval_min || 15)) * 60 * 1000;
+    const intervalMin = effectiveLoadNotificationIntervalMin(rule.interval_min, policy);
+    const intervalMs = intervalMin * 60_000;
     const startTime = new Date(now.getTime() - intervalMs).toISOString();
     const endTime = now.toISOString();
     const threshold = Number(rule.threshold ?? 80);
@@ -844,7 +844,7 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
       groups.set(groupKey, group);
     }
     for (const clientUuid of uniqueTargetClients) group.clientIds.add(clientUuid);
-    group.plans.push({ rule, ratio, label, targetClients: uniqueTargetClients });
+    group.plans.push({ rule, intervalMin, ratio, label, targetClients: uniqueTargetClients });
   }
 
   const rotation = Math.floor(now.getTime() / 120_000);
@@ -889,6 +889,7 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
         const message = buildLoadNotification({
           ruleName: plan.rule.name,
           nodeName: client.name || clientUuid,
+          metric: group.metric,
           metricLabel: plan.label,
           avgValue: stats.avg_value,
           threshold: group.threshold,
@@ -898,8 +899,8 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
         });
         const sent = await sendNotification(context, message, {
           key: `load:${plan.rule.id}:${clientUuid}`,
-          eventId: `${group.metric}:${group.threshold}:${plan.ratio}:${plan.rule.interval_min}`,
-          repeatMs: Math.max(1, Number(plan.rule.interval_min || 15)) * 60_000,
+          eventId: `${group.metric}:${group.threshold}:${plan.ratio}:${plan.intervalMin}`,
+          repeatMs: plan.intervalMin * 60_000,
         }, now, token => plan.rule.id == null ? Promise.resolve(false) : db.markLoadNotificationSent(
           context.database, plan.rule.id, clientUuid, now.toISOString(), token,
         ));
@@ -911,44 +912,7 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
 }
 
 async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date): Promise<void> {
-  const monitors = await db.listDueWebsiteMonitors(context.database, now.toISOString(), 50);
-  for await (const monitor of scheduledItems(context, 'websites', monitors, monitor => String(monitor.id))) {
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(context.database, check);
-    if (!updated) continue;
-
-    if (shouldNotifyWebsiteDown(updated, now)) {
-      const downSince = updated.down_since ? new Date(updated.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const lastStatus = updated.last_error || (updated.last_status_code ? `HTTP ${updated.last_status_code}` : 'network_error');
-      const sent = await sendNotification(context, buildWebsiteAlertNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        lastStatus,
-        checkedAt: check.checked_at,
-      }), { key: `website:${updated.id}`, eventId: `down:${updated.config_revision}:${updated.down_since}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, now.toISOString(), updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_down', `${sent ? '已发送' : '已记录'}网站告警: ${updated.name}`);
-    }
-
-    if (shouldNotifyWebsiteRecovery(updated)) {
-      const downSince = monitor.down_since ? new Date(monitor.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const sent = await sendNotification(context, buildWebsiteRecoveryNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        statusCode: updated.last_status_code,
-        latencyMs: updated.last_latency_ms,
-        eventTime: now,
-      }), { key: `website:${updated.id}`, eventId: `recovery:${updated.config_revision}:${updated.last_notified_at}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, null, updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_recovery', `${sent ? '已发送' : '已记录'}网站恢复: ${updated.name}`);
-    }
-  }
+  await runWebsiteMonitoring(context, now, (message, delivery) => sendNotification(context, message, delivery, now));
 }
 
 async function runScheduledStep(
@@ -985,6 +949,7 @@ async function runScheduled(env: Bindings): Promise<void> {
     const now = new Date();
     const context = createScheduledRunContext(env);
     const steps = [
+      ['cron_client_sync', 'cron_client_sync_error', '节点状态同步', () => synchronizePendingClientChanges(context.database, env, { limit: 10 }).then(() => undefined)],
       ['cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now)],
       ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],
       ['cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now)],

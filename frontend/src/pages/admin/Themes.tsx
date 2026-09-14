@@ -174,7 +174,8 @@ export default function AdminThemes() {
     form.append('file', file);
     setSaving(true);
     try {
-      await apiFetch('/admin/themes/upload', { method: 'POST', body: form });
+      const result = await apiFetch('/admin/themes/upload', { method: 'POST', body: form });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       toast.success('主题已上传');
       await loadThemes();
       refreshActiveThemeStylesheet();
@@ -189,10 +190,11 @@ export default function AdminThemes() {
   async function handleSetTheme(theme: ThemeCard) {
     setSaving(true);
     try {
-      await apiFetch('/admin/themes/set', {
+      const result = await apiFetch('/admin/themes/set', {
         method: 'POST',
         body: JSON.stringify({ short: theme.short }),
       });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       const nextActiveTheme = theme.short;
       setThemes(items => items.map(item => ({ ...item, active: item.short === nextActiveTheme })));
       setDisplayTheme(normalizeDisplayTheme(nextActiveTheme));
@@ -248,10 +250,11 @@ export default function AdminThemes() {
     if (!editing) return;
     setSaving(true);
     try {
-      await apiFetch('/admin/themes/settings', {
+      const result = await apiFetch('/admin/themes/settings', {
         method: 'POST',
         body: JSON.stringify({ short: editing.short, config: editConfig, custom_css: customCss }),
       });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       toast.success('主题配置已保存');
       closeConfig();
       await loadThemes();
@@ -269,10 +272,11 @@ export default function AdminThemes() {
     if (!deleting) return;
     setSaving(true);
     try {
-      await apiFetch('/admin/themes/delete', {
+      const result = await apiFetch('/admin/themes/delete', {
         method: 'POST',
         body: JSON.stringify({ short: deleting.short }),
       });
+      if (result.success !== true) throw new Error('服务器响应异常，结果无法确认，请刷新核对后再操作');
       setDeleting(null);
       await loadThemes();
       refreshActiveThemeStylesheet();

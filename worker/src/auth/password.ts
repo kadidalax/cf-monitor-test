@@ -1,11 +1,20 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 10000;
+const PBKDF2_ITERATIONS = 600000;
 const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
 const LEGACY_SALT = 'cf-monitor-salt';
 const LEGACY_SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
-const MIN_ADMIN_PASSWORD_LENGTH = 6;
+const MIN_ADMIN_PASSWORD_LENGTH = 15;
+// Whole known defaults only; ordinary passphrases may contain any of these words.
+const COMMON_PASSWORDS = new Set([
+  'passwordpassword', 'passwordpassword1', 'passwordpassword123',
+  '123456789012345', '1234567890123456', '12345678901234567890',
+  'qwertyuiopasdfgh', 'qwertyuiopasdfghjkl', 'qwertyuiopasdfghjklzxcvbnm',
+  'administrator123', 'administrator123456', 'adminadminadmin',
+  'changemechangeme', 'letmeinletmein123', 'password123456789',
+  'cf-vps-monitor123', 'cf-vps-monitor123456', 'correcthorsebatterystaple',
+]);
 
 type ParsedPasswordHash = {
   iterations: number;
@@ -87,7 +96,8 @@ function parsePasswordHash(hash: string): ParsedPasswordHash | null {
     return null;
   }
 
-  const iterations = Number.parseInt(iterationsText, 10);
+  if (!/^[1-9]\d{0,6}$/.test(iterationsText)) return null;
+  const iterations = Number(iterationsText);
   const salt = base64ToBytes(saltText);
   const storedHash = base64ToBytes(hashText);
 
@@ -116,9 +126,16 @@ export function needsPasswordRehash(hash: string): boolean {
   return parsed === null || parsed.iterations < PBKDF2_ITERATIONS;
 }
 
-export function validateAdminPasswordStrength(password: string, _username = ''): string | null {
+export function validateAdminPasswordStrength(password: string, username = ''): string | null {
   if (Array.from(password).length < MIN_ADMIN_PASSWORD_LENGTH) {
     return `密码至少需要 ${MIN_ADMIN_PASSWORD_LENGTH} 位`;
+  }
+
+  const normalized = password.normalize('NFKC').toLowerCase();
+  const account = username.trim().normalize('NFKC').toLowerCase();
+  if (COMMON_PASSWORDS.has(normalized) || (account && ['', '1', '123', '123456', '!', 'password']
+    .some(suffix => normalized === account + suffix))) {
+    return '请避免常见密码或账号默认密码，建议使用较长且独有的短语';
   }
 
   return null;

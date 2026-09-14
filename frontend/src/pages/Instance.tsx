@@ -17,6 +17,7 @@ import { useLiveData } from '../contexts/LiveDataContext';
 import { useAuth } from '../contexts/AuthContext';
 import { publicFetch } from '../utils/api';
 import { normalizePublicClients } from '../utils/publicClients';
+import { subscribePublicDataUpdated } from '../utils/publicDataEvents';
 import {
   collectCursorHistory,
   normalizePublicGpuRecords,
@@ -36,6 +37,7 @@ import {
   fetchPingTaskSeries,
   formatPingMs,
   getPingSeriesAverage,
+  getPingSeriesTimeoutCount,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
@@ -107,6 +109,7 @@ export default function Instance() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [recordsRangeEnd, setRecordsRangeEnd] = useState(() => Date.now());
   const [pingSeries, setPingSeries] = useState<PingTaskSeries[]>([]);
+  const [pingRangeEnd, setPingRangeEnd] = useState(() => Date.now());
   const [pingLoading, setPingLoading] = useState(false);
   const [pingError, setPingError] = useState<string | null>(null);
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
@@ -138,19 +141,24 @@ export default function Instance() {
   }, [clients, liveView]);
 
   // Load public client info.
-  const loadClient = useCallback(async (signal?: AbortSignal) => {
+  const loadClient = useCallback(async (signal?: AbortSignal, refresh = false) => {
     if (!uuid || authLoading) return;
     const requestId = ++clientRequestRef.current;
     setClientLoading(true);
-    setClient(null);
+    if (!refresh) setClient(null);
     try {
       setError(null);
       const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`, { signal });
       if (signal?.aborted || requestId !== clientRequestRef.current) return;
+      const rows = Array.isArray(data) ? data : data?.data;
+      if (!Array.isArray(rows) || rows.some((row) => !row || typeof row.uuid !== 'string')) {
+        throw new Error('服务器资料格式异常');
+      }
       const visible = normalizePublicClients(data, { includeHidden: isAuthenticated });
       setClients(visible);
       const found = visible.find((c) => c.uuid === uuid) || null;
-      if (found) { setClient(found); } else { setError('服务器不存在'); }
+      setClient(found);
+      if (!found) setError('服务器不存在');
     } catch {
       if (!signal?.aborted && requestId === clientRequestRef.current) setError('加载失败');
     } finally {
@@ -159,9 +167,14 @@ export default function Instance() {
   }, [uuid, authLoading, isAuthenticated]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let controller = new AbortController();
     void loadClient(controller.signal);
-    return () => { controller.abort(); clientRequestRef.current += 1; };
+    const unsubscribe = subscribePublicDataUpdated(() => {
+      controller.abort();
+      controller = new AbortController();
+      void loadClient(controller.signal, true);
+    });
+    return () => { unsubscribe(); controller.abort(); clientRequestRef.current += 1; };
   }, [loadClient]);
 
   // Load history records
@@ -228,8 +241,10 @@ export default function Instance() {
     setPingSeries([]);
     setPingError(null);
     setPingLoading(true);
+    const rangeEnd = Date.now();
+    setPingRangeEnd(rangeEnd);
 
-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
+    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date(rangeEnd).toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
       .then((series) => {
         if (!controller.signal.aborted) setPingSeries(series);
       })
@@ -281,8 +296,11 @@ export default function Instance() {
     setRecordsLoading(true);
   };
 
-  if (clientLoading || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
-  if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
+  if ((clientLoading && !client) || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
+  if (!client) return <Flex role="alert" direction="column" align="center" gap="3" style={{ padding: 40 }}>
+    <Text color="red">{error || '未找到'}</Text>
+    {error === '加载失败' && <Button onClick={() => void loadClient()} disabled={clientLoading}>重试</Button>}
+  </Flex>;
 
   const latestHistory = records.length > 0 ? records[records.length - 1] : null;
   const latest = liveRecord || latestHistory;
@@ -312,7 +330,7 @@ export default function Instance() {
   const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
   const pingChartRows = buildPingChartRows(pingSeriesWithRecords);
   const pingYAxisDomain = getPingYAxisDomain(pingSeriesWithRecords);
-  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithRecords, timeRangeHours[timeRange]);
+  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithRecords, timeRangeHours[timeRange], pingRangeEnd);
 
   return (
     <div className="instance-page">
@@ -327,6 +345,10 @@ export default function Instance() {
         />
 
         <section className="instance-detail-panel">
+      {error && <Flex role="alert" align="center" gap="3" mb="3">
+        <Text color="red">{error}，仍显示上次确认的服务器资料</Text>
+        <Button variant="soft" disabled={clientLoading} onClick={() => void loadClient(undefined, true)}>重试</Button>
+      </Flex>}
       {/* Top bar */}
       <Flex justify="between" align="center" mb="4">
         <Button variant="ghost" onClick={() => navigate('/')}>
@@ -563,6 +585,7 @@ export default function Instance() {
                   dataKey="time"
                   type="number"
                   domain={pingXAxisDomain}
+                  allowDuplicatedCategory={false}
                   tickFormatter={chartTimeFormatter}
                   fontSize={12}
                   minTickGap={28}
@@ -587,12 +610,13 @@ export default function Instance() {
                   <Line
                     key={item.task.key}
                     type="monotone"
+                    data={pingChartRows.filter((row) => row[item.task.key] !== undefined)}
                     dataKey={item.task.key}
                     name={item.task.label}
                     stroke={item.task.color}
                     strokeWidth={2.5}
-                    dot={false}
-                    connectNulls
+                    dot={{ r: 2 }}
+                    connectNulls={false}
                     isAnimationActive={false}
                   />
                 ))}
@@ -629,6 +653,7 @@ export default function Instance() {
                     </Flex>
                     <Text size="1" color="gray" className="instance-ping-series-stat">
                       {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
+                      {` · 超时 ${getPingSeriesTimeoutCount(item.records)} / ${item.records.length}`}
                     </Text>
                   </div>
                 );

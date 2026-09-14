@@ -58,8 +58,12 @@ function fixture({
       throw new Error('Unexpected Git operation in the isolated fixture');
     },
     fetchImpl: async (url, options) => {
-      const next = replies[Math.min(calls.http.length, replies.length - 1)];
-      calls.http.push({ url: new URL(url), options });
+      const requestUrl = new URL(url);
+      const pushIndex = calls.http.filter(call => call.url.searchParams.get('event') === 'push').length;
+      calls.http.push({ url: requestUrl, options });
+      if (requestUrl.searchParams.get('event') === 'workflow_dispatch') return response([]);
+      assert.equal(requestUrl.searchParams.get('event'), 'push');
+      const next = replies[Math.min(pushIndex, replies.length - 1)];
       if (next instanceof Error) throw next;
       return typeof next === 'function' ? next({ advance: ms => { elapsed += ms; } }) : next;
     },
@@ -89,7 +93,7 @@ test('waits for discovery and queued work, then permits the current commit after
   assert.equal(result.repository, 'example/monitor');
   assert.equal(result.runId, 100);
   assert.equal(result.runAttempt, 1);
-  assert.equal(f.calls.http.length, 5);
+  assert.equal(f.calls.http.length, 10, 'each poll verifies both allowed trigger histories');
   assert.deepEqual(f.calls.sleeps, [30_000, 30_000, 30_000, 30_000]);
   assert.equal(f.calls.logs.length, 4, 'unchanged queue status must not spam waiting messages');
 });
@@ -101,6 +105,7 @@ test('requests the push workflow for the exact SHA without filtering away unsucc
   assert.equal(url.origin, 'https://api.github.com');
   assert.equal(url.pathname, '/repos/example/monitor/actions/workflows/ci.yml/runs');
   assert.deepEqual(Object.fromEntries(url.searchParams), { head_sha: SHA, event: 'push', per_page: '100' });
+  assert.deepEqual(Object.fromEntries(f.calls.http[1].url.searchParams), { head_sha: SHA, event: 'workflow_dispatch', per_page: '100' });
   assert.equal(options.method, 'GET');
   assert.equal(options.redirect, 'error', 'credentials must not follow redirects');
   assert.ok(options.signal instanceof AbortSignal, 'the external request must have a timeout signal');
@@ -122,7 +127,7 @@ test('missing CI exhausts the bounded twelve-minute wait without falling back to
   const f = fixture({ replies: [response([])] });
   await assert.rejects(f.execute(), { code: 'WAIT_TIMEOUT' });
   assert.equal(f.elapsed(), 720_000);
-  assert.equal(f.calls.http.length, 24);
+  assert.equal(f.calls.http.length, 48);
   assert.ok(f.calls.sleeps.every(ms => ms === 30_000));
 });
 
@@ -137,7 +142,7 @@ for (const conclusion of ['failure', 'cancelled', 'skipped', 'timed_out', 'neutr
   test(`completed ${conclusion} CI stops immediately`, async () => {
     const f = fixture({ replies: [response([workflow({ conclusion })])] });
     await assert.rejects(f.execute(), { code: 'CI_NOT_SUCCESSFUL' });
-    assert.equal(f.calls.http.length, 1);
+    assert.equal(f.calls.http.length, 2);
     assert.equal(f.calls.sleeps.length, 0);
   });
 }
@@ -157,7 +162,7 @@ test('a newer queued run cannot reuse an older success', async () => {
     workflow({ status: 'queued', conclusion: null }),
   ])] });
   await assert.rejects(f.execute(), { code: 'WAIT_TIMEOUT' });
-  assert.equal(f.calls.http.length, 2);
+  assert.equal(f.calls.http.length, 4);
 });
 
 test('a rerun waits for the current attempt instead of accepting its previous success', async () => {
@@ -167,7 +172,7 @@ test('a rerun waits for the current attempt instead of accepting its previous su
   ] });
   const result = await f.execute();
   assert.equal(result.runAttempt, 2);
-  assert.equal(f.calls.http.length, 2);
+  assert.equal(f.calls.http.length, 4);
 });
 
 for (const [label, observed, gap] of [
@@ -182,7 +187,7 @@ for (const [label, observed, gap] of [
       response([workflow()]),
     ] });
     await assert.rejects(f.execute(), { code: 'STALE_RESPONSE' });
-    assert.equal(f.calls.http.length, gap ? 3 : 2);
+    assert.equal(f.calls.http.length, gap ? 6 : 4);
     assert.equal(f.calls.logs.some(message => message.includes('CI passed')), false);
   });
 }
@@ -195,7 +200,7 @@ test('discovery gaps still allow the observed run or a newer run to complete', a
       response([workflow({ id })]),
     ] });
     assert.equal((await f.execute()).runId, id);
-    assert.equal(f.calls.http.length, 3);
+    assert.equal(f.calls.http.length, 6);
   }
 });
 
@@ -248,7 +253,7 @@ for (const [label, settings, code] of [
       response([workflow({ status: 'queued', conclusion: null })]), response([workflow()]),
     ] });
     await assert.rejects(f.execute(), { code });
-    assert.equal(f.calls.http.length, 2);
+    assert.equal(f.calls.http.length, 4);
   });
 }
 
@@ -315,7 +320,7 @@ test('each request timeout is capped at fifteen seconds and the remaining overal
   });
   await fixture().execute();
   await fixture({ timeoutMs: 5_000 }).execute();
-  assert.deepEqual(timeouts, [15_000, 5_000]);
+  assert.deepEqual(timeouts, [15_000, 15_000, 5_000, 5_000]);
 });
 
 for (const tokenName of ['GH_TOKEN', 'GITHUB_TOKEN']) {

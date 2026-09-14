@@ -39,7 +39,7 @@ export function TrafficLimitEditor({
               onChange={(event) => update({ value: event.target.value })}
               type="number"
               min="0"
-              step="0.01"
+              step="any"
             />
             <Select.Root value={value.unit} onValueChange={(next) => update({ unit: next as TrafficLimitFormValue['unit'] })}>
               <Select.Trigger className="traffic-limit-unit-select" />

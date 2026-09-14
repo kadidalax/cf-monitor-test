@@ -43,7 +43,7 @@ function repositoryFromRemote(raw) {
   return parts.join('/').toLowerCase();
 }
 
-function latestWorkflowRun(payload, sha, repository) {
+function latestWorkflowRun(payload, sha, repository, event) {
   if (!payload || !Number.isSafeInteger(payload.total_count) || payload.total_count < 0
       || !Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > 100
       || payload.workflow_runs.length !== Math.min(payload.total_count, 100)) {
@@ -60,7 +60,7 @@ function latestWorkflowRun(payload, sha, repository) {
       fail('INVALID_RESPONSE', 'GitHub returned invalid workflow-run identity fields.');
     }
     if (run.head_sha !== sha || run.head_repository.full_name.toLowerCase() !== repository
-        || run.event !== 'push' || run.path !== '.github/workflows/ci.yml') {
+        || run.event !== event || run.path !== '.github/workflows/ci.yml') {
       fail('RUN_MISMATCH', 'GitHub returned a run for a different commit, repository, event, or workflow.');
     }
     if (run.status === 'completed' ? !conclusions.has(run.conclusion)
@@ -75,7 +75,7 @@ function latestWorkflowRun(payload, sha, repository) {
   return latest;
 }
 
-/** Wait for the latest push CI run for this clean checkout; never build or deploy. */
+/** Wait for the latest push or manual CI run for this clean checkout; never build or deploy. */
 export async function runGithubCiGate({
   root = defaultRoot,
   env = process.env,
@@ -124,23 +124,26 @@ export async function runGithubCiGate({
     const repository = repositoryFromRemote(git(['remote', 'get-url', 'origin']));
     git(['diff', '--quiet', 'HEAD', '--']);
 
-    const url = new URL(`https://api.github.com/repos/${repository}/actions/workflows/ci.yml/runs`);
-    url.search = new URLSearchParams({ head_sha: sha, event: 'push', per_page: '100' }).toString();
+    const bootstrapInstructions = `Enable Actions in ${repository} and ensure .github/workflows/ci.yml exists on the default branch. `
+      + `Open Actions > CI > Run workflow using a branch or tag pointing at ${sha}, then retry this build.`;
     const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'cf-vps-monitor-ci-gate' };
     const token = env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
     if (token) headers.Authorization = `Bearer ${token}`;
     let previousState;
     let newestObserved;
-    while (true) {
+    const readLatestRun = async event => {
       const remaining = deadline - now();
-      if (!Number.isFinite(remaining) || remaining <= 0) fail('WAIT_TIMEOUT', 'timed out waiting for successful CI; deployment stopped.');
+      if (!Number.isFinite(remaining) || remaining <= 0) fail('WAIT_TIMEOUT', `timed out waiting for successful CI; deployment stopped. ${bootstrapInstructions}`);
+      const url = new URL(`https://api.github.com/repos/${repository}/actions/workflows/ci.yml/runs`);
+      url.search = new URLSearchParams({ head_sha: sha, event, per_page: '100' }).toString();
       const signal = AbortSignal.timeout(Math.max(1, Math.min(15_000, Math.floor(remaining))));
       let response;
       try {
         response = await fetchImpl(url.href, { method: 'GET', headers, signal, redirect: 'error', cache: 'no-store' });
       } catch { fail('NETWORK_ERROR', 'the GitHub request failed or timed out; deployment stopped.'); }
       if (!Number.isInteger(response?.status)) fail('INVALID_RESPONSE', 'GitHub returned an invalid HTTP response.');
+      if (response.status === 404) fail('WORKFLOW_UNAVAILABLE', `GitHub could not read this CI workflow (HTTP 404). Check repository access. ${bootstrapInstructions}`);
       if (response.status !== 200) fail('HTTP_ERROR', `GitHub returned HTTP ${response.status}; deployment stopped.`);
       let payload;
       try { payload = await response.json(); } catch {
@@ -148,7 +151,16 @@ export async function runGithubCiGate({
         fail('INVALID_RESPONSE', 'GitHub returned an unreadable response; deployment stopped.');
       }
       if (now() >= deadline) fail('WAIT_TIMEOUT', 'timed out waiting for successful CI; deployment stopped.');
-      const latest = latestWorkflowRun(payload, sha, repository);
+      return latestWorkflowRun(payload, sha, repository, event);
+    };
+    while (true) {
+      // Query each allowed trigger separately; a PR or reusable release workflow
+      // cannot become evidence for this build. The latest run across both lists
+      // is authoritative, including failures and queued reruns.
+      const push = await readLatestRun('push');
+      const manual = await readLatestRun('workflow_dispatch');
+      if (push && manual && push.id === manual.id) fail('INVALID_RESPONSE', 'GitHub returned conflicting trigger identities for one CI run.');
+      const latest = !push ? manual : !manual ? push : push.id > manual.id ? push : manual;
       // API snapshots can lag behind an earlier poll. Once a rerun is seen,
       // an older success must never regain permission to publish this checkout.
       if (latest && newestObserved && (latest.id < newestObserved.id
@@ -166,14 +178,14 @@ export async function runGithubCiGate({
         if (!Number.isFinite(completedAt) || completedAt >= deadline) {
           fail('WAIT_TIMEOUT', 'timed out while confirming the tested checkout; deployment stopped.');
         }
-        log(`GitHub CI passed for ${sha.slice(0, 7)} (run ${latest.id}, attempt ${latest.run_attempt}).`);
-        return { sha, repository, runId: latest.id, runAttempt: latest.run_attempt };
+        log(`GitHub CI passed for ${sha.slice(0, 7)} (${latest.event}, run ${latest.id}, attempt ${latest.run_attempt}).`);
+        return { sha, repository, runId: latest.id, runAttempt: latest.run_attempt, event: latest.event };
       }
       const state = latest ? `${latest.id}:${latest.run_attempt}:${latest.status}` : 'missing';
       if (state !== previousState) {
         log(latest
           ? `Waiting for GitHub CI ${sha.slice(0, 7)}: run ${latest.id}, attempt ${latest.run_attempt}, ${latest.status}.`
-          : `Waiting for the GitHub push CI run for ${sha.slice(0, 7)} to appear.`);
+          : `No push or manual CI run found for ${sha.slice(0, 7)} yet. ${bootstrapInstructions}`);
         previousState = state;
       }
       const delay = Math.min(pollMs, deadline - now());

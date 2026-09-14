@@ -114,6 +114,10 @@ const GPU_MEMORY_BUCKET_RATIO = 0.01;
 const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
 const AGENT_AUTH_SNAPSHOT_PREFIX = 'agent-auth:';
 const AGENT_AUTH_UUID_PREFIX = 'agent-auth-uuid:';
+const AGENT_AUTH_CONTROL_PREFIX = 'agent-auth-control:';
+const CLIENT_SYNC_REVISION_PREFIX = 'client-sync-revision:';
+const WEBSITE_RECHECK_PREFIX = 'website-recheck:';
+const WEBSITE_RECHECK_MAX_PENDING = 256;
 const GEO_REGION_CACHE_MS = 48 * 60 * 60 * 1000;
 type SessionRole = 'agent' | 'viewer';
 type AgentPolicyMode = 'active' | 'idle';
@@ -376,6 +380,20 @@ interface AgentAuthSnapshot extends JsonObject {
   updated_at: string;
 }
 
+interface AgentAuthControl {
+  tokenHash: string | null;
+  rotatedAt: number;
+  revision?: string;
+  removed: boolean;
+}
+
+interface WebsiteRecheckTask {
+  id: string;
+  check: db.WebsiteCheckInput;
+  retryAt: number;
+  attempts: number;
+}
+
 interface ReportNetworkMetadata {
   sourceIp?: string;
   region?: string;
@@ -383,6 +401,7 @@ interface ReportNetworkMetadata {
 
 interface SessionAttachment {
   role: SessionRole;
+  authHash?: string;
   clientId: string;
   clientName: string;
   hidden: boolean;
@@ -450,6 +469,7 @@ export class LiveDataDO {
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private basicInfoSignatures = new Map<string, string>();
   private metadataSyncQueues = new Map<string, Promise<void>>();
+  private clientControlWrites = new Map<string, Promise<unknown>>();
   private pingWriteQueues = new Map<string, Promise<unknown>>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
 
@@ -562,6 +582,7 @@ export class LiveDataDO {
     if (typeof value.clientId !== 'string' || value.clientId.trim() === '') return null;
     return {
       role: value.role,
+      ...(typeof value.authHash === 'string' ? { authHash: value.authHash } : {}),
       clientId: value.clientId,
       clientName: typeof value.clientName === 'string' && value.clientName.trim() !== ''
         ? value.clientName
@@ -1263,7 +1284,7 @@ export class LiveDataDO {
     }, current.hidden ? 'admin' : 'all');
   }
 
-  private async scheduleExpiryAlarm(now: number) {
+  private async scheduleExpiryAlarm(now: number, required = false) {
     try {
       const expiries: number[] = [];
       for (const client of this.clients.values()) {
@@ -1277,6 +1298,10 @@ export class LiveDataDO {
           expiries.push(expiresAt);
         }
       }
+      const rechecks = await this.state.storage.list<WebsiteRecheckTask>({ prefix: WEBSITE_RECHECK_PREFIX, limit: WEBSITE_RECHECK_MAX_PENDING });
+      for (const task of rechecks.values()) {
+        if (Number.isFinite(task.retryAt)) expiries.push(Math.max(now + 1000, task.retryAt));
+      }
       const nextExpiry = expiries.sort((a, b) => a - b)[0];
 
       if (nextExpiry === undefined) {
@@ -1285,8 +1310,9 @@ export class LiveDataDO {
       }
 
       await this.state.storage.setAlarm(Math.max(nextExpiry, now + 1000));
-    } catch {
-      // Alarm scheduling is best effort; snapshots still filter expired HTTP clients.
+    } catch (error) {
+      if (required) throw error;
+      // Display-only expiry scheduling is best effort; acknowledged tasks are not.
     }
   }
 
@@ -1449,9 +1475,60 @@ export class LiveDataDO {
     if (!client) {
       return Response.json({ error: 'Invalid agent auth snapshot' }, { status: 400 });
     }
-    await this.state.storage.put(`${AGENT_AUTH_SNAPSHOT_PREFIX}${client.token_hash}`, client);
-    await this.state.storage.put(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`, client.token_hash);
-    return Response.json({ success: true });
+    return this.runClientControlWrite(client.uuid, async () => {
+      const accepted = await this.storeAgentAuthSnapshot(client);
+      return accepted ? Response.json({ success: true })
+        : Response.json({ error: 'Credential snapshot was superseded' }, { status: 409 });
+    });
+  }
+
+  private async runClientControlWrite<T>(uuid: string, write: () => Promise<T>): Promise<T> {
+    const previous = this.clientControlWrites.get(uuid) || Promise.resolve();
+    const pending = previous.catch(() => undefined).then(write);
+    this.clientControlWrites.set(uuid, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.clientControlWrites.get(uuid) === pending) this.clientControlWrites.delete(uuid);
+    }
+  }
+
+  private async storeAgentAuthSnapshot(client: AgentAuthSnapshot, revision?: string): Promise<boolean> {
+    const controlKey = `${AGENT_AUTH_CONTROL_PREFIX}${client.uuid}`;
+    const uuidKey = `${AGENT_AUTH_UUID_PREFIX}${client.uuid}`;
+    const control = await this.state.storage.get<AgentAuthControl>(controlKey);
+    const previousHash = await this.state.storage.get<string>(uuidKey);
+    const previous = previousHash
+      ? await this.state.storage.get<AgentAuthSnapshot>(`${AGENT_AUTH_SNAPSHOT_PREFIX}${previousHash}`) : undefined;
+    const rotatedAt = Date.parse(client.token_rotated_at || client.created_at || '') || 0;
+    const oldRotatedAt = control?.rotatedAt ?? (Date.parse(previous?.token_rotated_at || previous?.created_at || '') || 0);
+    if (revision && control?.revision && BigInt(revision) < BigInt(control.revision)) return false;
+    if (!revision) {
+      if (control?.removed) return false;
+      if (control?.revision && control.tokenHash !== client.token_hash) return false;
+      if (previousHash && previousHash !== client.token_hash && rotatedAt <= oldRotatedAt) return false;
+      if (previousHash === client.token_hash && previous &&
+        (Date.parse(previous.updated_at || '') || 0) > (Date.parse(client.updated_at || '') || 0)) return true;
+    }
+    // Cloudflare coalesces writes issued without an intervening await into one
+    // atomic commit. The UUID pointer is also checked on every lookup.
+    const deletion = previousHash && previousHash !== client.token_hash
+      ? this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${previousHash}`) : Promise.resolve(false);
+    const saved = this.state.storage.put({
+      [`${AGENT_AUTH_SNAPSHOT_PREFIX}${client.token_hash}`]: client,
+      [uuidKey]: client.token_hash,
+      [controlKey]: { tokenHash: client.token_hash, rotatedAt,
+        ...(revision || control?.revision ? { revision: revision || control?.revision } : {}), removed: false },
+    });
+    await Promise.all([deletion, saved]);
+    return true;
+  }
+
+  private async isAgentCredentialCurrent(uuid: string, tokenHash?: string): Promise<boolean> {
+    const control = await this.state.storage.get<AgentAuthControl>(`${AGENT_AUTH_CONTROL_PREFIX}${uuid}`);
+    if (!control) return true;
+    return !control.removed && (!control.revision || Boolean(tokenHash)) &&
+      (!tokenHash || control.tokenHash === tokenHash);
   }
 
   private async lookupAgentAuthSnapshot(request: Request): Promise<Response> {
@@ -1460,15 +1537,83 @@ export class LiveDataDO {
     const tokenHash = stringField(parsed.body, 'token_hash').trim();
     if (!tokenHash) return Response.json({ error: 'Invalid token hash' }, { status: 400 });
     const client = await this.state.storage.get<AgentAuthSnapshot>(`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`);
-    return client
+    const control = client ? await this.state.storage.get<AgentAuthControl>(`${AGENT_AUTH_CONTROL_PREFIX}${client.uuid}`) : undefined;
+    const currentHash = client ? await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`) : undefined;
+    return client && currentHash === tokenHash && !control?.removed && (!control || control.tokenHash === tokenHash)
       ? Response.json({ client })
       : Response.json({ error: 'Snapshot missing' }, { status: 404 });
   }
 
   private async removeAgentAuthByUuid(uuid: string): Promise<void> {
     const tokenHash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
-    if (tokenHash) await this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`);
-    await this.state.storage.delete(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
+    const control = await this.state.storage.get<AgentAuthControl>(`${AGENT_AUTH_CONTROL_PREFIX}${uuid}`);
+    const deletion = this.state.storage.delete([
+      `${AGENT_AUTH_UUID_PREFIX}${uuid}`,
+      ...(tokenHash ? [`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`] : []),
+    ]);
+    const revoked = this.state.storage.put(`${AGENT_AUTH_CONTROL_PREFIX}${uuid}`, {
+      ...control, tokenHash: null, rotatedAt: control?.rotatedAt || Date.now(), removed: true,
+    });
+    await Promise.all([deletion, revoked]);
+  }
+
+  private async applyClientSynchronization(request: Request): Promise<Response> {
+    const parsed = await parseJsonRequestWithLimit(request, HTTP_CLIENT_META_MAX_BODY_BYTES);
+    if ('response' in parsed) return parsed.response;
+    const uuid = stringField(parsed.body, 'uuid').trim();
+    const revision = stringField(parsed.body, 'revision');
+    const rawClient = parsed.body.client;
+    const client = rawClient === null ? null : normalizeAgentAuthSnapshot(rawClient);
+    if (!uuid || !/^[1-9]\d{0,19}$/.test(revision) || (rawClient !== null && (!client || client.uuid !== uuid))) {
+      return Response.json({ error: 'Invalid client synchronization' }, { status: 400 });
+    }
+    return this.runClientControlWrite(uuid, async () => {
+      const key = `${CLIENT_SYNC_REVISION_PREFIX}${uuid}`;
+      const previous = await this.state.storage.get<{ revision: string; complete: boolean }>(key);
+      if (previous && (BigInt(previous.revision) > BigInt(revision) ||
+        (previous.revision === revision && previous.complete))) {
+        return Response.json({ success: true, uuid, revision, applied: false });
+      }
+      // Persist the high-water mark before applying effects; interrupted work
+      // remains retryable at this revision without allowing an older replay.
+      await this.state.storage.put(key, { revision, complete: false });
+      if (!client) {
+        await this.removeClient(new Request('https://do/client-remove', { method: 'POST', body: JSON.stringify({ uuid }) }));
+      } else {
+        const previousHash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
+        if (previousHash && previousHash !== client.token_hash) {
+          await this.removeClient(new Request('https://do/client-remove', {
+            method: 'POST', body: JSON.stringify({ uuid, keepMetadata: true }),
+          }));
+        }
+        if (!await this.storeAgentAuthSnapshot(client, revision)) {
+          return Response.json({ error: 'Newer credentials already applied' }, { status: 409 });
+        }
+        await this.updateClientMeta(new Request('https://do/client-meta', { method: 'POST',
+          body: JSON.stringify({ uuid, client, name: client.name, hidden: client.hidden }),
+        }));
+      }
+      await this.state.storage.put(key, { revision, complete: true });
+      return Response.json({ success: true, uuid, revision, applied: true });
+    });
+  }
+
+  private async applyClientSynchronizationBatch(request: Request): Promise<Response> {
+    const parsed = await parseJsonRequestWithLimit(request, MAX_BACKUP_BYTES);
+    if ('response' in parsed) return parsed.response;
+    const changes = parsed.body.changes;
+    if (!Array.isArray(changes) || changes.length === 0 || changes.length > 200 || changes.some(change => !isObjectPayload(change))) {
+      return Response.json({ error: 'Invalid synchronization batch' }, { status: 400 });
+    }
+    const applied: Array<{ uuid: string; revision: string }> = [];
+    for (const change of changes) {
+      const response = await this.applyClientSynchronization(new Request('https://do/client-sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+      }));
+      if (!response.ok) return response;
+      applied.push({ uuid: change.uuid as string, revision: change.revision as string });
+    }
+    return Response.json({ success: true, applied });
   }
 
   private async removeAgentAuthSnapshot(request: Request): Promise<Response> {
@@ -1593,7 +1738,7 @@ export class LiveDataDO {
     this.sessionRoles.delete(meta.uuid);
     this.clients.delete(meta.uuid);
     this.lastKnownClients.delete(meta.uuid);
-    await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`);
+    await this.state.storage.delete([`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`, `offline:streak:${meta.uuid}`]);
     await this.removeAgentAuthByUuid(String(meta.uuid));
     if (!keepMetadata) {
       await this.removeAdminClientSnapshot(String(meta.uuid));
@@ -1758,6 +1903,10 @@ export class LiveDataDO {
 
     const clientId = payload.uuid;
     return this.runClientReport(clientId, async lifecycle => {
+      if (!await this.isAgentCredentialCurrent(clientId, stringField(payload, 'auth_hash'))) {
+        return Response.json({ error: 'Client credential was replaced' }, { status: 401 });
+      }
+      this.assertReportCurrent(lifecycle);
       const network: ReportNetworkMetadata = {
         sourceIp: stringField(payload, 'source_ip'),
         region: stringField(payload, 'region'),
@@ -1915,11 +2064,10 @@ export class LiveDataDO {
       if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
       if (!(await this.canPersistWithinCapacity(nowMs))) return;
 
-      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId, true)).map(task => task.id));
+      const assigned = new Map((await this.getWebsiteProbeTasks(nowMs, clientId, true)).map(task => [task.id, task]));
       if (assigned.size === 0) return;
       const checkedAt = new Date(nowMs).toISOString();
       let changed = false;
-      const fallbackChecked = new Set<number>();
       for (const item of results) {
         const monitorId = Number(item.monitor_id);
         const configRevision = item.config_revision;
@@ -1932,6 +2080,7 @@ export class LiveDataDO {
           !assigned.has(monitorId) ||
           typeof configRevision !== 'string' ||
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(configRevision) ||
+          assigned.get(monitorId)?.config_revision !== configRevision ||
           !Number.isFinite(latencyMs) ||
           latencyMs < 0 ||
           latencyMs > 60_000 ||
@@ -1941,7 +2090,7 @@ export class LiveDataDO {
         ) {
           continue;
         }
-        const updated = await db.recordWebsiteCheck(database, {
+        const check: db.WebsiteCheckInput = {
           monitor_id: monitorId,
           config_revision: configRevision,
           checked_at: checkedAt,
@@ -1954,16 +2103,14 @@ export class LiveDataDO {
           error: typeof item.error === 'string' && item.error ? item.error.slice(0, 120) : null,
           source_type: 'agent',
           source_client: clientId,
-        });
+        };
+        if (effectiveStatus === 'down' && assigned.get(monitorId)?.agent_probe_status_enabled) {
+          await this.queueWebsiteRecheck(check);
+        }
+        const updated = await db.recordWebsiteCheck(database, check);
         if (!updated) continue;
         changed = true;
 
-        if (effectiveStatus === 'down' && updated.agent_probe_status_enabled && !fallbackChecked.has(monitorId)) {
-          fallbackChecked.add(monitorId);
-          const fallbackCheck = await checkWebsiteMonitorHttp(updated);
-          const fallbackUpdated = await db.recordWebsiteCheck(database, fallbackCheck);
-          changed = Boolean(fallbackUpdated) || changed;
-        }
       }
       if (changed) this.broadcastMetadataChanged({ websites: true });
     } catch (error) {
@@ -1978,9 +2125,60 @@ export class LiveDataDO {
     }
   }
 
+  private async queueWebsiteRecheck(check: db.WebsiteCheckInput): Promise<void> {
+    // A late response from an old assignment cannot replace another version's
+    // durable work. The shared prefix still lets alarms consume legacy keys.
+    const key = `${WEBSITE_RECHECK_PREFIX}${check.monitor_id}:${check.config_revision}`;
+    const previous = await this.state.storage.get<WebsiteRecheckTask>(key);
+    if (!previous || Date.parse(previous.check.checked_at) < Date.parse(check.checked_at)) {
+      if (!previous && (await this.state.storage.list({ prefix: WEBSITE_RECHECK_PREFIX, limit: WEBSITE_RECHECK_MAX_PENDING })).size >= WEBSITE_RECHECK_MAX_PENDING) {
+        throw new Error('Website recheck queue is full; retry the report');
+      }
+      // The job stores result identity, never website credentials. Replaying the
+      // original SQL check recovers a commit whose confirmation was interrupted.
+      await this.state.storage.put(key, { id: crypto.randomUUID(), check,
+        retryAt: Date.now() + 1000, attempts: 0 } satisfies WebsiteRecheckTask);
+    }
+    await this.scheduleExpiryAlarm(Date.now(), true);
+  }
+
+  private async processWebsiteRechecks(now: number): Promise<void> {
+    const database = this.getQueryDatabase();
+    if (!database) return;
+    const pending = await this.state.storage.list<WebsiteRecheckTask>({ prefix: WEBSITE_RECHECK_PREFIX, limit: WEBSITE_RECHECK_MAX_PENDING });
+    const due = [...pending].filter(([, task]) => task.retryAt <= now).sort((a, b) => a[1].retryAt - b[1].retryAt).slice(0, 2);
+    await Promise.all(due.map(async ([key, task]) => {
+      try {
+        let current = await db.getWebsiteMonitor(database, task.check.monitor_id);
+        if (current?.enabled && current.agent_probe_status_enabled && current.agent_probe_mode !== 'off' &&
+          current.config_revision === task.check.config_revision &&
+          (Date.parse(current.last_checked_at || '') || 0) <= Date.parse(task.check.checked_at)) {
+          current = await db.recordWebsiteCheck(database, task.check) || await db.getWebsiteMonitor(database, task.check.monitor_id);
+          if (current?.enabled && current.agent_probe_status_enabled && current.config_revision === task.check.config_revision &&
+            (Date.parse(current.last_checked_at || '') || 0) <= Date.parse(task.check.checked_at)) {
+            const result = await checkWebsiteMonitorHttp(current);
+            if (await db.recordWebsiteCheck(database, result)) this.broadcastMetadataChanged({ websites: true });
+          }
+        }
+        if ((await this.state.storage.get<WebsiteRecheckTask>(key))?.id === task.id) await this.state.storage.delete(key);
+      } catch (error) {
+        if ((await this.state.storage.get<WebsiteRecheckTask>(key))?.id === task.id) {
+          await this.state.storage.put(key, { ...task, attempts: task.attempts + 1,
+            retryAt: Date.now() + Math.min(300000, 2000 * 2 ** Math.min(task.attempts, 8)) });
+        }
+        await bestEffortRecordHealthEvent(database, 'website_probe_persistence', 'error',
+          `Website recheck deferred: ${errorDetail(error)}`, { auditAction: 'website_probe_recheck_error' });
+      }
+    }));
+  }
+
   private async restoreClients(request: Request): Promise<Response> {
     const parsed = await parseJsonRequestWithLimit(request, MAX_BACKUP_BYTES);
     if ('response' in parsed) return parsed.response;
+    const expectedVersion = parsed.body.expected_version;
+    if (typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      return Response.json({ error: 'A restored snapshot requires its pre-read version' }, { status: 400 });
+    }
     if (!Array.isArray(parsed.body.clients) || parsed.body.clients.length > 1000 ||
       parsed.body.clients.some(client => !isObjectPayload(client))) {
       return Response.json({ error: 'Invalid restored client list' }, { status: 400 });
@@ -1996,8 +2194,11 @@ export class LiveDataDO {
     // A restore is a rare whole-configuration transition. Only local storage is
     // awaited in this gate; no database or other external I/O can hold it open.
     return this.state.blockConcurrencyWhile(async () => {
-      this.restoreVersion += 1;
       const previous = await this.readAdminClientsSnapshot();
+      if ((previous?.updatedAt ?? 0) !== expectedVersion) {
+        return Response.json({ error: 'Client state changed while the snapshot was read', code: 'CLIENT_SNAPSHOT_CHANGED' }, { status: 409 });
+      }
+      this.restoreVersion += 1;
       const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
       for (const prefix of [HTTP_LIVE_STATE_PREFIX, AGENT_AUTH_SNAPSHOT_PREFIX, AGENT_AUTH_UUID_PREFIX]) {
         while (true) {
@@ -2042,12 +2243,20 @@ export class LiveDataDO {
       return this.restoreClients(request);
     }
 
+    if (request.method === 'POST' && url.pathname === '/client-sync/batch') {
+      return this.applyClientSynchronizationBatch(request);
+    }
+
     if (request.method === 'POST' && url.pathname === '/client-meta') {
       return this.updateClientMeta(request);
     }
 
     if (request.method === 'POST' && url.pathname === '/client-remove') {
       return this.removeClient(request);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/client-sync') {
+      return this.applyClientSynchronization(request);
     }
 
     if (request.method === 'POST' && url.pathname === '/agent-auth') {
@@ -2142,6 +2351,7 @@ export class LiveDataDO {
       const clientName = url.searchParams.get('name') || clientId;
       const hidden = url.searchParams.get('hidden') === '1' || url.searchParams.get('hidden') === 'true';
       const role = url.searchParams.get('role') === 'agent' ? 'agent' : 'viewer';
+      const authHash = role === 'agent' ? url.searchParams.get('auth_hash') || undefined : undefined;
       const viewerIp = url.searchParams.get('viewer_ip') || undefined;
       const sourceIp = url.searchParams.get('source_ip') || undefined;
       const region = url.searchParams.get('region') || undefined;
@@ -2152,6 +2362,11 @@ export class LiveDataDO {
         const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
         if (limitResponse) return limitResponse;
         await this.getAgentPolicySettings(now);
+        const afterWaitLimit = this.enforceViewerConnectionLimit(viewerIp);
+        if (afterWaitLimit) return afterWaitLimit;
+      }
+      if (role === 'agent' && !await this.isAgentCredentialCurrent(clientId, authHash)) {
+        return Response.json({ error: 'Client credential was replaced' }, { status: 401 });
       }
 
       const oldSession = role === 'agent' ? this.sessions.get(clientId) : undefined;
@@ -2176,6 +2391,7 @@ export class LiveDataDO {
         clientId,
         clientName,
         hidden,
+        ...(authHash ? { authHash } : {}),
         ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
         ...(role === 'viewer' ? { viewerExpiresAt: now + viewerTtlMs } : {}),
         ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
@@ -2282,6 +2498,11 @@ export class LiveDataDO {
       return;
     }
     try {
+      if (!await this.isAgentCredentialCurrent(attachment.clientId, attachment.authHash)) {
+        try { ws.close(1008, 'Client credential was replaced'); } catch {}
+        this.cleanupSession(ws, attachment);
+        return;
+      }
       const data = JSON.parse(typeof message === 'string' ? message : new TextDecoder().decode(message));
       if (!isObjectPayload(data)) return;
       await this.handleMessage(attachment.clientId, attachment.clientName, attachment.hidden, data, ws);
@@ -2325,8 +2546,12 @@ export class LiveDataDO {
     const now = Date.now();
     await this.removeExpiredClients(now);
     this.removeExpiredViewers(now);
-    await this.broadcastAgentPolicy(now, false);
-    await this.scheduleExpiryAlarm(now);
+    try {
+      await this.processWebsiteRechecks(now);
+      await this.broadcastAgentPolicy(Date.now(), false);
+    } finally {
+      await this.scheduleExpiryAlarm(Date.now(), true);
+    }
   }
 
   /**
@@ -2367,7 +2592,11 @@ export class LiveDataDO {
       if (!Number.isFinite(graceMs) || graceMs <= 0) continue;
 
       const live = this.clients.get(uuid);
-      const lastSeen = live && Number.isFinite(live.lastReportTime) ? live.lastReportTime : null;
+      const retained = this.lastKnownClients.get(uuid);
+      const lastSeen = Math.max(
+        live && Number.isFinite(live.lastReportTime) ? live.lastReportTime : 0,
+        retained && Number.isFinite(retained.lastReportTime) ? retained.lastReportTime : 0,
+      );
       // 调用方可传入数据库侧的最后记录时间，两者取较新——DO 刚重启且 attachment
       // 尚未恢复时，数据库的值可以兜底，避免把在线节点判成离线。
       const fallback = Number(entry.fallbackLastSeen);

@@ -267,7 +267,7 @@ SReclaimable:     40 kB
 	}
 }
 
-func TestMergeMemorySnapshotZerosContainerSwapWhenCgroupSwapMissing(t *testing.T) {
+func TestMergeMemorySnapshotLeavesContainerSwapUnknownWhenCgroupSwapMissing(t *testing.T) {
 	procMem := parseProcMeminfo(`MemTotal:       65563288 kB
 MemFree:        10000000 kB
 Buffers:          100000 kB
@@ -288,12 +288,12 @@ SReclaimable:     100000 kB
 	if !got.hasRAM || got.ramTotal != 512000000 || got.ramUsed != 42*1024*1024 {
 		t.Fatalf("merged ram = %#v, want cgroup ram", got)
 	}
-	if !got.hasSwap || got.swapTotal != 0 || got.swapUsed != 0 {
-		t.Fatalf("merged swap = %#v, want container swap cleared instead of host swap", got)
+	if got.hasSwap || got.swapTotal != 0 || got.swapUsed != 0 {
+		t.Fatalf("merged swap = %#v, want unavailable container swap instead of host swap", got)
 	}
 }
 
-func TestMergeMemorySnapshotZerosContainerSwapWhenCgroupMirrorsHostSwap(t *testing.T) {
+func TestMergeMemorySnapshotRespectsLargeExplicitCgroupSwap(t *testing.T) {
 	procMem := parseProcMeminfo(`MemTotal:       65563288 kB
 MemFree:        10000000 kB
 Buffers:          100000 kB
@@ -314,8 +314,8 @@ SReclaimable:     100000 kB
 
 	got := mergeMemorySnapshot(procMem, cgroup, true)
 
-	if !got.hasSwap || got.swapTotal != 0 || got.swapUsed != 0 {
-		t.Fatalf("merged swap = %#v, want host-sized cgroup swap cleared for LXC", got)
+	if !got.hasSwap || got.swapTotal != cgroup.swapTotal || got.swapUsed != cgroup.swapUsed {
+		t.Fatalf("merged swap = %#v, want explicit cgroup budget regardless of RAM ratio", got)
 	}
 }
 
@@ -1002,6 +1002,11 @@ func TestTrafficAndRateCallSitesUseOneSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
+	collector, err := os.ReadFile("metric_availability.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source = append(source, collector...)
 
 	secondArg := func(fn string) string {
 		pattern := regexp.MustCompile(`\b` + fn + `\(`)
@@ -1117,24 +1122,24 @@ func TestPreparedReportUsesRawCountersForNetworkSpeed(t *testing.T) {
 	preparer := &reportPreparer{}
 	preparer.prepareReportForInterval(Report{
 		Timestamp:    1000,
-		NetTotalUp:   5000,
-		NetTotalDown: 8000,
+		NetTotalUp:   int64Metric(5000),
+		NetTotalDown: int64Metric(8000),
 	}, 10)
 
 	report := preparer.prepareReportForInterval(Report{
 		Timestamp:    11_000,
-		NetTotalUp:   200,
-		NetTotalDown: 300,
+		NetTotalUp:   int64Metric(200),
+		NetTotalDown: int64Metric(300),
 	}, 10)
-	if report.NetOut != 0 || report.NetIn != 0 {
-		t.Fatalf("speed without raw counters = %d/%d, want 0/0 after monthly total reset", report.NetOut, report.NetIn)
+	if report.NetOut == nil || report.NetIn == nil || *report.NetOut != 0 || *report.NetIn != 0 {
+		t.Fatal("speed without raw counters must be known 0/0 after monthly total reset")
 	}
 
 	preparer = &reportPreparer{}
 	preparer.prepareReportForInterval(Report{
 		Timestamp:       1000,
-		NetTotalUp:      5000,
-		NetTotalDown:    8000,
+		NetTotalUp:      int64Metric(5000),
+		NetTotalDown:    int64Metric(8000),
 		hasRawNetTotals: true,
 		rawNetTotalUp:   50_000,
 		rawNetTotalDown: 80_000,
@@ -1142,14 +1147,14 @@ func TestPreparedReportUsesRawCountersForNetworkSpeed(t *testing.T) {
 
 	report = preparer.prepareReportForInterval(Report{
 		Timestamp:       11_000,
-		NetTotalUp:      200,
-		NetTotalDown:    300,
+		NetTotalUp:      int64Metric(200),
+		NetTotalDown:    int64Metric(300),
 		hasRawNetTotals: true,
 		rawNetTotalUp:   50_400,
 		rawNetTotalDown: 80_900,
 	}, 10)
-	if report.NetOut != 40 || report.NetIn != 90 {
-		t.Fatalf("speed from raw counters = %d/%d, want 40/90", report.NetOut, report.NetIn)
+	if report.NetOut == nil || report.NetIn == nil || *report.NetOut != 40 || *report.NetIn != 90 {
+		t.Fatal("speed from raw counters must be known 40/90")
 	}
 }
 
@@ -1547,11 +1552,11 @@ func TestPrepareReportDoesNotSpikeOnInterfaceAppearance(t *testing.T) {
 	}
 	out := p.prepareReportForInterval(second, 120)
 
-	if out.NetOut != 10 {
-		t.Fatalf("NetOut = %d, want 10 (1200 字节 / 120 秒)", out.NetOut)
+	if out.NetOut == nil || *out.NetOut != 10 {
+		t.Fatal("NetOut must be known 10 (1200 字节 / 120 秒)")
 	}
-	if out.NetIn != 20 {
-		t.Fatalf("NetIn = %d, want 20 (2400 字节 / 120 秒)", out.NetIn)
+	if out.NetIn == nil || *out.NetIn != 20 {
+		t.Fatal("NetIn must be known 20 (2400 字节 / 120 秒)")
 	}
 }
 

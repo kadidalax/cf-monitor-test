@@ -6,6 +6,7 @@ on:
       - '**'
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,16 +21,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '24'
           cache: npm
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
@@ -94,3 +97,59 @@ jobs:
         run: |
           npm run build:migrations
           git diff --exit-code -- supabase/ worker/src/generated/
+
+  native-smoke:
+    name: Native Agent on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Native Go tests and executable startup
+        shell: bash
+        working-directory: agent
+        run: |
+          set -euo pipefail
+          go test ./...
+          output="${RUNNER_TEMP}/cf-monitor-smoke"
+          if [ "$RUNNER_OS" = Windows ]; then output="${output}.exe"; fi
+          go build -trimpath -o "$output" .
+          "$output" -h
+      - name: Native Windows install, upgrade and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci-windows-installer.ps1
+
+  freebsd-smoke:
+    name: Native Agent on FreeBSD
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Native FreeBSD tests and executable startup
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1
+        with:
+          release: '14.5'
+          prepare: pkg install -y go
+          run: |
+            set -eu
+            cd agent
+            go test ./...
+            smoke_dir="$(mktemp -d /tmp/cf-monitor-smoke.XXXXXX)"
+            trap 'rm -f "$smoke_dir/agent"; rmdir "$smoke_dir"' EXIT
+            go build -trimpath -o "$smoke_dir/agent" .
+            "$smoke_dir/agent" -h

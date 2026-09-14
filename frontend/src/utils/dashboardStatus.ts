@@ -1,4 +1,4 @@
-import { formatBytes, formatSpeed } from './format';
+import { formatMetricBytes, formatMetricSpeed } from './nodeMetrics';
 
 export const defaultStatusCardVisibility = {
   currentOnline: true,
@@ -13,10 +13,10 @@ export interface DashboardStatusInput {
   onlineCount: number;
   totalCount: number;
   regionCount: number;
-  totalUp: number;
-  totalDown: number;
-  totalSpeedUp: number;
-  totalSpeedDown: number;
+  totalUp: number | null;
+  totalDown: number | null;
+  totalSpeedUp: number | null;
+  totalSpeedDown: number | null;
 }
 
 export interface DashboardStatusCard {
@@ -29,8 +29,8 @@ export interface DashboardStatusCard {
 }
 
 export function buildDashboardStatusCards(input: DashboardStatusInput): DashboardStatusCard[] {
-  const trafficValues = [`↑ ${formatBytes(input.totalUp)}`, `↓ ${formatBytes(input.totalDown)}`];
-  const speedValues = [`↑ ${formatSpeed(input.totalSpeedUp)}`, `↓ ${formatSpeed(input.totalSpeedDown)}`];
+  const trafficValues = [`↑ ${formatMetricBytes(input.totalUp)}`, `↓ ${formatMetricBytes(input.totalDown)}`];
+  const speedValues = [`↑ ${formatMetricSpeed(input.totalSpeedUp)}`, `↓ ${formatMetricSpeed(input.totalSpeedDown)}`];
 
   return [
     {
